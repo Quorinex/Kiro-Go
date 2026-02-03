@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kiro API Proxy</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; color: #1e293b; min-height: 100vh; }
+        .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+        .login-wrapper { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #f0f4ff 0%, #faf5ff 100%); }
+        .login-box { background: #fff; padding: 40px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 100%; max-width: 380px; }
+        .login-box h1 { text-align: center; color: #7c3aed; margin-bottom: 8px; }
+        .login-box p { text-align: center; color: #64748b; margin-bottom: 24px; font-size: 14px; }
+        .form-group { margin-bottom: 16px; }
+        label { display: block; margin-bottom: 6px; color: #374151; font-size: 14px; font-weight: 500; }
+        input[type="text"], input[type="password"], select, textarea { width: 100%; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; background: #fff; color: #1e293b; }
+        input:focus, textarea:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124,58,237,0.1); }
+        textarea { resize: vertical; min-height: 80px; font-family: monospace; }
+        .btn { padding: 10px 18px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+        .btn-primary { background: #7c3aed; color: white; }
+        .btn-primary:hover { background: #6d28d9; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-secondary { background: #f1f5f9; color: #374151; }
+        .btn-sm { padding: 6px 12px; font-size: 13px; }
+        .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e2e8f0; }
+        .card-title { font-size: 16px; font-weight: 600; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .stat-card { background: #fff; border-radius: 10px; padding: 16px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .stat-value { font-size: 24px; font-weight: 700; color: #7c3aed; }
+        .stat-label { font-size: 12px; color: #64748b; margin-top: 4px; }
+        .badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
+        .badge-success { background: #dcfce7; color: #16a34a; }
+        .badge-warning { background: #fef3c7; color: #d97706; }
+        .badge-error { background: #fee2e2; color: #dc2626; }
+        .badge-info { background: #ede9fe; color: #7c3aed; }
+        .badge-pro { background: #3b82f6; color: white; }
+        .badge-proplus { background: #8b5cf6; color: white; }
+        .badge-power { background: #f59e0b; color: white; }
+        .badge-free { background: #6b7280; color: white; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); z-index: 1000; }
+        .modal.active { display: flex; align-items: center; justify-content: center; }
+        .modal-content { background: #fff; border-radius: 12px; padding: 24px; max-width: 600px; width: 90%; max-height: 90vh; overflow-y: auto; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .modal-title { font-size: 18px; font-weight: 600; }
+        .modal-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #64748b; }
+        .modal-footer { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
+        .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #cbd5e1; border-radius: 24px; transition: 0.3s; }
+        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }
+        input:checked + .slider { background: #7c3aed; }
+        input:checked + .slider:before { transform: translateX(20px); }
+        .tabs { display: flex; gap: 4px; margin-bottom: 20px; background: #f1f5f9; padding: 4px; border-radius: 10px; }
+        .tab { padding: 10px 18px; border-radius: 8px; cursor: pointer; color: #64748b; font-weight: 500; font-size: 14px; }
+        .tab:hover { color: #374151; }
+        .tab.active { background: #fff; color: #7c3aed; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .hidden { display: none !important; }
+        .message { padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 14px; }
+        .message-error { background: #fee2e2; color: #dc2626; }
+        .endpoint { background: #f8fafc; padding: 12px 16px; border-radius: 8px; font-family: monospace; font-size: 13px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+        .header h1 { font-size: 20px; color: #7c3aed; }
+        .account-card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid #7c3aed; }
+        .account-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+        .account-email { font-weight: 600; font-size: 15px; color: #1e293b; }
+        .account-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+        .account-usage { margin: 12px 0; }
+        .usage-bar { height: 8px; background: #e2e8f0; border-radius: 4px; overflow: hidden; }
+        .usage-fill { height: 100%; background: #7c3aed; border-radius: 4px; transition: width 0.3s; }
+        .usage-fill.high { background: #f59e0b; }
+        .usage-fill.critical { background: #ef4444; }
+        .usage-text { display: flex; justify-content: space-between; font-size: 12px; color: #64748b; margin-top: 4px; }
+        .account-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e2e8f0; }
+        .account-stat { text-align: center; }
+        .account-stat-value { font-weight: 600; font-size: 14px; }
+        .account-stat-label { font-size: 11px; color: #64748b; }
+        .account-actions { display: flex; gap: 6px; }
+        .detail-section { margin-bottom: 20px; }
+        .detail-section h4 { font-size: 14px; color: #64748b; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .detail-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+        .detail-item { background: #f8fafc; padding: 12px; border-radius: 8px; }
+        .detail-label { font-size: 12px; color: #64748b; margin-bottom: 4px; }
+        .detail-value { font-size: 14px; font-weight: 500; }
+        .model-list { display: grid; gap: 8px; max-height: 300px; overflow-y: auto; }
+        .model-item { background: #f8fafc; padding: 10px 12px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .model-name { font-weight: 500; font-size: 13px; }
+        .model-info { font-size: 11px; color: #64748b; }
+        .btn-icon { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; }
+        .btn-icon svg { width: 16px; height: 16px; }
+        .icon { width: 16px; height: 16px; vertical-align: middle; }
+        .loading { opacity: 0.6; pointer-events: none; }
+        .logo { display: flex; align-items: center; gap: 8px; }
+        .logo svg { width: 24px; height: 24px; color: #7c3aed; }
+    </style>
+</head>
+<body>
+    <div id="loginPage" class="login-wrapper">
+        <div class="login-box">
+            <h1 class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Kiro API Proxy</h1>
+            <p>请输入管理密码登录</p>
+            <div class="form-group">
+                <label>管理密码</label>
+                <input type="password" id="pwdField" placeholder="输入密码" autocomplete="off">
+            </div>
+            <button type="button" class="btn btn-primary" style="width:100%" onclick="login()">登录</button>
+            <div id="loginError" class="message message-error hidden" style="margin-top:12px"></div>
+        </div>
+    </div>
+
+    <div id="mainPage" class="container hidden">
+        <div class="header">
+            <h1 class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Kiro API Proxy</h1>
+            <span class="badge badge-success" id="statusBadge">运行中</span>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-value" id="statAccounts">0</div><div class="stat-label">账号</div></div>
+            <div class="stat-card"><div class="stat-value" id="statRequests">0</div><div class="stat-label">请求</div></div>
+            <div class="stat-card"><div class="stat-value" id="statSuccess">0</div><div class="stat-label">成功</div></div>
+            <div class="stat-card"><div class="stat-value" id="statFailed">0</div><div class="stat-label">失败</div></div>
+            <div class="stat-card"><div class="stat-value" id="statTokens">0</div><div class="stat-label">Tokens</div></div>
+            <div class="stat-card"><div class="stat-value" id="statCredits">0</div><div class="stat-label">Credits</div></div>
+        </div>
+
+        <div class="tabs">
+            <div class="tab active" data-tab="accounts">账号管理</div>
+            <div class="tab" data-tab="settings">设置</div>
+            <div class="tab" data-tab="api">API 端点</div>
+        </div>
+
+        <div id="tabAccounts" class="tab-content">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">账号列表</span>
+                    <div>
+                        <button class="btn btn-secondary btn-sm" onclick="showModal('credentials')">导入凭证</button>
+                        <button class="btn btn-secondary btn-sm" onclick="showModal('sso')">SSO Token</button>
+                        <button class="btn btn-primary btn-sm" onclick="showModal('iam')">IAM SSO</button>
+                    </div>
+                </div>
+                <div id="accountsList"></div>
+            </div>
+        </div>
+
+        <div id="tabSettings" class="tab-content hidden">
+            <div class="card">
+                <div class="card-header"><span class="card-title">API 设置</span></div>
+                <div class="form-group">
+                    <label style="display:flex;align-items:center;gap:10px">
+                        <label class="switch"><input type="checkbox" id="requireApiKey"><span class="slider"></span></label>
+                        启用 API Key 验证
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>API Key</label>
+                    <input type="text" id="apiKeyInput" placeholder="留空则不验证">
+                </div>
+                <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+            </div>
+            <div class="card">
+                <div class="card-header"><span class="card-title">管理密码</span></div>
+                <div class="form-group">
+                    <label>新密码</label>
+                    <input type="password" id="newPassword" placeholder="输入新密码">
+                </div>
+                <button class="btn btn-primary" onclick="changePassword()">修改密码</button>
+            </div>
+            <div class="card">
+                <div class="card-header"><span class="card-title">统计</span></div>
+                <button class="btn btn-danger" onclick="resetStats()">重置统计</button>
+            </div>
+        </div>
+
+        <div id="tabApi" class="tab-content hidden">
+            <div class="card">
+                <div class="card-header"><span class="card-title">API 端点</span></div>
+                <p style="margin-bottom:12px;font-weight:500">Claude API</p>
+                <div class="endpoint"><span id="claudeEndpoint"></span><button class="btn btn-sm btn-secondary" onclick="copy('claudeEndpoint')">复制</button></div>
+                <p style="margin:16px 0 12px;font-weight:500">OpenAI API</p>
+                <div class="endpoint"><span id="openaiEndpoint"></span><button class="btn btn-sm btn-secondary" onclick="copy('openaiEndpoint')">复制</button></div>
+                <p style="margin:16px 0 12px;font-weight:500">模型列表</p>
+                <div class="endpoint"><span id="modelsEndpoint"></span><button class="btn btn-sm btn-secondary" onclick="copy('modelsEndpoint')">复制</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="addModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title" id="modalTitle">添加账号</span>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div id="modalBody"></div>
+        </div>
+    </div>
+
+    <div id="detailModal" class="modal">
+        <div class="modal-content" style="max-width:700px">
+            <div class="modal-header">
+                <span class="modal-title">账号详情</span>
+                <button class="modal-close" onclick="closeDetailModal()">&times;</button>
+            </div>
+            <div id="detailBody"></div>
+        </div>
+    </div>
+
+    <script>
+        let password = localStorage.getItem('admin_password') || '';
+        const baseUrl = location.origin;
+        let accountsData = [];
+
+        document.addEventListener('DOMContentLoaded', function() {
+            if (password) tryAutoLogin();
+            document.getElementById('pwdField').addEventListener('keypress', e => { if (e.key === 'Enter') login(); });
+            document.querySelectorAll('.tab').forEach(tab => { tab.onclick = () => switchTab(tab.dataset.tab); });
+        });
+
+        async function tryAutoLogin() {
+            try {
+                const res = await fetch('/admin/api/status', { headers: { 'X-Admin-Password': password } });
+                if (res.ok) { showMain(); loadData(); }
+            } catch (e) {}
+        }
+
+        async function login() {
+            password = document.getElementById('pwdField').value;
+            try {
+                const res = await fetch('/admin/api/status', { headers: { 'X-Admin-Password': password } });
+                if (res.ok) {
+                    localStorage.setItem('admin_password', password);
+                    showMain(); loadData();
+                } else {
+                    document.getElementById('loginError').textContent = '密码错误';
+                    document.getElementById('loginError').classList.remove('hidden');
+                }
+            } catch (e) {
+                document.getElementById('loginError').textContent = '连接失败';
+                document.getElementById('loginError').classList.remove('hidden');
+            }
+        }
+
+        function showMain() {
+            document.getElementById('loginPage').classList.add('hidden');
+            document.getElementById('mainPage').classList.remove('hidden');
+        }
+
+        async function loadData() {
+            await Promise.all([loadStats(), loadAccounts(), loadSettings()]);
+            document.getElementById('claudeEndpoint').textContent = baseUrl + '/v1/messages';
+            document.getElementById('openaiEndpoint').textContent = baseUrl + '/v1/chat/completions';
+            document.getElementById('modelsEndpoint').textContent = baseUrl + '/v1/models';
+        }
+
+        async function loadStats() {
+            const res = await fetch('/admin/api/status', { headers: { 'X-Admin-Password': password } });
+            const d = await res.json();
+            document.getElementById('statAccounts').textContent = d.accounts || 0;
+            document.getElementById('statRequests').textContent = d.totalRequests || 0;
+            document.getElementById('statSuccess').textContent = d.successRequests || 0;
+            document.getElementById('statFailed').textContent = d.failedRequests || 0;
+            document.getElementById('statTokens').textContent = formatNum(d.totalTokens || 0);
+            document.getElementById('statCredits').textContent = (d.totalCredits || 0).toFixed(2);
+        }
+
+        async function loadAccounts() {
+            const res = await fetch('/admin/api/accounts', { headers: { 'X-Admin-Password': password } });
+            accountsData = await res.json();
+            renderAccounts();
+        }
+
+        function renderAccounts() {
+            const container = document.getElementById('accountsList');
+            if (accountsData.length === 0) {
+                container.innerHTML = '<p style="text-align:center;color:#64748b;padding:40px">暂无账号，请添加</p>';
+                return;
+            }
+            container.innerHTML = accountsData.map(a => {
+                const usagePercent = (a.usagePercent || 0) * 100;
+                const usageClass = usagePercent > 90 ? 'critical' : usagePercent > 70 ? 'high' : '';
+                return `<div class="account-card">
+                    <div class="account-header">
+                        <div>
+                            <div class="account-email">${a.email || a.id.substring(0,12)+'...'}</div>
+                            <div class="account-meta">
+                                ${getSubBadge(a.subscriptionType)}
+                                <span class="badge badge-info">${a.authMethod || '-'}</span>
+                                ${getStatusBadge(a)}
+                            </div>
+                        </div>
+                        <div class="account-actions">
+                            <button class="btn btn-sm btn-icon btn-secondary" onclick="refreshAccount('${a.id}')" title="刷新信息"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></button>
+                            <button class="btn btn-sm btn-icon btn-secondary" onclick="showDetail('${a.id}')" title="详情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg></button>
+                            <button class="btn btn-sm ${a.enabled ? 'btn-secondary' : 'btn-primary'}" onclick="toggleAccount('${a.id}',${!a.enabled})">${a.enabled ? '禁用' : '启用'}</button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteAccount('${a.id}')">删除</button>
+                        </div>
+                    </div>
+                    ${a.usageLimit > 0 ? `<div class="account-usage">
+                        <div class="usage-bar"><div class="usage-fill ${usageClass}" style="width:${usagePercent}%"></div></div>
+                        <div class="usage-text">
+                            <span>${a.usageCurrent?.toFixed(1) || 0} / ${a.usageLimit?.toFixed(0) || 0}</span>
+                            <span>${usagePercent.toFixed(1)}%${a.nextResetDate ? ' · 重置: '+a.nextResetDate : ''}</span>
+                        </div>
+                    </div>` : ''}
+                    <div class="account-stats">
+                        <div class="account-stat"><div class="account-stat-value">${a.requestCount || 0}</div><div class="account-stat-label">请求</div></div>
+                        <div class="account-stat"><div class="account-stat-value">${formatNum(a.totalTokens || 0)}</div><div class="account-stat-label">Tokens</div></div>
+                        <div class="account-stat"><div class="account-stat-value">${(a.totalCredits || 0).toFixed(2)}</div><div class="account-stat-label">Credits</div></div>
+                        <div class="account-stat"><div class="account-stat-value">${formatTokenExpiry(a.expiresAt)}</div><div class="account-stat-label">Token到期</div></div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function getSubBadge(type) {
+            const t = (type || '').toUpperCase();
+            if (t.includes('POWER')) return '<span class="badge badge-power">POWER</span>';
+            if (t.includes('PRO_PLUS') || t.includes('PROPLUS')) return '<span class="badge badge-proplus">PRO+</span>';
+            if (t.includes('PRO')) return '<span class="badge badge-pro">PRO</span>';
+            return '<span class="badge badge-free">FREE</span>';
+        }
+
+        function getStatusBadge(a) {
+            if (!a.hasToken) return '<span class="badge badge-error">无Token</span>';
+            if (a.expiresAt && a.expiresAt < Date.now()/1000) return '<span class="badge badge-warning">已过期</span>';
+            if (!a.enabled) return '<span class="badge badge-warning">已禁用</span>';
+            return '<span class="badge badge-success">正常</span>';
+        }
+
+        function formatTokenExpiry(ts) {
+            if (!ts) return '-';
+            const diff = ts - Date.now()/1000;
+            if (diff <= 0) return '已过期';
+            if (diff < 3600) return Math.floor(diff/60) + '分钟';
+            if (diff < 86400) return Math.floor(diff/3600) + '时';
+            return Math.floor(diff/86400) + '天';
+        }
+
+        async function refreshAccount(id) {
+            const card = event.target.closest('.account-card');
+            if (card) card.classList.add('loading');
+            try {
+                const res = await fetch('/admin/api/accounts/' + id + '/refresh', { method: 'POST', headers: { 'X-Admin-Password': password } });
+                const d = await res.json();
+                if (d.success) { loadAccounts(); } else { alert('刷新失败: ' + d.error); }
+            } catch (e) { alert('刷新失败'); }
+            if (card) card.classList.remove('loading');
+        }
+
+        async function showDetail(id) {
+            const a = accountsData.find(x => x.id === id);
+            if (!a) return;
+            const body = document.getElementById('detailBody');
+            body.innerHTML = `
+                <div class="detail-section">
+                    <h4>基本信息</h4>
+                    <div class="detail-grid">
+                        <div class="detail-item"><div class="detail-label">邮箱</div><div class="detail-value">${a.email || '-'}</div></div>
+                        <div class="detail-item"><div class="detail-label">用户ID</div><div class="detail-value" style="font-size:12px;word-break:break-all">${a.userId || '-'}</div></div>
+                        <div class="detail-item"><div class="detail-label">认证方式</div><div class="detail-value">${a.authMethod || '-'}</div></div>
+                        <div class="detail-item"><div class="detail-label">Region</div><div class="detail-value">${a.region || 'us-east-1'}</div></div>
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <h4>机器码</h4>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input type="text" id="machineIdInput" value="${a.machineId || ''}" style="flex:1;font-family:monospace;font-size:12px" placeholder="UUID 格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                        <button class="btn btn-sm btn-secondary" onclick="generateMachineId()">生成</button>
+                        <button class="btn btn-sm btn-primary" onclick="saveMachineId('${id}')">保存</button>
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <h4>订阅信息</h4>
+                    <div class="detail-grid">
+                        <div class="detail-item"><div class="detail-label">订阅类型</div><div class="detail-value">${a.subscriptionTitle || a.subscriptionType || '-'}</div></div>
+                        <div class="detail-item"><div class="detail-label">剩余天数</div><div class="detail-value">${a.daysRemaining || '-'}</div></div>
+                        <div class="detail-item"><div class="detail-label">Token到期</div><div class="detail-value">${a.expiresAt ? new Date(a.expiresAt*1000).toLocaleString() : '-'}</div></div>
+                        <div class="detail-item"><div class="detail-label">上次刷新</div><div class="detail-value">${a.lastRefresh ? new Date(a.lastRefresh*1000).toLocaleString() : '-'}</div></div>
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <h4>使用量</h4>
+                    <div class="detail-grid">
+                        <div class="detail-item"><div class="detail-label">当前用量</div><div class="detail-value">${a.usageCurrent?.toFixed(2) || 0}</div></div>
+                        <div class="detail-item"><div class="detail-label">用量上限</div><div class="detail-value">${a.usageLimit?.toFixed(0) || 0}</div></div>
+                        <div class="detail-item"><div class="detail-label">使用比例</div><div class="detail-value">${((a.usagePercent||0)*100).toFixed(1)}%</div></div>
+                        <div class="detail-item"><div class="detail-label">重置日期</div><div class="detail-value">${a.nextResetDate || '-'}</div></div>
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <h4>统计</h4>
+                    <div class="detail-grid">
+                        <div class="detail-item"><div class="detail-label">请求数</div><div class="detail-value">${a.requestCount || 0}</div></div>
+                        <div class="detail-item"><div class="detail-label">错误数</div><div class="detail-value">${a.errorCount || 0}</div></div>
+                        <div class="detail-item"><div class="detail-label">总Tokens</div><div class="detail-value">${formatNum(a.totalTokens || 0)}</div></div>
+                        <div class="detail-item"><div class="detail-label">总Credits</div><div class="detail-value">${(a.totalCredits || 0).toFixed(2)}</div></div>
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <h4>可用模型 <button class="btn btn-sm btn-secondary" onclick="loadModels('${id}')" style="margin-left:10px">加载</button></h4>
+                    <div id="modelsList" class="model-list"><p style="color:#64748b;font-size:13px">点击加载按钮获取模型列表</p></div>
+                </div>
+            `;
+            document.getElementById('detailModal').classList.add('active');
+        }
+
+        async function loadModels(id) {
+            const container = document.getElementById('modelsList');
+            container.innerHTML = '<p style="color:#64748b">加载中...</p>';
+            try {
+                const res = await fetch('/admin/api/accounts/' + id + '/models', { headers: { 'X-Admin-Password': password } });
+                const d = await res.json();
+                if (d.success && d.models) {
+                    container.innerHTML = d.models.map(m => `<div class="model-item">
+                        <div><div class="model-name">${m.modelId}</div><div class="model-info">${m.description || ''}</div></div>
+                        <div class="model-info">${m.tokenLimits ? (m.tokenLimits.maxInputTokens/1000)+'K / '+(m.tokenLimits.maxOutputTokens/1000)+'K' : ''}</div>
+                    </div>`).join('') || '<p style="color:#64748b">无可用模型</p>';
+                } else {
+                    container.innerHTML = '<p style="color:#ef4444">加载失败: ' + (d.error || '未知错误') + '</p>';
+                }
+            } catch (e) { container.innerHTML = '<p style="color:#ef4444">加载失败</p>'; }
+        }
+
+        function closeDetailModal() { document.getElementById('detailModal').classList.remove('active'); }
+
+        async function generateMachineId() {
+            try {
+                const res = await fetch('/admin/api/generate-machine-id', { headers: { 'X-Admin-Password': password } });
+                const d = await res.json();
+                if (d.machineId) {
+                    document.getElementById('machineIdInput').value = d.machineId;
+                }
+            } catch (e) { alert('生成失败'); }
+        }
+
+        async function saveMachineId(id) {
+            const machineId = document.getElementById('machineIdInput').value.trim();
+            // UUID 格式或 32位十六进制
+            if (machineId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId) && !/^[0-9a-f]{32}$/i.test(machineId)) {
+                alert('机器码格式错误，需要 UUID 格式 (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) 或 32位十六进制');
+                return;
+            }
+            try {
+                const res = await fetch('/admin/api/accounts/' + id, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ machineId })
+                });
+                const d = await res.json();
+                if (d.success) {
+                    alert('已保存');
+                    loadAccounts();
+                } else {
+                    alert('保存失败: ' + d.error);
+                }
+            } catch (e) { alert('保存失败'); }
+        }
+
+        async function loadSettings() {
+            const res = await fetch('/admin/api/settings', { headers: { 'X-Admin-Password': password } });
+            const d = await res.json();
+            document.getElementById('requireApiKey').checked = d.requireApiKey;
+            document.getElementById('apiKeyInput').value = d.apiKey || '';
+        }
+
+        async function saveSettings() {
+            await fetch('/admin/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ requireApiKey: document.getElementById('requireApiKey').checked, apiKey: document.getElementById('apiKeyInput').value })
+            });
+            alert('已保存');
+        }
+
+        async function changePassword() {
+            const newPwd = document.getElementById('newPassword').value;
+            if (!newPwd) return alert('请输入新密码');
+            await fetch('/admin/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ password: newPwd })
+            });
+            password = newPwd;
+            localStorage.setItem('admin_password', password);
+            alert('密码已修改');
+            document.getElementById('newPassword').value = '';
+        }
+
+        async function resetStats() {
+            if (!confirm('确定重置统计？')) return;
+            await fetch('/admin/api/stats/reset', { method: 'POST', headers: { 'X-Admin-Password': password } });
+            loadStats();
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+            document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
+        }
+
+        async function toggleAccount(id, enabled) {
+            await fetch('/admin/api/accounts/' + id, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ enabled })
+            });
+            loadAccounts();
+        }
+
+        async function deleteAccount(id) {
+            if (!confirm('确定删除？')) return;
+            await fetch('/admin/api/accounts/' + id, { method: 'DELETE', headers: { 'X-Admin-Password': password } });
+            loadAccounts(); loadStats();
+        }
+
+        function formatNum(n) {
+            if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n/1000).toFixed(1) + 'K';
+            return n.toString();
+        }
+
+        function copy(id) {
+            navigator.clipboard.writeText(document.getElementById(id).textContent);
+            alert('已复制');
+        }
+
+        function showModal(type) {
+            const modal = document.getElementById('addModal');
+            const title = document.getElementById('modalTitle');
+            const body = document.getElementById('modalBody');
+            
+            if (type === 'credentials') {
+                title.textContent = '导入凭证';
+                body.innerHTML = `
+                    <div class="form-group"><label>凭证 JSON</label><textarea id="credJson" placeholder='{"accessToken":"...","refreshToken":"...","clientId":"...","clientSecret":"..."}'></textarea></div>
+                    <div class="form-group"><label>认证方式</label><select id="credAuth"><option value="social">Social</option><option value="idc">IAM IdC</option></select></div>
+                    <div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="importCredentials()">导入</button></div>`;
+            } else if (type === 'sso') {
+                title.textContent = 'SSO Token';
+                body.innerHTML = `
+                    <div class="form-group"><label>Bearer Token</label><textarea id="ssoToken" placeholder="从浏览器获取的 Bearer Token"></textarea></div>
+                    <div class="form-group"><label>Region</label><input type="text" id="ssoRegion" value="us-east-1"></div>
+                    <div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="importSsoToken()">导入</button></div>`;
+            } else if (type === 'iam') {
+                title.textContent = 'IAM SSO 登录';
+                body.innerHTML = `
+                    <div class="form-group"><label>Start URL</label><input type="text" id="iamStartUrl" placeholder="https://xxx.awsapps.com/start"></div>
+                    <div class="form-group"><label>Region</label><input type="text" id="iamRegion" value="us-east-1"></div>
+                    <div id="iamStep2" class="hidden">
+                        <p style="color:#16a34a;margin:12px 0">请在浏览器中完成登录，然后粘贴回调 URL</p>
+                        <div class="form-group"><label>回调 URL</label><input type="text" id="iamCallback" placeholder="http://127.0.0.1:xxx/?code=..."></div>
+                    </div>
+                    <div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">取消</button><button class="btn btn-primary" id="iamBtn" onclick="startIamSso()">开始登录</button></div>`;
+            }
+            modal.classList.add('active');
+        }
+
+        function closeModal() { document.getElementById('addModal').classList.remove('active'); }
+
+        async function importCredentials() {
+            try {
+                const json = JSON.parse(document.getElementById('credJson').value);
+                json.authMethod = document.getElementById('credAuth').value;
+                const res = await fetch('/admin/api/auth/credentials', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify(json)
+                });
+                const d = await res.json();
+                if (d.success) { closeModal(); loadAccounts(); loadStats(); alert('导入成功: ' + (d.account?.email || d.account?.id)); }
+                else alert('失败: ' + d.error);
+            } catch (e) { alert('JSON 格式错误'); }
+        }
+
+        async function importSsoToken() {
+            const res = await fetch('/admin/api/auth/sso-token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ bearerToken: document.getElementById('ssoToken').value, region: document.getElementById('ssoRegion').value })
+            });
+            const d = await res.json();
+            if (d.success) { closeModal(); loadAccounts(); loadStats(); alert('导入成功: ' + (d.account?.email || d.account?.id)); }
+            else alert('失败: ' + d.error);
+        }
+
+        let iamSession = '';
+        async function startIamSso() {
+            if (iamSession) {
+                const res = await fetch('/admin/api/auth/iam-sso/complete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ sessionId: iamSession, callbackUrl: document.getElementById('iamCallback').value })
+                });
+                const d = await res.json();
+                if (d.success) { closeModal(); loadAccounts(); loadStats(); alert('登录成功: ' + (d.account?.email || d.account?.id)); iamSession = ''; }
+                else alert('失败: ' + d.error);
+            } else {
+                const res = await fetch('/admin/api/auth/iam-sso/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ startUrl: document.getElementById('iamStartUrl').value, region: document.getElementById('iamRegion').value })
+                });
+                const d = await res.json();
+                if (d.authorizeUrl) {
+                    iamSession = d.sessionId;
+                    window.open(d.authorizeUrl, '_blank');
+                    document.getElementById('iamStep2').classList.remove('hidden');
+                    document.getElementById('iamBtn').textContent = '完成登录';
+                } else alert('失败: ' + d.error);
+            }
+        }
+
+        setInterval(() => { if (!document.getElementById('mainPage').classList.contains('hidden')) loadStats(); }, 10000);
+    </script>
+</body>
+</html>

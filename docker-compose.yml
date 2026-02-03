@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  kiro-api-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - CONFIG_PATH=/app/data/config.json
+    restart: unless-stopped
