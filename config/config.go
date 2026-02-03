@@ -106,7 +106,6 @@ func Init(path string) error {
 	return Load()
 }
 
-// Load 从文件加载配置
 func Load() error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -114,11 +113,11 @@ func Load() error {
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 创建默认配置
+			// 创建默认配置，Docker 环境默认监听 0.0.0.0
 			cfg = &Config{
 				Password:      "changeme",
 				Port:          8080,
-				Host:          "127.0.0.1",
+				Host:          "0.0.0.0",
 				RequireApiKey: false,
 				Accounts:      []Account{},
 			}
