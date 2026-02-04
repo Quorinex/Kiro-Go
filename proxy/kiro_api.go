@@ -223,19 +223,19 @@ type UsageBreakdown struct {
 }
 
 type FreeTrialInfo struct {
-	CurrentUsage    float64 `json:"currentUsage"`
-	UsageLimit      float64 `json:"usageLimit"`
-	FreeTrialStatus string  `json:"freeTrialStatus"`
-	FreeTrialExpiry int64   `json:"freeTrialExpiry"`
+	CurrentUsage    float64     `json:"currentUsage"`
+	UsageLimit      float64     `json:"usageLimit"`
+	FreeTrialStatus string      `json:"freeTrialStatus"`
+	FreeTrialExpiry json.Number `json:"freeTrialExpiry"`
 }
 
 type BonusInfo struct {
-	BonusCode   string  `json:"bonusCode"`
-	DisplayName string  `json:"displayName"`
-	CurrentUsage float64 `json:"currentUsage"`
-	UsageLimit   float64 `json:"usageLimit"`
-	ExpiresAt    int64   `json:"expiresAt"`
-	Status       string  `json:"status"`
+	BonusCode    string      `json:"bonusCode"`
+	DisplayName  string      `json:"displayName"`
+	CurrentUsage float64     `json:"currentUsage"`
+	UsageLimit   float64     `json:"usageLimit"`
+	ExpiresAt    json.Number `json:"expiresAt"`
+	Status       string      `json:"status"`
 }
 
 type SubscriptionInfo struct {
