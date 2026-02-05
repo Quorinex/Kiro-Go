@@ -65,6 +65,13 @@ type Account struct {
 	NextResetDate string  `json:"nextResetDate,omitempty"` // Date when usage resets (YYYY-MM-DD)
 	LastRefresh   int64   `json:"lastRefresh,omitempty"`   // Last info refresh timestamp
 
+	// Trial usage tracking
+	TrialUsageCurrent float64 `json:"trialUsageCurrent,omitempty"` // Trial quota current usage
+	TrialUsageLimit   float64 `json:"trialUsageLimit,omitempty"`   // Trial quota total limit
+	TrialUsagePercent float64 `json:"trialUsagePercent,omitempty"` // Trial quota usage percentage (0.0-1.0)
+	TrialStatus       string  `json:"trialStatus,omitempty"`       // Trial status: ACTIVE, EXPIRED, NONE
+	TrialExpiresAt    int64   `json:"trialExpiresAt,omitempty"`    // Trial expiration timestamp (Unix seconds)
+
 	// Runtime statistics (updated during operation)
 	RequestCount int     `json:"requestCount,omitempty"` // Total requests processed
 	ErrorCount   int     `json:"errorCount,omitempty"`   // Total errors encountered
@@ -109,6 +116,11 @@ type AccountInfo struct {
 	UsagePercent      float64
 	NextResetDate     string
 	LastRefresh       int64
+	TrialUsageCurrent float64
+	TrialUsageLimit   float64
+	TrialUsagePercent float64
+	TrialStatus       string
+	TrialExpiresAt    int64
 }
 
 var (
@@ -345,6 +357,11 @@ func UpdateAccountInfo(id string, info AccountInfo) error {
 			cfg.Accounts[i].UsagePercent = info.UsagePercent
 			cfg.Accounts[i].NextResetDate = info.NextResetDate
 			cfg.Accounts[i].LastRefresh = info.LastRefresh
+			cfg.Accounts[i].TrialUsageCurrent = info.TrialUsageCurrent
+			cfg.Accounts[i].TrialUsageLimit = info.TrialUsageLimit
+			cfg.Accounts[i].TrialUsagePercent = info.TrialUsagePercent
+			cfg.Accounts[i].TrialStatus = info.TrialStatus
+			cfg.Accounts[i].TrialExpiresAt = info.TrialExpiresAt
 			return Save()
 		}
 	}

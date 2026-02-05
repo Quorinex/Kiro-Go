@@ -74,6 +74,9 @@
         .usage-fill.high { background: #f59e0b; }
         .usage-fill.critical { background: #ef4444; }
         .usage-text { display: flex; justify-content: space-between; font-size: 11px; color: #64748b; margin-top: 4px; }
+        .usage-label { font-size: 12px; color: #64748b; margin-bottom: 4px; font-weight: 500; }
+        .account-usage + .account-usage { margin-top: 8px; }
+        .badge-trial { background: #10b981; color: white; }
         .account-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0; }
         .account-stat { text-align: center; }
         .account-stat-value { font-weight: 600; font-size: 13px; }
@@ -336,12 +339,15 @@
             container.innerHTML = accountsData.map(a => {
                 const usagePercent = (a.usagePercent || 0) * 100;
                 const usageClass = usagePercent > 90 ? 'critical' : usagePercent > 70 ? 'high' : '';
+                const trialUsagePercent = (a.trialUsagePercent || 0) * 100;
+                const trialUsageClass = trialUsagePercent > 90 ? 'critical' : trialUsagePercent > 70 ? 'high' : '';
                 return `<div class="account-card">
                     <div class="account-header">
                         <div class="account-info">
                             <div class="account-email">${a.email || a.id.substring(0,12)+'...'}</div>
                             <div class="account-meta">
                                 ${getSubBadge(a.subscriptionType)}
+                                ${getTrialBadge(a)}
                                 <span class="badge badge-info">${formatAuthMethod(a.provider || a.authMethod)}</span>
                                 ${getStatusBadge(a)}
                             </div>
@@ -354,10 +360,19 @@
                         </div>
                     </div>
                     ${a.usageLimit > 0 ? `<div class="account-usage">
+                        <div class="usage-label">主配额</div>
                         <div class="usage-bar"><div class="usage-fill ${usageClass}" style="width:${usagePercent}%"></div></div>
                         <div class="usage-text">
                             <span>${a.usageCurrent?.toFixed(1) || 0} / ${a.usageLimit?.toFixed(0) || 0}</span>
                             <span>${usagePercent.toFixed(1)}%</span>
+                        </div>
+                    </div>` : ''}
+                    ${a.trialUsageLimit > 0 ? `<div class="account-usage">
+                        <div class="usage-label">试用配额 ${formatTrialExpiry(a.trialExpiresAt)}</div>
+                        <div class="usage-bar"><div class="usage-fill ${trialUsageClass}" style="width:${trialUsagePercent}%"></div></div>
+                        <div class="usage-text">
+                            <span>${a.trialUsageCurrent?.toFixed(1) || 0} / ${a.trialUsageLimit?.toFixed(0) || 0}</span>
+                            <span>${trialUsagePercent.toFixed(1)}%</span>
                         </div>
                     </div>` : ''}
                     <div class="account-stats">
@@ -376,6 +391,24 @@
             if (t.includes('PRO_PLUS') || t.includes('PROPLUS')) return '<span class="badge badge-proplus">PRO+</span>';
             if (t.includes('PRO')) return '<span class="badge badge-pro">PRO</span>';
             return '<span class="badge badge-free">FREE</span>';
+        }
+
+        function getTrialBadge(account) {
+            if (account.trialStatus === 'ACTIVE' && account.trialUsageLimit > 0) {
+                return '<span class="badge badge-trial">试用中</span>';
+            }
+            return '';
+        }
+
+        function formatTrialExpiry(timestamp) {
+            if (!timestamp) return '';
+            const date = new Date(timestamp * 1000);
+            const now = new Date();
+            const diffDays = Math.ceil((date - now) / (1000 * 60 * 60 * 24));
+            if (diffDays < 0) return '(已过期)';
+            if (diffDays === 0) return '(今天到期)';
+            if (diffDays <= 7) return `(${diffDays}天后到期)`;
+            return '';
         }
 
         function formatAuthMethod(method) {
@@ -438,8 +471,13 @@
                     <div class="detail-grid">
                         <div class="detail-item"><div class="detail-label">订阅类型</div><div class="detail-value">${a.subscriptionTitle || a.subscriptionType || '-'}</div></div>
                         <div class="detail-item"><div class="detail-label">Token到期</div><div class="detail-value">${a.expiresAt ? new Date(a.expiresAt*1000).toLocaleString() : '-'}</div></div>
-                        <div class="detail-item"><div class="detail-label">用量</div><div class="detail-value">${a.usageCurrent?.toFixed(1) || 0} / ${a.usageLimit?.toFixed(0) || 0}</div></div>
+                        <div class="detail-item"><div class="detail-label">主配额</div><div class="detail-value">${a.usageCurrent?.toFixed(1) || 0} / ${a.usageLimit?.toFixed(0) || 0}</div></div>
                         <div class="detail-item"><div class="detail-label">重置日期</div><div class="detail-value">${a.nextResetDate || '-'}</div></div>
+                        ${a.trialUsageLimit > 0 ? `
+                        <div class="detail-item"><div class="detail-label">试用配额</div><div class="detail-value">${a.trialUsageCurrent?.toFixed(1) || 0} / ${a.trialUsageLimit?.toFixed(0) || 0}</div></div>
+                        <div class="detail-item"><div class="detail-label">试用状态</div><div class="detail-value">${a.trialStatus || '-'}</div></div>
+                        <div class="detail-item"><div class="detail-label">试用到期</div><div class="detail-value">${a.trialExpiresAt ? new Date(a.trialExpiresAt*1000).toLocaleString() : '-'}</div></div>
+                        ` : ''}
                     </div>
                 </div>
                 <div class="detail-section">

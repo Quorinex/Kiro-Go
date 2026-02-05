@@ -186,6 +186,28 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 		}
 	}
 
+	// 解析试用配额信息
+	if len(usage.UsageBreakdownList) > 0 {
+		breakdown := usage.UsageBreakdownList[0]
+		if breakdown.FreeTrialInfo != nil {
+			info.TrialUsageCurrent = breakdown.FreeTrialInfo.CurrentUsage
+			info.TrialUsageLimit = breakdown.FreeTrialInfo.UsageLimit
+			if info.TrialUsageLimit > 0 {
+				info.TrialUsagePercent = info.TrialUsageCurrent / info.TrialUsageLimit
+			}
+			info.TrialStatus = breakdown.FreeTrialInfo.FreeTrialStatus
+
+			// 解析试用到期时间
+			if breakdown.FreeTrialInfo.FreeTrialExpiry != "" {
+				if ts, err := breakdown.FreeTrialInfo.FreeTrialExpiry.Int64(); err == nil && ts > 0 {
+					info.TrialExpiresAt = ts
+				} else if f, err := breakdown.FreeTrialInfo.FreeTrialExpiry.Float64(); err == nil && f > 0 {
+					info.TrialExpiresAt = int64(f)
+				}
+			}
+		}
+	}
+
 	return info, nil
 }
 
