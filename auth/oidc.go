@@ -37,8 +37,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (stri
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -75,8 +74,7 @@ func refreshSocialToken(refreshToken string) (string, string, int64, error) {
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", "", 0, err
 	}

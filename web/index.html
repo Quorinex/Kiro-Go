@@ -1,289 +1,1322 @@
 <!DOCTYPE html>
 <html lang="zh">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Kiro API Proxy</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; color: #1e293b; min-height: 100vh; -webkit-tap-highlight-color: transparent; }
-        .container { max-width: 1100px; margin: 0 auto; padding: 16px; }
-        .login-wrapper { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #f0f4ff 0%, #faf5ff 100%); padding: 16px; }
-        .login-box { background: #fff; padding: 32px 24px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 100%; max-width: 380px; }
-        .login-box h1 { text-align: center; color: #7c3aed; margin-bottom: 8px; font-size: 22px; justify-content: center; }
-        .login-box p { text-align: center; color: #64748b; margin-bottom: 24px; font-size: 14px; }
-        .form-group { margin-bottom: 16px; }
-        label { display: block; margin-bottom: 6px; color: #374151; font-size: 14px; font-weight: 500; }
-        input[type="text"], input[type="password"], select, textarea { width: 100%; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 16px; background: #fff; color: #1e293b; -webkit-appearance: none; }
-        input:focus, textarea:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124,58,237,0.1); }
-        textarea { resize: vertical; min-height: 100px; font-family: monospace; font-size: 14px; }
-        .btn { padding: 12px 18px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; touch-action: manipulation; }
-        .btn-primary { background: #7c3aed; color: white; }
-        .btn-primary:hover, .btn-primary:active { background: #6d28d9; }
-        .btn-danger { background: #ef4444; color: white; }
-        .btn-secondary { background: #f1f5f9; color: #374151; }
-        .btn-sm { padding: 8px 12px; font-size: 13px; }
-        .card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e2e8f0; flex-wrap: wrap; gap: 12px; }
-        .card-title { font-size: 16px; font-weight: 600; }
-        .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
-        .stat-card { background: #fff; border-radius: 10px; padding: 12px 8px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .stat-value { font-size: 20px; font-weight: 700; color: #7c3aed; }
-        .stat-label { font-size: 11px; color: #64748b; margin-top: 2px; }
-        .badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; white-space: nowrap; }
-        .badge-success { background: #dcfce7; color: #16a34a; }
-        .badge-warning { background: #fef3c7; color: #d97706; }
-        .badge-error { background: #fee2e2; color: #dc2626; }
-        .badge-info { background: #ede9fe; color: #7c3aed; }
-        .badge-pro { background: #3b82f6; color: white; }
-        .badge-proplus { background: #8b5cf6; color: white; }
-        .badge-power { background: #f59e0b; color: white; }
-        .badge-free { background: #6b7280; color: white; }
-        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; padding: 16px; overflow-y: auto; }
-        .modal.active { display: flex; align-items: flex-start; justify-content: center; padding-top: 5vh; }
-        .modal-content { background: #fff; border-radius: 12px; padding: 20px; width: 100%; max-width: 600px; margin-bottom: 20px; }
-        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .modal-title { font-size: 18px; font-weight: 600; }
-        .modal-close { background: none; border: none; font-size: 28px; cursor: pointer; color: #64748b; padding: 0 8px; }
-        .modal-footer { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
-        .switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #cbd5e1; border-radius: 24px; transition: 0.3s; }
-        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }
-        input:checked + .slider { background: #7c3aed; }
-        input:checked + .slider:before { transform: translateX(20px); }
-        .tabs { display: flex; gap: 4px; margin-bottom: 16px; background: #f1f5f9; padding: 4px; border-radius: 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-        .tab { padding: 10px 16px; border-radius: 8px; cursor: pointer; color: #64748b; font-weight: 500; font-size: 14px; white-space: nowrap; flex-shrink: 0; }
-        .tab:hover { color: #374151; }
-        .tab.active { background: #fff; color: #7c3aed; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .hidden { display: none !important; }
-        .message { padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 14px; }
-        .message-error { background: #fee2e2; color: #dc2626; }
-        .endpoint { background: #f8fafc; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; gap: 10px; word-break: break-all; }
-        .endpoint span { flex: 1; }
-        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; gap: 12px; }
-        .header h1 { font-size: 18px; color: #7c3aed; }
-        .account-card { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid #7c3aed; }
-        .account-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; gap: 10px; }
-        .account-info { flex: 1; min-width: 0; }
-        .account-email { font-weight: 600; font-size: 14px; color: #1e293b; word-break: break-all; }
-        .account-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
-        .account-usage { margin: 10px 0; }
-        .usage-bar { height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; }
-        .usage-fill { height: 100%; background: #7c3aed; border-radius: 3px; transition: width 0.3s; }
-        .usage-fill.high { background: #f59e0b; }
-        .usage-fill.critical { background: #ef4444; }
-        .usage-text { display: flex; justify-content: space-between; font-size: 11px; color: #64748b; margin-top: 4px; }
-        .usage-label { font-size: 12px; color: #64748b; margin-bottom: 4px; font-weight: 500; }
-        .account-usage + .account-usage { margin-top: 8px; }
-        .badge-trial { background: #10b981; color: white; }
-        .account-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0; }
-        .account-stat { text-align: center; }
-        .account-stat-value { font-weight: 600; font-size: 13px; }
-        .account-stat-label { font-size: 10px; color: #64748b; }
-        .account-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
-        .detail-section { margin-bottom: 20px; }
-        .detail-section h4 { font-size: 13px; color: #64748b; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .detail-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
-        .detail-item { background: #f8fafc; padding: 10px 12px; border-radius: 8px; }
-        .detail-label { font-size: 11px; color: #64748b; margin-bottom: 2px; }
-        .detail-value { font-size: 13px; font-weight: 500; word-break: break-all; }
-        .model-list { display: grid; gap: 8px; max-height: 250px; overflow-y: auto; }
-        .model-item { background: #f8fafc; padding: 10px 12px; border-radius: 8px; }
-        .model-name { font-weight: 500; font-size: 13px; }
-        .model-info { font-size: 11px; color: #64748b; margin-top: 2px; }
-        .btn-icon { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; }
-        .btn-icon svg { width: 18px; height: 18px; }
-        .loading { opacity: 0.6; pointer-events: none; }
-        .logo { display: flex; align-items: center; gap: 8px; }
-        .logo svg { width: 24px; height: 24px; color: #7c3aed; }
-        .machine-id-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
-        .machine-id-row input { flex: 1; min-width: 200px; font-family: monospace; font-size: 11px; }
-        .machine-id-row .btn { flex-shrink: 0; }
-        
-        /* 移动端适配 */
-        @media (max-width: 640px) {
-            .container { padding: 12px; }
-            .stats-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }
-            .stat-card { padding: 10px 6px; }
-            .stat-value { font-size: 18px; }
-            .stat-label { font-size: 10px; }
-            .card { padding: 14px; }
-            .card-header { flex-direction: column; align-items: flex-start; }
-            .card-actions { width: 100%; }
-            .card-actions .btn { flex: 1; text-align: center; }
-            .account-header { flex-direction: column; }
-            .account-actions { width: 100%; justify-content: flex-start; }
-            .account-actions .btn { padding: 8px 10px; font-size: 12px; }
-            .account-stats { grid-template-columns: repeat(2, 1fr); }
-            .detail-grid { grid-template-columns: 1fr; }
-            .tabs { gap: 2px; }
-            .tab { padding: 10px 12px; font-size: 13px; }
-            .modal-content { padding: 16px; }
-            .endpoint { flex-direction: column; align-items: stretch; }
-            .endpoint .btn { width: 100%; }
-            .machine-id-row { flex-direction: column; }
-            .machine-id-row input { min-width: 100%; }
-            .machine-id-row .btn { width: 100%; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }
-        
+
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #f8fafc;
+            color: #1e293b;
+            min-height: 100vh;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        .login-wrapper {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #f0f4ff 0%, #faf5ff 100%);
+            padding: 16px;
+        }
+
+        .login-box {
+            background: #fff;
+            padding: 32px 24px;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 380px;
+        }
+
+        .login-box h1 {
+            text-align: center;
+            color: #7c3aed;
+            margin-bottom: 8px;
+            font-size: 22px;
+            justify-content: center;
+        }
+
+        .login-box p {
+            text-align: center;
+            color: #64748b;
+            margin-bottom: 24px;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 6px;
+            color: #374151;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        input[type="text"],
+        input[type="password"],
+        select,
+        textarea {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 16px;
+            background: #fff;
+            color: #1e293b;
+            -webkit-appearance: none;
+        }
+
+        input:focus,
+        textarea:focus {
+            outline: none;
+            border-color: #7c3aed;
+            box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+            font-family: monospace;
+            font-size: 14px;
+        }
+
+        .btn {
+            padding: 12px 18px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+            touch-action: manipulation;
+        }
+
+        .btn-primary {
+            background: #7c3aed;
+            color: white;
+        }
+
+        .btn-primary:hover,
+        .btn-primary:active {
+            background: #6d28d9;
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-secondary {
+            background: #f1f5f9;
+            color: #374151;
+        }
+
+        .btn-sm {
+            padding: 8px 12px;
+            font-size: 13px;
+        }
+
+        .card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #e2e8f0;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .card-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: #fff;
+            border-radius: 10px;
+            padding: 12px 8px;
+            text-align: center;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #7c3aed;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: #64748b;
+            margin-top: 2px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .badge-success {
+            background: #dcfce7;
+            color: #16a34a;
+        }
+
+        .badge-warning {
+            background: #fef3c7;
+            color: #d97706;
+        }
+
+        .badge-error {
+            background: #fee2e2;
+            color: #dc2626;
+        }
+
+        .badge-info {
+            background: #ede9fe;
+            color: #7c3aed;
+        }
+
+        .badge-pro {
+            background: #3b82f6;
+            color: white;
+        }
+
+        .badge-proplus {
+            background: #8b5cf6;
+            color: white;
+        }
+
+        .badge-power {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .badge-free {
+            background: #6b7280;
+            color: white;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            padding: 16px;
+            overflow-y: auto;
+        }
+
+        .modal.active {
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            padding-top: 5vh;
+        }
+
+        .modal-content {
+            background: #fff;
+            border-radius: 12px;
+            padding: 20px;
+            width: 100%;
+            max-width: 600px;
+            margin-bottom: 20px;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 28px;
+            cursor: pointer;
+            color: #64748b;
+            padding: 0 8px;
+        }
+
+        .modal-footer {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+            flex-shrink: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: #cbd5e1;
+            border-radius: 24px;
+            transition: 0.3s;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background: white;
+            border-radius: 50%;
+            transition: 0.3s;
+        }
+
+        input:checked+.slider {
+            background: #7c3aed;
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(20px);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 16px;
+            background: #f1f5f9;
+            padding: 4px;
+            border-radius: 10px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .tab {
+            padding: 10px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            color: #64748b;
+            font-weight: 500;
+            font-size: 14px;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .tab:hover {
+            color: #374151;
+        }
+
+        .tab.active {
+            background: #fff;
+            color: #7c3aed;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+
+        .message-error {
+            background: #fee2e2;
+            color: #dc2626;
+        }
+
+        .endpoint {
+            background: #f8fafc;
+            padding: 12px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            word-break: break-all;
+        }
+
+        .endpoint span {
+            flex: 1;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            gap: 12px;
+        }
+
+        .header h1 {
+            font-size: 18px;
+            color: #7c3aed;
+        }
+
+        .account-card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 14px;
+            margin-bottom: 12px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            border-left: 4px solid #7c3aed;
+        }
+
+        .account-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+            gap: 10px;
+        }
+
+        .account-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .account-email {
+            font-weight: 600;
+            font-size: 14px;
+            color: #1e293b;
+            word-break: break-all;
+        }
+
+        .account-meta {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 6px;
+        }
+
+        .account-usage {
+            margin: 10px 0;
+        }
+
+        .usage-bar {
+            height: 6px;
+            background: #e2e8f0;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .usage-fill {
+            height: 100%;
+            background: #7c3aed;
+            border-radius: 3px;
+            transition: width 0.3s;
+        }
+
+        .usage-fill.high {
+            background: #f59e0b;
+        }
+
+        .usage-fill.critical {
+            background: #ef4444;
+        }
+
+        .usage-text {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: #64748b;
+            margin-top: 4px;
+        }
+
+        .usage-label {
+            font-size: 12px;
+            color: #64748b;
+            margin-bottom: 4px;
+            font-weight: 500;
+        }
+
+        .account-usage+.account-usage {
+            margin-top: 8px;
+        }
+
+        .badge-trial {
+            background: #10b981;
+            color: white;
+        }
+
+        .account-stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .account-stat {
+            text-align: center;
+        }
+
+        .account-stat-value {
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        .account-stat-label {
+            font-size: 10px;
+            color: #64748b;
+        }
+
+        .account-actions {
+            display: flex;
+            gap: 6px;
+            flex-shrink: 0;
+            flex-wrap: wrap;
+        }
+
+        .detail-section {
+            margin-bottom: 20px;
+        }
+
+        .detail-section h4 {
+            font-size: 13px;
+            color: #64748b;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+        }
+
+        .detail-item {
+            background: #f8fafc;
+            padding: 10px 12px;
+            border-radius: 8px;
+        }
+
+        .detail-label {
+            font-size: 11px;
+            color: #64748b;
+            margin-bottom: 2px;
+        }
+
+        .detail-value {
+            font-size: 13px;
+            font-weight: 500;
+            word-break: break-all;
+        }
+
+        .model-list {
+            display: grid;
+            gap: 8px;
+            max-height: 250px;
+            overflow-y: auto;
+        }
+
+        .model-item {
+            background: #f8fafc;
+            padding: 10px 12px;
+            border-radius: 8px;
+        }
+
+        .model-name {
+            font-weight: 500;
+            font-size: 13px;
+        }
+
+        .model-info {
+            font-size: 11px;
+            color: #64748b;
+            margin-top: 2px;
+        }
+
+        .btn-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            padding: 0;
+        }
+
+        .btn-icon svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        .loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .logo svg {
+            width: 24px;
+            height: 24px;
+            color: #7c3aed;
+        }
+
+        .machine-id-row {
+            display: flex;
+            gap: 8px;
+            align-items: stretch;
+            flex-wrap: wrap;
+        }
+
+        .machine-id-row input {
+            flex: 1;
+            min-width: 200px;
+            font-family: monospace;
+            font-size: 11px;
+        }
+
+        .machine-id-row .btn {
+            flex-shrink: 0;
+        }
+
+        .lang-switch {
+            display: flex;
+            gap: 4px;
+            background: #f1f5f9;
+            padding: 2px;
+            border-radius: 6px;
+        }
+
+        .lang-btn {
+            padding: 4px 8px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 12px;
+            border-radius: 4px;
+            color: #64748b;
+        }
+
+        .lang-btn.active {
+            background: #fff;
+            color: #7c3aed;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        @media (max-width: 640px) {
+            .container {
+                padding: 12px;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(3, 1fr);
+                gap: 8px;
+            }
+
+            .stat-card {
+                padding: 10px 6px;
+            }
+
+            .stat-value {
+                font-size: 18px;
+            }
+
+            .stat-label {
+                font-size: 10px;
+            }
+
+            .card {
+                padding: 14px;
+            }
+
+            .card-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .card-actions {
+                width: 100%;
+            }
+
+            .card-actions .btn {
+                flex: 1;
+                text-align: center;
+            }
+
+            .account-header {
+                flex-direction: column;
+            }
+
+            .account-actions {
+                width: 100%;
+                justify-content: flex-start;
+            }
+
+            .account-actions .btn {
+                padding: 8px 10px;
+                font-size: 12px;
+            }
+
+            .account-stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .detail-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .tabs {
+                gap: 2px;
+            }
+
+            .tab {
+                padding: 10px 12px;
+                font-size: 13px;
+            }
+
+            .modal-content {
+                padding: 16px;
+            }
+
+            .endpoint {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .endpoint .btn {
+                width: 100%;
+            }
+
+            .machine-id-row {
+                flex-direction: column;
+            }
+
+            .machine-id-row input {
+                min-width: 100%;
+            }
+
+            .machine-id-row .btn {
+                width: 100%;
+            }
+        }
+
         @media (min-width: 641px) {
-            .detail-grid { grid-template-columns: repeat(2, 1fr); }
+            .detail-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
         }
     </style>
 </head>
+
 <body>
     <div id="loginPage" class="login-wrapper">
         <div class="login-box">
-            <h1 class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Kiro API Proxy</h1>
-            <p>请输入管理密码登录</p>
-            <div class="form-group">
-                <label>管理密码</label>
-                <input type="password" id="pwdField" placeholder="输入密码" autocomplete="off">
+            <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
+                <div class="lang-switch">
+                    <button class="lang-btn" data-lang="zh" onclick="setLang('zh')">中文</button>
+                    <button class="lang-btn" data-lang="en" onclick="setLang('en')">EN</button>
+                </div>
             </div>
-            <button type="button" class="btn btn-primary" style="width:100%" onclick="login()">登录</button>
+            <h1 class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                </svg>Kiro API Proxy</h1>
+            <p data-i18n="login.subtitle"></p>
+            <div class="form-group">
+                <label data-i18n="login.password"></label>
+                <input type="password" id="pwdField" data-i18n-placeholder="login.passwordPlaceholder"
+                    autocomplete="off">
+            </div>
+            <button type="button" class="btn btn-primary" style="width:100%" onclick="login()"
+                data-i18n="login.submit"></button>
             <div id="loginError" class="message message-error hidden" style="margin-top:12px"></div>
         </div>
     </div>
-
     <div id="mainPage" class="container hidden">
         <div class="header">
-            <h1 class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Kiro API Proxy</h1>
-            <span class="badge badge-success" id="statusBadge">运行中</span>
+            <h1 class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                </svg>Kiro API Proxy</h1>
+            <div class="header-right">
+                <div class="lang-switch">
+                    <button class="lang-btn" data-lang="zh" onclick="setLang('zh')">中文</button>
+                    <button class="lang-btn" data-lang="en" onclick="setLang('en')">EN</button>
+                </div>
+                <span class="badge badge-success" id="statusBadge" data-i18n="status.running"></span>
+            </div>
         </div>
-        
         <div class="stats-grid">
-            <div class="stat-card"><div class="stat-value" id="statAccounts">0</div><div class="stat-label">账号</div></div>
-            <div class="stat-card"><div class="stat-value" id="statRequests">0</div><div class="stat-label">请求</div></div>
-            <div class="stat-card"><div class="stat-value" id="statSuccess">0</div><div class="stat-label">成功</div></div>
-            <div class="stat-card"><div class="stat-value" id="statFailed">0</div><div class="stat-label">失败</div></div>
-            <div class="stat-card"><div class="stat-value" id="statTokens">0</div><div class="stat-label">Tokens</div></div>
-            <div class="stat-card"><div class="stat-value" id="statCredits">0</div><div class="stat-label">Credits</div></div>
+            <div class="stat-card">
+                <div class="stat-value" id="statAccounts">0</div>
+                <div class="stat-label" data-i18n="stats.accounts"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="statRequests">0</div>
+                <div class="stat-label" data-i18n="stats.requests"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="statSuccess">0</div>
+                <div class="stat-label" data-i18n="stats.success"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="statFailed">0</div>
+                <div class="stat-label" data-i18n="stats.failed"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="statTokens">0</div>
+                <div class="stat-label">Tokens</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="statCredits">0</div>
+                <div class="stat-label">Credits</div>
+            </div>
         </div>
-
         <div class="tabs">
-            <div class="tab active" data-tab="accounts">账号</div>
-            <div class="tab" data-tab="settings">设置</div>
-            <div class="tab" data-tab="api">API</div>
+            <div class="tab active" data-tab="accounts" data-i18n="tabs.accounts"></div>
+            <div class="tab" data-tab="settings" data-i18n="tabs.settings"></div>
+            <div class="tab" data-tab="api" data-i18n="tabs.api"></div>
         </div>
-
         <div id="tabAccounts" class="tab-content">
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title">账号列表</span>
-                    <div class="card-actions">
-                        <button class="btn btn-primary btn-sm" onclick="showModal('add')">添加账号</button>
-                    </div>
+                    <span class="card-title" data-i18n="accounts.title"></span>
+                    <div class="card-actions"><button class="btn btn-primary btn-sm" onclick="showModal('add')"
+                            data-i18n="accounts.add"></button></div>
                 </div>
                 <div id="accountsList"></div>
             </div>
         </div>
-
         <div id="tabSettings" class="tab-content hidden">
             <div class="card">
-                <div class="card-header"><span class="card-title">API 设置</span></div>
+                <div class="card-header"><span class="card-title" data-i18n="settings.apiSettings"></span></div>
                 <div class="form-group">
                     <label style="display:flex;align-items:center;gap:10px">
-                        <label class="switch"><input type="checkbox" id="requireApiKey"><span class="slider"></span></label>
-                        启用 API Key 验证
+                        <label class="switch"><input type="checkbox" id="requireApiKey"><span
+                                class="slider"></span></label>
+                        <span data-i18n="settings.enableApiKey"></span>
                     </label>
                 </div>
-                <div class="form-group">
-                    <label>API Key</label>
-                    <input type="text" id="apiKeyInput" placeholder="留空则不验证">
-                </div>
-                <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+                <div class="form-group"><label>API Key</label><input type="text" id="apiKeyInput"
+                        data-i18n-placeholder="settings.apiKeyPlaceholder"></div>
+                <button class="btn btn-primary" onclick="saveSettings()" data-i18n="common.save"></button>
             </div>
             <div class="card">
-                <div class="card-header"><span class="card-title">Thinking 模式设置</span></div>
+                <div class="card-header"><span class="card-title" data-i18n="settings.thinkingSettings"></span></div>
                 <div class="form-group">
-                    <label>触发后缀</label>
+                    <label data-i18n="settings.thinkingSuffix"></label>
                     <input type="text" id="thinkingSuffix" placeholder="-thinking">
-                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block">模型名称加此后缀即启用思考模式，如 claude-sonnet-4.5-thinking</small>
+                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block"
+                        data-i18n="settings.thinkingSuffixHint"></small>
                 </div>
                 <div class="form-group">
-                    <label>OpenAI API 输出格式</label>
+                    <label data-i18n="settings.openaiFormat"></label>
                     <select id="openaiThinkingFormat">
-                        <option value="reasoning_content">reasoning_content (DeepSeek 兼容)</option>
-                        <option value="thinking">&lt;thinking&gt; 标签 (Claude 原生)</option>
-                        <option value="think">&lt;think&gt; 标签 (OpenAI 原生)</option>
+                        <option value="reasoning_content">reasoning_content (DeepSeek)</option>
+                        <option value="thinking">&lt;thinking&gt; (Claude)</option>
+                        <option value="think">&lt;think&gt; (OpenAI)</option>
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Claude API 输出格式</label>
+                    <label data-i18n="settings.claudeFormat"></label>
                     <select id="claudeThinkingFormat">
-                        <option value="thinking">&lt;thinking&gt; 标签 (Claude 原生)</option>
-                        <option value="think">&lt;think&gt; 标签</option>
-                        <option value="reasoning_content">直接输出 (无标签)</option>
+                        <option value="thinking">&lt;thinking&gt; (Claude)</option>
+                        <option value="think">&lt;think&gt; (OpenAI)</option>
+                        <option value="reasoning_content" data-i18n="settings.noTag"></option>
                     </select>
                 </div>
-                <button class="btn btn-primary" onclick="saveThinkingConfig()">保存 Thinking 设置</button>
+                <button class="btn btn-primary" onclick="saveThinkingConfig()"
+                    data-i18n="settings.saveThinking"></button>
             </div>
             <div class="card">
-                <div class="card-header"><span class="card-title">管理密码</span></div>
+                <div class="card-header"><span class="card-title" data-i18n="settings.endpointSettings"></span></div>
                 <div class="form-group">
-                    <label>新密码</label>
-                    <input type="password" id="newPassword" placeholder="输入新密码">
+                    <label data-i18n="settings.preferredEndpoint"></label>
+                    <select id="preferredEndpoint">
+                        <option value="auto" data-i18n="settings.endpointAuto"></option>
+                        <option value="codewhisperer">CodeWhisperer</option>
+                        <option value="amazonq">AmazonQ</option>
+                    </select>
+                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block"
+                        data-i18n="settings.endpointHint"></small>
                 </div>
-                <button class="btn btn-primary" onclick="changePassword()">修改密码</button>
+                <button class="btn btn-primary" onclick="saveEndpointConfig()"
+                    data-i18n="settings.saveEndpoint"></button>
             </div>
             <div class="card">
-                <div class="card-header"><span class="card-title">统计</span></div>
-                <button class="btn btn-danger" onclick="resetStats()">重置统计</button>
+                <div class="card-header"><span class="card-title" data-i18n="settings.adminPassword"></span></div>
+                <div class="form-group"><label data-i18n="settings.newPassword"></label><input type="password"
+                        id="newPassword" data-i18n-placeholder="settings.newPasswordPlaceholder"></div>
+                <button class="btn btn-primary" onclick="changePassword()" data-i18n="settings.changePassword"></button>
+            </div>
+            <div class="card">
+                <div class="card-header"><span class="card-title" data-i18n="settings.statistics"></span></div>
+                <button class="btn btn-danger" onclick="resetStats()" data-i18n="settings.resetStats"></button>
             </div>
         </div>
-
         <div id="tabApi" class="tab-content hidden">
             <div class="card">
-                <div class="card-header"><span class="card-title">API 端点</span></div>
+                <div class="card-header"><span class="card-title" data-i18n="api.endpoints"></span></div>
                 <p style="margin-bottom:10px;font-weight:500;font-size:14px">Claude API</p>
-                <div class="endpoint"><span id="claudeEndpoint"></span><button class="btn btn-sm btn-secondary" onclick="copy('claudeEndpoint')">复制</button></div>
+                <div class="endpoint"><span id="claudeEndpoint"></span><button class="btn btn-sm btn-secondary"
+                        onclick="copy('claudeEndpoint')" data-i18n="common.copy"></button></div>
                 <p style="margin:14px 0 10px;font-weight:500;font-size:14px">OpenAI API</p>
-                <div class="endpoint"><span id="openaiEndpoint"></span><button class="btn btn-sm btn-secondary" onclick="copy('openaiEndpoint')">复制</button></div>
-                <p style="margin:14px 0 10px;font-weight:500;font-size:14px">模型列表</p>
-                <div class="endpoint"><span id="modelsEndpoint"></span><button class="btn btn-sm btn-secondary" onclick="copy('modelsEndpoint')">复制</button></div>
+                <div class="endpoint"><span id="openaiEndpoint"></span><button class="btn btn-sm btn-secondary"
+                        onclick="copy('openaiEndpoint')" data-i18n="common.copy"></button></div>
+                <p style="margin:14px 0 10px;font-weight:500;font-size:14px" data-i18n="api.modelList"></p>
+                <div class="endpoint"><span id="modelsEndpoint"></span><button class="btn btn-sm btn-secondary"
+                        onclick="copy('modelsEndpoint')" data-i18n="common.copy"></button></div>
             </div>
         </div>
     </div>
-
     <div id="addModal" class="modal">
         <div class="modal-content">
-            <div class="modal-header">
-                <span class="modal-title" id="modalTitle">添加账号</span>
-                <button class="modal-close" onclick="closeModal()">&times;</button>
-            </div>
+            <div class="modal-header"><span class="modal-title" id="modalTitle"></span><button class="modal-close"
+                    onclick="closeModal()">&times;</button></div>
             <div id="modalBody"></div>
         </div>
     </div>
-
     <div id="detailModal" class="modal">
         <div class="modal-content">
-            <div class="modal-header">
-                <span class="modal-title">账号详情</span>
-                <button class="modal-close" onclick="closeDetailModal()">&times;</button>
-            </div>
+            <div class="modal-header"><span class="modal-title" data-i18n="detail.title"></span><button
+                    class="modal-close" onclick="closeDetailModal()">&times;</button></div>
             <div id="detailBody"></div>
         </div>
     </div>
-
     <script>
+        const i18n = {
+            zh: {
+                'login.subtitle': '请输入管理密码登录',
+                'login.password': '管理密码',
+                'login.passwordPlaceholder': '输入密码',
+                'login.submit': '登录',
+                'login.error': '密码错误',
+                'login.connectError': '连接失败',
+                'status.running': '运行中',
+                'stats.accounts': '账号',
+                'stats.requests': '请求',
+                'stats.success': '成功',
+                'stats.failed': '失败',
+                'tabs.accounts': '账号',
+                'tabs.settings': '设置',
+                'tabs.api': 'API',
+                'accounts.title': '账号列表',
+                'accounts.add': '添加账号',
+                'accounts.empty': '暂无账号',
+                'accounts.refresh': '刷新',
+                'accounts.detail': '详情',
+                'accounts.enable': '启用',
+                'accounts.disable': '禁用',
+                'accounts.delete': '删除',
+                'accounts.requests': '请求',
+                'accounts.tokens': 'Tokens',
+                'accounts.credits': 'Credits',
+                'accounts.expiry': '到期',
+                'accounts.noToken': '无Token',
+                'accounts.expired': '已过期',
+                'accounts.disabled': '已禁用',
+                'accounts.normal': '正常',
+                'accounts.refreshFailed': '刷新失败',
+                'accounts.confirmDelete': '确定删除？',
+                'accounts.mainQuota': '主配额',
+                'accounts.trialQuota': '试用配额',
+                'accounts.trial': '试用中',
+                'accounts.trialExpired': '已过期',
+                'accounts.trialToday': '今天到期',
+                'accounts.trialDays': '天后到期',
+                'time.expired': '已过期',
+                'time.minutes': '分钟',
+                'time.hours': '小时',
+                'time.days': '天',
+                'settings.apiSettings': 'API 设置',
+                'settings.enableApiKey': '启用 API Key 验证',
+                'settings.apiKeyPlaceholder': '留空则不验证',
+                'settings.thinkingSettings': 'Thinking 模式设置',
+                'settings.thinkingSuffix': '触发后缀',
+                'settings.thinkingSuffixHint': '模型名称加此后缀即启用思考模式，如 claude-sonnet-4.5-thinking',
+                'settings.openaiFormat': 'OpenAI API 输出格式',
+                'settings.claudeFormat': 'Claude API 输出格式',
+                'settings.noTag': '直接输出 (无标签)',
+                'settings.saveThinking': '保存 Thinking 设置',
+                'settings.thinkingSaved': 'Thinking 设置已保存',
+                'settings.endpointSettings': 'Kiro 端点设置',
+                'settings.preferredEndpoint': '首选端点',
+                'settings.endpointAuto': '自动选择',
+                'settings.endpointHint': '选择首选端点，自动选择模式下会根据可用性自动选择端点',
+                'settings.saveEndpoint': '保存端点设置',
+                'settings.endpointSaved': '端点设置已保存',
+                'settings.adminPassword': '管理密码',
+                'settings.newPassword': '新密码',
+                'settings.newPasswordPlaceholder': '输入新密码',
+                'settings.changePassword': '修改密码',
+                'settings.passwordRequired': '请输入新密码',
+                'settings.passwordChanged': '密码已修改',
+                'settings.statistics': '统计',
+                'settings.resetStats': '重置统计',
+                'settings.confirmReset': '确定重置统计？',
+                'api.endpoints': 'API 端点',
+                'api.modelList': '模型列表',
+                'detail.title': '账号详情',
+                'detail.basicInfo': '基本信息',
+                'detail.email': '邮箱',
+                'detail.userId': '用户ID',
+                'detail.authMethod': '认证方式',
+                'detail.region': 'Region',
+                'detail.machineId': '机器码',
+                'detail.generate': '生成',
+                'detail.subscription': '订阅信息',
+                'detail.subscriptionType': '订阅类型',
+                'detail.tokenExpiry': 'Token到期',
+                'detail.usage': '用量',
+                'detail.mainQuota': '主配额',
+                'detail.trialQuota': '试用配额',
+                'detail.trialStatus': '试用状态',
+                'detail.trialExpiry': '试用到期',
+                'detail.resetDate': '重置日期',
+                'detail.statistics': '统计',
+                'detail.requestCount': '请求数',
+                'detail.errorCount': '错误数',
+                'detail.totalTokens': '总Tokens',
+                'detail.totalCredits': '总Credits',
+                'detail.models': '可用模型',
+                'detail.loadModels': '加载',
+                'detail.loading': '加载中...',
+                'detail.noModels': '无可用模型',
+                'detail.loadFailed': '加载失败',
+                'detail.machineIdError': '机器码格式错误',
+                'detail.saved': '已保存',
+                'detail.saveFailed': '保存失败',
+                'detail.generateFailed': '生成失败',
+                'modal.addAccount': '添加账号',
+                'modal.builderIdTitle': 'AWS Builder ID',
+                'modal.builderIdDesc': '通过 AWS Builder ID 授权登录添加个人账号',
+                'modal.iamTitle': 'IAM Identity Center (企业 SSO) 登录',
+                'modal.iamDesc': '通过 IAM Identity Center (企业 SSO) 授权添加企业账号',
+                'modal.ssoTitle': 'SSO Token',
+                'modal.ssoDesc': '通过浏览器 x-amz-sso_authn Token 添加账号',
+                'modal.localTitle': 'Kiro 本地缓存',
+                'modal.localDesc': '通过 Kiro IDE 本地缓存文件添加账号',
+                'modal.credentialsTitle': '凭证 JSON',
+                'modal.credentialsDesc': '通过 Kiro Account Manager 导出的凭证添加账号',
+                'builderid.startLogin': '开始登录',
+                'builderid.verifyCode': '请在浏览器中输入上方验证码',
+                'builderid.verifyUrl': '验证链接',
+                'builderid.open': '打开',
+                'builderid.waiting': '等待授权中...',
+                'builderid.success': '登录成功',
+                'iam.startUrl': 'Start URL',
+                'iam.loginUrl': '登录链接',
+                'iam.completeLogin': '请在浏览器中完成登录，然后粘贴回调 URL',
+                'iam.callbackUrl': '回调 URL',
+                'iam.complete': '完成登录',
+                'sso.howToGet': '如何获取 Token?',
+                'sso.step1': '在浏览器中访问并登录',
+                'sso.step2': '按 F12 打开开发者工具 → Application → Cookies',
+                'sso.step3': '找到并复制',
+                'sso.tokenLabel': 'x-amz-sso_authn',
+                'sso.tokenHint': '*支持批量导入，每行一个 Token',
+                'sso.tokenPlaceholder': '粘贴 x-amz-sso_authn 值',
+                'sso.importSuccess': '成功添加 {0} 个账号',
+                'sso.importPartial': '，{0} 个失败',
+                'local.fileLocation': '文件位置',
+                'local.loginChannel': '登录渠道',
+                'local.tokenFile': 'kiro-auth-token.json',
+                'local.tokenRequired': '*必填',
+                'local.clientFile': '{hash}.json',
+                'local.clientRequired': '*IdC 登录必填',
+                'local.pasteOrUpload': '粘贴文件内容或上传文件',
+                'local.upload': '上传',
+                'local.tokenMissing': '请提供 kiro-auth-token.json 内容',
+                'local.tokenInvalid': 'kiro-auth-token.json 格式错误',
+                'local.refreshTokenMissing': '缺少 refreshToken',
+                'local.clientMissing': 'IdC 登录需要提供 {hash}.json 内容',
+                'local.clientInvalid': '{hash}.json 格式错误',
+                'local.clientSecretMissing': '缺少 clientId 或 clientSecret',
+                'local.importSuccess': '导入成功',
+                'credentials.label': '凭证 JSON',
+                'credentials.authMethod': '认证方式',
+                'credentials.authHint': '*影响 Token 刷新方式',
+                'credentials.social': 'Social (AWS Builder ID / Google / GitHub)',
+                'credentials.idc': 'IAM Identity Center (企业 SSO)',
+                'credentials.jsonError': 'JSON 格式错误',
+                'credentials.batchHint': '支持单个对象或 JSON 数组格式批量导入。必填: refreshToken。可选: provider (BuilderId/Enterprise/Github/Google), clientId, clientSecret',
+                'common.save': '保存设置',
+                'common.saved': '保存',
+                'common.copy': '复制',
+                'common.copied': '已复制',
+                'common.cancel': '取消',
+                'common.back': '返回',
+                'common.add': '添加',
+                'common.failed': '失败',
+                'common.saveFailed': '保存失败'
+            },
+            en: {
+                'login.subtitle': 'Enter admin password to login',
+                'login.password': 'Admin Password',
+                'login.passwordPlaceholder': 'Enter password',
+                'login.submit': 'Login',
+                'login.error': 'Wrong password',
+                'login.connectError': 'Connection failed',
+                'status.running': 'Running',
+                'stats.accounts': 'Accounts',
+                'stats.requests': 'Requests',
+                'stats.success': 'Success',
+                'stats.failed': 'Failed',
+                'tabs.accounts': 'Accounts',
+                'tabs.settings': 'Settings',
+                'tabs.api': 'API',
+                'accounts.title': 'Account List',
+                'accounts.add': 'Add Account',
+                'accounts.empty': 'No accounts',
+                'accounts.refresh': 'Refresh',
+                'accounts.detail': 'Details',
+                'accounts.enable': 'Enable',
+                'accounts.disable': 'Disable',
+                'accounts.delete': 'Delete',
+                'accounts.requests': 'Requests',
+                'accounts.tokens': 'Tokens',
+                'accounts.credits': 'Credits',
+                'accounts.expiry': 'Expiry',
+                'accounts.noToken': 'No Token',
+                'accounts.expired': 'Expired',
+                'accounts.disabled': 'Disabled',
+                'accounts.normal': 'Active',
+                'accounts.refreshFailed': 'Refresh failed',
+                'accounts.confirmDelete': 'Confirm delete?',
+                'time.expired': 'Expired',
+                'time.minutes': 'min',
+                'time.hours': 'hr',
+                'time.days': 'd',
+                'settings.apiSettings': 'API Settings',
+                'settings.enableApiKey': 'Enable API Key Verification',
+                'settings.apiKeyPlaceholder': 'Leave empty to disable',
+                'settings.thinkingSettings': 'Thinking Mode Settings',
+                'settings.thinkingSuffix': 'Trigger Suffix',
+                'settings.thinkingSuffixHint': 'Add this suffix to model name to enable thinking mode, e.g. claude-sonnet-4.5-thinking',
+                'settings.openaiFormat': 'OpenAI API Output Format',
+                'settings.claudeFormat': 'Claude API Output Format',
+                'settings.noTag': 'Direct output (no tag)',
+                'settings.saveThinking': 'Save Thinking Settings',
+                'settings.thinkingSaved': 'Thinking settings saved',
+                'settings.endpointSettings': 'Kiro Endpoint Settings',
+                'settings.preferredEndpoint': 'Preferred Endpoint',
+                'settings.endpointAuto': 'Auto',
+                'settings.endpointHint': 'Select preferred endpoint. In auto-select mode, the endpoint is automatically selected based on availability.',
+                'settings.saveEndpoint': 'Save Endpoint Settings',
+                'settings.endpointSaved': 'Endpoint settings saved',
+                'settings.adminPassword': 'Admin Password',
+                'settings.newPassword': 'New Password',
+                'settings.newPasswordPlaceholder': 'Enter new password',
+                'settings.changePassword': 'Change Password',
+                'settings.passwordRequired': 'Please enter new password',
+                'settings.passwordChanged': 'Password changed',
+                'settings.statistics': 'Statistics',
+                'settings.resetStats': 'Reset Statistics',
+                'settings.confirmReset': 'Confirm reset statistics?',
+                'api.endpoints': 'API Endpoints',
+                'api.modelList': 'Model List',
+                'detail.title': 'Account Details',
+                'detail.basicInfo': 'Basic Info',
+                'detail.email': 'Email',
+                'detail.userId': 'User ID',
+                'detail.authMethod': 'Auth Method',
+                'detail.region': 'Region',
+                'detail.machineId': 'Machine ID',
+                'detail.generate': 'Generate',
+                'detail.subscription': 'Subscription',
+                'detail.subscriptionType': 'Type',
+                'detail.tokenExpiry': 'Token Expiry',
+                'detail.usage': 'Usage',
+                'detail.resetDate': 'Reset Date',
+                'detail.statistics': 'Statistics',
+                'detail.requestCount': 'Requests',
+                'detail.errorCount': 'Errors',
+                'detail.totalTokens': 'Total Tokens',
+                'detail.totalCredits': 'Total Credits',
+                'detail.models': 'Available Models',
+                'detail.loadModels': 'Load',
+                'detail.loading': 'Loading...',
+                'detail.noModels': 'No models available',
+                'detail.loadFailed': 'Load failed',
+                'detail.machineIdError': 'Invalid machine ID format',
+                'detail.saved': 'Saved',
+                'detail.saveFailed': 'Save failed',
+                'detail.generateFailed': 'Generate failed',
+                'modal.addAccount': 'Add Account',
+                'modal.builderIdTitle': 'AWS Builder ID',
+                'modal.builderIdDesc': 'Add personal account via AWS Builder ID authorization',
+                'modal.iamTitle': 'IAM Identity Center (Enterprise SSO)',
+                'modal.iamDesc': 'Add enterprise account via IAM Identity Center SSO',
+                'modal.ssoTitle': 'SSO Token',
+                'modal.ssoDesc': 'Add account via browser x-amz-sso_authn token',
+                'modal.localTitle': 'Kiro Local Cache',
+                'modal.localDesc': 'Add account via Kiro IDE local cache files',
+                'modal.credentialsTitle': 'Credentials JSON',
+                'modal.credentialsDesc': 'Add account via Kiro Account Manager exported credentials',
+                'builderid.startLogin': 'Start Login',
+                'builderid.verifyCode': 'Enter the code above in your browser',
+                'builderid.verifyUrl': 'Verification URL',
+                'builderid.open': 'Open',
+                'builderid.waiting': 'Waiting for authorization...',
+                'builderid.success': 'Login successful',
+                'iam.startUrl': 'Start URL',
+                'iam.loginUrl': 'Login URL',
+                'iam.completeLogin': 'Complete login in browser, then paste callback URL',
+                'iam.callbackUrl': 'Callback URL',
+                'iam.complete': 'Complete Login',
+                'sso.howToGet': 'How to get Token?',
+                'sso.step1': 'Visit and login to',
+                'sso.step2': 'Press F12 to open DevTools → Application → Cookies',
+                'sso.step3': 'Find and copy',
+                'sso.tokenLabel': 'x-amz-sso_authn',
+                'sso.tokenHint': '*Supports batch import, one token per line',
+                'sso.tokenPlaceholder': 'Paste x-amz-sso_authn value',
+                'sso.importSuccess': 'Successfully added {0} accounts',
+                'sso.importPartial': ', {0} failed',
+                'local.fileLocation': 'File Location',
+                'local.loginChannel': 'Login Channel',
+                'local.tokenFile': 'kiro-auth-token.json',
+                'local.tokenRequired': '*Required',
+                'local.clientFile': '{hash}.json',
+                'local.clientRequired': '*Required for IdC login',
+                'local.pasteOrUpload': 'Paste content or upload file',
+                'local.upload': 'Upload',
+                'local.tokenMissing': 'Please provide kiro-auth-token.json content',
+                'local.tokenInvalid': 'Invalid kiro-auth-token.json format',
+                'local.refreshTokenMissing': 'Missing refreshToken',
+                'local.clientMissing': 'IdC login requires {hash}.json content',
+                'local.clientInvalid': 'Invalid {hash}.json format',
+                'local.clientSecretMissing': 'Missing clientId or clientSecret',
+                'local.importSuccess': 'Import successful',
+                'credentials.label': 'Credentials JSON',
+                'credentials.authMethod': 'Auth Method',
+                'credentials.authHint': '*Affects token refresh method',
+                'credentials.social': 'Social (AWS Builder ID / Google / GitHub)',
+                'credentials.idc': 'IAM Identity Center (Enterprise SSO)',
+                'credentials.jsonError': 'Invalid JSON format',
+                'credentials.batchHint': 'Supports single object or JSON array for batch import. Required: refreshToken. Optional: provider (BuilderId/Enterprise/Github/Google), clientId, clientSecret',
+                'common.save': 'Save Settings',
+                'common.saved': 'Saved',
+                'common.copy': 'Copy',
+                'common.copied': 'Copied',
+                'common.cancel': 'Cancel',
+                'common.back': 'Back',
+                'common.add': 'Add',
+                'common.failed': 'Failed',
+                'common.saveFailed': 'Save failed'
+            }
+        };
+        let currentLang = localStorage.getItem('kiro_lang') || 'zh';
+        function t(key, ...args) {
+            let text = i18n[currentLang][key] || i18n['zh'][key] || key;
+            args.forEach((arg, idx) => { text = text.replace('{' + idx + '}', arg); });
+            return text;
+        }
+        function setLang(lang) {
+            currentLang = lang;
+            localStorage.setItem('kiro_lang', lang);
+            document.documentElement.lang = lang;
+            updateLangButtons();
+            applyTranslations();
+            renderAccounts();
+        }
+        function updateLangButtons() {
+            document.querySelectorAll('.lang-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.lang === currentLang);
+            });
+        }
+        function applyTranslations() {
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                el.textContent = t(el.dataset.i18n);
+            });
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+                el.placeholder = t(el.dataset.i18nPlaceholder);
+            });
+        }
+
         let password = localStorage.getItem('admin_password') || '';
         const baseUrl = location.origin;
         let accountsData = [];
-
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', function () {
+            updateLangButtons();
+            applyTranslations();
             if (password) tryAutoLogin();
             document.getElementById('pwdField').addEventListener('keypress', e => { if (e.key === 'Enter') login(); });
             document.querySelectorAll('.tab').forEach(tab => { tab.onclick = () => switchTab(tab.dataset.tab); });
         });
-
         async function tryAutoLogin() {
             try {
                 const res = await fetch('/admin/api/status', { headers: { 'X-Admin-Password': password } });
                 if (res.ok) { showMain(); loadData(); }
-            } catch (e) {}
+            } catch (e) { }
         }
-
         async function login() {
             password = document.getElementById('pwdField').value;
             try {
@@ -292,27 +1325,24 @@
                     localStorage.setItem('admin_password', password);
                     showMain(); loadData();
                 } else {
-                    document.getElementById('loginError').textContent = '密码错误';
+                    document.getElementById('loginError').textContent = t('login.error');
                     document.getElementById('loginError').classList.remove('hidden');
                 }
             } catch (e) {
-                document.getElementById('loginError').textContent = '连接失败';
+                document.getElementById('loginError').textContent = t('login.connectError');
                 document.getElementById('loginError').classList.remove('hidden');
             }
         }
-
         function showMain() {
             document.getElementById('loginPage').classList.add('hidden');
             document.getElementById('mainPage').classList.remove('hidden');
         }
-
         async function loadData() {
             await Promise.all([loadStats(), loadAccounts(), loadSettings()]);
             document.getElementById('claudeEndpoint').textContent = baseUrl + '/v1/messages';
             document.getElementById('openaiEndpoint').textContent = baseUrl + '/v1/chat/completions';
             document.getElementById('modelsEndpoint').textContent = baseUrl + '/v1/models';
         }
-
         async function loadStats() {
             const res = await fetch('/admin/api/status', { headers: { 'X-Admin-Password': password } });
             const d = await res.json();
@@ -323,17 +1353,16 @@
             document.getElementById('statTokens').textContent = formatNum(d.totalTokens || 0);
             document.getElementById('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
         }
-
         async function loadAccounts() {
             const res = await fetch('/admin/api/accounts', { headers: { 'X-Admin-Password': password } });
             accountsData = await res.json();
             renderAccounts();
         }
-
         function renderAccounts() {
             const container = document.getElementById('accountsList');
+            if (!container) return;
             if (accountsData.length === 0) {
-                container.innerHTML = '<p style="text-align:center;color:#64748b;padding:30px">暂无账号</p>';
+                container.innerHTML = '<p style="text-align:center;color:#64748b;padding:30px">' + t('accounts.empty') + '</p>';
                 return;
             }
             container.innerHTML = accountsData.map(a => {
@@ -341,61 +1370,46 @@
                 const usageClass = usagePercent > 90 ? 'critical' : usagePercent > 70 ? 'high' : '';
                 const trialUsagePercent = (a.trialUsagePercent || 0) * 100;
                 const trialUsageClass = trialUsagePercent > 90 ? 'critical' : trialUsagePercent > 70 ? 'high' : '';
-                return `<div class="account-card">
-                    <div class="account-header">
-                        <div class="account-info">
-                            <div class="account-email">${a.email || a.id.substring(0,12)+'...'}</div>
-                            <div class="account-meta">
-                                ${getSubBadge(a.subscriptionType)}
-                                ${getTrialBadge(a)}
-                                <span class="badge badge-info">${formatAuthMethod(a.provider || a.authMethod)}</span>
-                                ${getStatusBadge(a)}
-                            </div>
-                        </div>
-                        <div class="account-actions">
-                            <button class="btn btn-sm btn-icon btn-secondary" onclick="refreshAccount('${a.id}')" title="刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></button>
-                            <button class="btn btn-sm btn-icon btn-secondary" onclick="showDetail('${a.id}')" title="详情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
-                            <button class="btn btn-sm ${a.enabled ? 'btn-secondary' : 'btn-primary'}" onclick="toggleAccount('${a.id}',${!a.enabled})">${a.enabled ? '禁用' : '启用'}</button>
-                            <button class="btn btn-sm btn-danger" onclick="deleteAccount('${a.id}')">删除</button>
-                        </div>
-                    </div>
-                    ${a.usageLimit > 0 ? `<div class="account-usage">
-                        <div class="usage-label">主配额</div>
-                        <div class="usage-bar"><div class="usage-fill ${usageClass}" style="width:${usagePercent}%"></div></div>
-                        <div class="usage-text">
-                            <span>${a.usageCurrent?.toFixed(1) || 0} / ${a.usageLimit?.toFixed(0) || 0}</span>
-                            <span>${usagePercent.toFixed(1)}%</span>
-                        </div>
-                    </div>` : ''}
-                    ${a.trialUsageLimit > 0 ? `<div class="account-usage">
-                        <div class="usage-label">试用配额 ${formatTrialExpiry(a.trialExpiresAt)}</div>
-                        <div class="usage-bar"><div class="usage-fill ${trialUsageClass}" style="width:${trialUsagePercent}%"></div></div>
-                        <div class="usage-text">
-                            <span>${a.trialUsageCurrent?.toFixed(1) || 0} / ${a.trialUsageLimit?.toFixed(0) || 0}</span>
-                            <span>${trialUsagePercent.toFixed(1)}%</span>
-                        </div>
-                    </div>` : ''}
-                    <div class="account-stats">
-                        <div class="account-stat"><div class="account-stat-value">${a.requestCount || 0}</div><div class="account-stat-label">请求</div></div>
-                        <div class="account-stat"><div class="account-stat-value">${formatNum(a.totalTokens || 0)}</div><div class="account-stat-label">Tokens</div></div>
-                        <div class="account-stat"><div class="account-stat-value">${(a.totalCredits || 0).toFixed(1)}</div><div class="account-stat-label">Credits</div></div>
-                        <div class="account-stat"><div class="account-stat-value">${formatTokenExpiry(a.expiresAt)}</div><div class="account-stat-label">到期</div></div>
-                    </div>
-                </div>`;
+                return '<div class="account-card">' +
+                    '<div class="account-header">' +
+                    '<div class="account-info">' +
+                    '<div class="account-email">' + (a.email || a.id.substring(0, 12) + '...') + '</div>' +
+                    '<div class="account-meta">' +
+                    getSubBadge(a.subscriptionType) +
+                    getTrialBadge(a) +
+                    '<span class="badge badge-info">' + formatAuthMethod(a.provider || a.authMethod) + '</span>' +
+                    getStatusBadge(a) +
+                    '</div>' +
+                    '</div>' +
+                    '<div class="account-actions">' +
+                    '<button class="btn btn-sm btn-icon btn-secondary" onclick="refreshAccount(\'' + a.id + '\')" title="' + t('accounts.refresh') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></button>' +
+                    '<button class="btn btn-sm btn-icon btn-secondary" onclick="showDetail(\'' + a.id + '\')" title="' + t('accounts.detail') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>' +
+                    '<button class="btn btn-sm ' + (a.enabled ? 'btn-secondary' : 'btn-primary') + '" onclick="toggleAccount(\'' + a.id + '\',' + !a.enabled + ')">' + (a.enabled ? t('accounts.disable') : t('accounts.enable')) + '</button>' +
+                    '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.id + '\')">' + t('accounts.delete') + '</button>' +
+                    '</div>' +
+                    '</div>' +
+                    (a.usageLimit > 0 ? '<div class="account-usage"><div class="usage-label">' + t('accounts.mainQuota') + '</div><div class="usage-bar"><div class="usage-fill ' + usageClass + '" style="width:' + usagePercent + '%"></div></div><div class="usage-text"><span>' + (a.usageCurrent?.toFixed(1) || 0) + ' / ' + (a.usageLimit?.toFixed(0) || 0) + '</span><span>' + usagePercent.toFixed(1) + '%</span></div></div>' : '') +
+                    (a.trialUsageLimit > 0 ? '<div class="account-usage"><div class="usage-label">' + t('accounts.trialQuota') + ' ' + formatTrialExpiry(a.trialExpiresAt) + '</div><div class="usage-bar"><div class="usage-fill ' + trialUsageClass + '" style="width:' + trialUsagePercent + '%"></div></div><div class="usage-text"><span>' + (a.trialUsageCurrent?.toFixed(1) || 0) + ' / ' + (a.trialUsageLimit?.toFixed(0) || 0) + '</span><span>' + trialUsagePercent.toFixed(1) + '%</span></div></div>' : '') +
+                    '<div class="account-stats">' +
+                    '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + t('accounts.requests') + '</div></div>' +
+                    '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + t('accounts.tokens') + '</div></div>' +
+                    '<div class="account-stat"><div class="account-stat-value">' + (a.totalCredits || 0).toFixed(1) + '</div><div class="account-stat-label">' + t('accounts.credits') + '</div></div>' +
+                    '<div class="account-stat"><div class="account-stat-value">' + formatTokenExpiry(a.expiresAt) + '</div><div class="account-stat-label">' + t('accounts.expiry') + '</div></div>' +
+                    '</div>' +
+                    '</div>';
             }).join('');
         }
-
         function getSubBadge(type) {
-            const t = (type || '').toUpperCase();
-            if (t.includes('POWER')) return '<span class="badge badge-power">POWER</span>';
-            if (t.includes('PRO_PLUS') || t.includes('PROPLUS')) return '<span class="badge badge-proplus">PRO+</span>';
-            if (t.includes('PRO')) return '<span class="badge badge-pro">PRO</span>';
+            const subType = (type || '').toUpperCase();
+            if (subType.includes('POWER')) return '<span class="badge badge-power">POWER</span>';
+            if (subType.includes('PRO_PLUS') || subType.includes('PROPLUS')) return '<span class="badge badge-proplus">PRO+</span>';
+            if (subType.includes('PRO')) return '<span class="badge badge-pro">PRO</span>';
             return '<span class="badge badge-free">FREE</span>';
         }
 
         function getTrialBadge(account) {
             if (account.trialStatus === 'ACTIVE' && account.trialUsageLimit > 0) {
-                return '<span class="badge badge-trial">试用中</span>';
+                return '<span class="badge badge-trial">' + t('accounts.trial') + '</span>';
             }
             return '';
         }
@@ -405,9 +1419,9 @@
             const date = new Date(timestamp * 1000);
             const now = new Date();
             const diffDays = Math.ceil((date - now) / (1000 * 60 * 60 * 24));
-            if (diffDays < 0) return '(已过期)';
-            if (diffDays === 0) return '(今天到期)';
-            if (diffDays <= 7) return `(${diffDays}天后到期)`;
+            if (diffDays < 0) return '(' + t('accounts.trialExpired') + ')';
+            if (diffDays === 0) return '(' + t('accounts.trialToday') + ')';
+            if (diffDays <= 7) return '(' + diffDays + t('accounts.trialDays') + ')';
             return '';
         }
 
@@ -417,113 +1431,88 @@
             if (method === 'social') return 'Social';
             return method;
         }
-
         function getStatusBadge(a) {
-            if (!a.hasToken) return '<span class="badge badge-error">无Token</span>';
-            if (a.expiresAt && a.expiresAt < Date.now()/1000) return '<span class="badge badge-warning">已过期</span>';
-            if (!a.enabled) return '<span class="badge badge-warning">已禁用</span>';
-            return '<span class="badge badge-success">正常</span>';
+            if (!a.hasToken) return '<span class="badge badge-error">' + t('accounts.noToken') + '</span>';
+            if (a.expiresAt && a.expiresAt < Date.now() / 1000) return '<span class="badge badge-warning">' + t('accounts.expired') + '</span>';
+            if (!a.enabled) return '<span class="badge badge-warning">' + t('accounts.disabled') + '</span>';
+            return '<span class="badge badge-success">' + t('accounts.normal') + '</span>';
         }
-
         function formatTokenExpiry(ts) {
             if (!ts) return '-';
-            const diff = ts - Date.now()/1000;
-            if (diff <= 0) return '已过期';
-            if (diff < 3600) return Math.floor(diff/60) + '分钟';
-            if (diff < 86400) return Math.floor(diff/3600) + '小时';
-            return Math.floor(diff/86400) + '天';
+            const diff = ts - Date.now() / 1000;
+            if (diff <= 0) return t('time.expired');
+            if (diff < 3600) return Math.floor(diff / 60) + t('time.minutes');
+            if (diff < 86400) return Math.floor(diff / 3600) + t('time.hours');
+            return Math.floor(diff / 86400) + t('time.days');
         }
-
         async function refreshAccount(id) {
             const card = event.target.closest('.account-card');
             if (card) card.classList.add('loading');
             try {
                 const res = await fetch('/admin/api/accounts/' + id + '/refresh', { method: 'POST', headers: { 'X-Admin-Password': password } });
                 const d = await res.json();
-                if (d.success) { loadAccounts(); } else { alert('刷新失败: ' + d.error); }
-            } catch (e) { alert('刷新失败'); }
+                if (d.success) { loadAccounts(); } else { alert(t('accounts.refreshFailed') + ': ' + d.error); }
+            } catch (e) { alert(t('accounts.refreshFailed')); }
             if (card) card.classList.remove('loading');
         }
-
         async function showDetail(id) {
             const a = accountsData.find(x => x.id === id);
             if (!a) return;
-            document.getElementById('detailBody').innerHTML = `
-                <div class="detail-section">
-                    <h4>基本信息</h4>
-                    <div class="detail-grid">
-                        <div class="detail-item"><div class="detail-label">邮箱</div><div class="detail-value">${a.email || '-'}</div></div>
-                        <div class="detail-item"><div class="detail-label">用户ID</div><div class="detail-value">${a.userId || '-'}</div></div>
-                        <div class="detail-item"><div class="detail-label">认证方式</div><div class="detail-value">${formatAuthMethod(a.provider || a.authMethod)}</div></div>
-                        <div class="detail-item"><div class="detail-label">Region</div><div class="detail-value">${a.region || 'us-east-1'}</div></div>
-                    </div>
-                </div>
-                <div class="detail-section">
-                    <h4>机器码</h4>
-                    <div class="machine-id-row">
-                        <input type="text" id="machineIdInput" value="${a.machineId || ''}" placeholder="UUID格式">
-                        <button class="btn btn-sm btn-secondary" onclick="generateMachineId()">生成</button>
-                        <button class="btn btn-sm btn-primary" onclick="saveMachineId('${id}')">保存</button>
-                    </div>
-                </div>
-                <div class="detail-section">
-                    <h4>订阅信息</h4>
-                    <div class="detail-grid">
-                        <div class="detail-item"><div class="detail-label">订阅类型</div><div class="detail-value">${a.subscriptionTitle || a.subscriptionType || '-'}</div></div>
-                        <div class="detail-item"><div class="detail-label">Token到期</div><div class="detail-value">${a.expiresAt ? new Date(a.expiresAt*1000).toLocaleString() : '-'}</div></div>
-                        <div class="detail-item"><div class="detail-label">主配额</div><div class="detail-value">${a.usageCurrent?.toFixed(1) || 0} / ${a.usageLimit?.toFixed(0) || 0}</div></div>
-                        <div class="detail-item"><div class="detail-label">重置日期</div><div class="detail-value">${a.nextResetDate || '-'}</div></div>
-                        ${a.trialUsageLimit > 0 ? `
-                        <div class="detail-item"><div class="detail-label">试用配额</div><div class="detail-value">${a.trialUsageCurrent?.toFixed(1) || 0} / ${a.trialUsageLimit?.toFixed(0) || 0}</div></div>
-                        <div class="detail-item"><div class="detail-label">试用状态</div><div class="detail-value">${a.trialStatus || '-'}</div></div>
-                        <div class="detail-item"><div class="detail-label">试用到期</div><div class="detail-value">${a.trialExpiresAt ? new Date(a.trialExpiresAt*1000).toLocaleString() : '-'}</div></div>
-                        ` : ''}
-                    </div>
-                </div>
-                <div class="detail-section">
-                    <h4>统计</h4>
-                    <div class="detail-grid">
-                        <div class="detail-item"><div class="detail-label">请求数</div><div class="detail-value">${a.requestCount || 0}</div></div>
-                        <div class="detail-item"><div class="detail-label">错误数</div><div class="detail-value">${a.errorCount || 0}</div></div>
-                        <div class="detail-item"><div class="detail-label">总Tokens</div><div class="detail-value">${formatNum(a.totalTokens || 0)}</div></div>
-                        <div class="detail-item"><div class="detail-label">总Credits</div><div class="detail-value">${(a.totalCredits || 0).toFixed(2)}</div></div>
-                    </div>
-                </div>
-                <div class="detail-section">
-                    <h4>可用模型 <button class="btn btn-sm btn-secondary" onclick="loadModels('${id}')" style="margin-left:8px">加载</button></h4>
-                    <div id="modelsList" class="model-list"><p style="color:#64748b;font-size:12px">点击加载按钮获取</p></div>
-                </div>`;
+            document.getElementById('detailBody').innerHTML =
+                '<div class="detail-section"><h4>' + t('detail.basicInfo') + '</h4><div class="detail-grid">' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.email') + '</div><div class="detail-value">' + (a.email || '-') + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.userId') + '</div><div class="detail-value">' + (a.userId || '-') + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.authMethod') + '</div><div class="detail-value">' + formatAuthMethod(a.provider || a.authMethod) + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.region') + '</div><div class="detail-value">' + (a.region || 'us-east-1') + '</div></div>' +
+                '</div></div>' +
+                '<div class="detail-section"><h4>' + t('detail.machineId') + '</h4><div class="machine-id-row">' +
+                '<input type="text" id="machineIdInput" value="' + (a.machineId || '') + '" placeholder="UUID">' +
+                '<button class="btn btn-sm btn-secondary" onclick="generateMachineId()">' + t('detail.generate') + '</button>' +
+                '<button class="btn btn-sm btn-primary" onclick="saveMachineId(\'' + id + '\')">' + t('common.saved').split(' ')[0] + '</button>' +
+                '</div></div>' +
+                '<div class="detail-section"><h4>' + t('detail.subscription') + '</h4><div class="detail-grid">' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.subscriptionType') + '</div><div class="detail-value">' + (a.subscriptionTitle || a.subscriptionType || '-') + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.tokenExpiry') + '</div><div class="detail-value">' + (a.expiresAt ? new Date(a.expiresAt * 1000).toLocaleString() : '-') + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.mainQuota') + '</div><div class="detail-value">' + (a.usageCurrent?.toFixed(1) || 0) + ' / ' + (a.usageLimit?.toFixed(0) || 0) + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.resetDate') + '</div><div class="detail-value">' + (a.nextResetDate || '-') + '</div></div>' +
+                (a.trialUsageLimit > 0 ? '<div class="detail-item"><div class="detail-label">' + t('detail.trialQuota') + '</div><div class="detail-value">' + (a.trialUsageCurrent?.toFixed(1) || 0) + ' / ' + (a.trialUsageLimit?.toFixed(0) || 0) + '</div></div>' +
+                    '<div class="detail-item"><div class="detail-label">' + t('detail.trialStatus') + '</div><div class="detail-value">' + (a.trialStatus || '-') + '</div></div>' +
+                    '<div class="detail-item"><div class="detail-label">' + t('detail.trialExpiry') + '</div><div class="detail-value">' + (a.trialExpiresAt ? new Date(a.trialExpiresAt * 1000).toLocaleString() : '-') + '</div></div>' : '') +
+                '</div></div>' +
+                '<div class="detail-section"><h4>' + t('detail.statistics') + '</h4><div class="detail-grid">' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.requestCount') + '</div><div class="detail-value">' + (a.requestCount || 0) + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.errorCount') + '</div><div class="detail-value">' + (a.errorCount || 0) + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.totalTokens') + '</div><div class="detail-value">' + formatNum(a.totalTokens || 0) + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.totalCredits') + '</div><div class="detail-value">' + (a.totalCredits || 0).toFixed(2) + '</div></div>' +
+                '</div></div>' +
+                '<div class="detail-section"><h4>' + t('detail.models') + ' <button class="btn btn-sm btn-secondary" onclick="loadModels(\'' + id + '\')" style="margin-left:8px">' + t('detail.loadModels') + '</button></h4><div id="modelsList" class="model-list"></div></div>';
             document.getElementById('detailModal').classList.add('active');
         }
-
         async function loadModels(id) {
             const container = document.getElementById('modelsList');
-            container.innerHTML = '<p style="color:#64748b">加载中...</p>';
+            container.innerHTML = '<p style="color:#64748b">' + t('detail.loading') + '</p>';
             try {
                 const res = await fetch('/admin/api/accounts/' + id + '/models', { headers: { 'X-Admin-Password': password } });
                 const d = await res.json();
                 if (d.success && d.models) {
-                    container.innerHTML = d.models.map(m => `<div class="model-item"><div class="model-name">${m.modelId}</div><div class="model-info">${m.description || ''}</div></div>`).join('') || '<p style="color:#64748b">无可用模型</p>';
+                    container.innerHTML = d.models.map(m => '<div class="model-item"><div class="model-name">' + m.modelId + '</div><div class="model-info">' + (m.description || '') + '</div></div>').join('') || '<p style="color:#64748b">' + t('detail.noModels') + '</p>';
                 } else {
-                    container.innerHTML = '<p style="color:#ef4444">加载失败: ' + (d.error || '未知错误') + '</p>';
+                    container.innerHTML = '<p style="color:#ef4444">' + t('detail.loadFailed') + ': ' + (d.error || '') + '</p>';
                 }
-            } catch (e) { container.innerHTML = '<p style="color:#ef4444">加载失败</p>'; }
+            } catch (e) { container.innerHTML = '<p style="color:#ef4444">' + t('detail.loadFailed') + '</p>'; }
         }
-
         function closeDetailModal() { document.getElementById('detailModal').classList.remove('active'); }
-
         async function generateMachineId() {
             try {
                 const res = await fetch('/admin/api/generate-machine-id', { headers: { 'X-Admin-Password': password } });
                 const d = await res.json();
                 if (d.machineId) document.getElementById('machineIdInput').value = d.machineId;
-            } catch (e) { alert('生成失败'); }
+            } catch (e) { alert(t('detail.generateFailed')); }
         }
-
         async function saveMachineId(id) {
             const machineId = document.getElementById('machineIdInput').value.trim();
             if (machineId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId) && !/^[0-9a-f]{32}$/i.test(machineId)) {
-                alert('机器码格式错误'); return;
+                alert(t('detail.machineIdError')); return;
             }
             try {
                 const res = await fetch('/admin/api/accounts/' + id, {
@@ -531,19 +1520,17 @@
                     body: JSON.stringify({ machineId })
                 });
                 const d = await res.json();
-                if (d.success) { alert('已保存'); loadAccounts(); } else { alert('保存失败: ' + d.error); }
-            } catch (e) { alert('保存失败'); }
+                if (d.success) { alert(t('detail.saved')); loadAccounts(); } else { alert(t('detail.saveFailed') + ': ' + d.error); }
+            } catch (e) { alert(t('detail.saveFailed')); }
         }
-
         async function loadSettings() {
             const res = await fetch('/admin/api/settings', { headers: { 'X-Admin-Password': password } });
             const d = await res.json();
             document.getElementById('requireApiKey').checked = d.requireApiKey;
             document.getElementById('apiKeyInput').value = d.apiKey || '';
-            // 加载 thinking 配置
             loadThinkingConfig();
+            loadEndpointConfig();
         }
-
         async function loadThinkingConfig() {
             const res = await fetch('/admin/api/thinking', { headers: { 'X-Admin-Password': password } });
             const d = await res.json();
@@ -551,53 +1538,56 @@
             document.getElementById('openaiThinkingFormat').value = d.openaiFormat || 'reasoning_content';
             document.getElementById('claudeThinkingFormat').value = d.claudeFormat || 'thinking';
         }
-
         async function saveThinkingConfig() {
             const res = await fetch('/admin/api/thinking', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify({
-                    suffix: document.getElementById('thinkingSuffix').value || '-thinking',
-                    openaiFormat: document.getElementById('openaiThinkingFormat').value,
-                    claudeFormat: document.getElementById('claudeThinkingFormat').value
-                })
+                body: JSON.stringify({ suffix: document.getElementById('thinkingSuffix').value || '-thinking', openaiFormat: document.getElementById('openaiThinkingFormat').value, claudeFormat: document.getElementById('claudeThinkingFormat').value })
             });
             const d = await res.json();
-            if (d.success) { alert('Thinking 设置已保存'); } else { alert('保存失败: ' + d.error); }
+            if (d.success) { alert(t('settings.thinkingSaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
         }
-
+        async function loadEndpointConfig() {
+            const res = await fetch('/admin/api/endpoint', { headers: { 'X-Admin-Password': password } });
+            const d = await res.json();
+            document.getElementById('preferredEndpoint').value = d.preferredEndpoint || 'auto';
+        }
+        async function saveEndpointConfig() {
+            const res = await fetch('/admin/api/endpoint', {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ preferredEndpoint: document.getElementById('preferredEndpoint').value })
+            });
+            const d = await res.json();
+            if (d.success) { alert(t('settings.endpointSaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
+        }
         async function saveSettings() {
             await fetch('/admin/api/settings', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
                 body: JSON.stringify({ requireApiKey: document.getElementById('requireApiKey').checked, apiKey: document.getElementById('apiKeyInput').value })
             });
-            alert('已保存');
+            alert(t('common.saved'));
         }
-
         async function changePassword() {
             const newPwd = document.getElementById('newPassword').value;
-            if (!newPwd) return alert('请输入新密码');
+            if (!newPwd) return alert(t('settings.passwordRequired'));
             await fetch('/admin/api/settings', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
                 body: JSON.stringify({ password: newPwd })
             });
             password = newPwd;
             localStorage.setItem('admin_password', password);
-            alert('密码已修改');
+            alert(t('settings.passwordChanged'));
             document.getElementById('newPassword').value = '';
         }
-
         async function resetStats() {
-            if (!confirm('确定重置统计？')) return;
+            if (!confirm(t('settings.confirmReset'))) return;
             await fetch('/admin/api/stats/reset', { method: 'POST', headers: { 'X-Admin-Password': password } });
             loadStats();
         }
-
         function switchTab(tab) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+            document.querySelectorAll('.tab').forEach(tabEl => tabEl.classList.toggle('active', tabEl.dataset.tab === tab));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
             document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
         }
-
         async function toggleAccount(id, enabled) {
             await fetch('/admin/api/accounts/' + id, {
                 method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
@@ -605,176 +1595,89 @@
             });
             loadAccounts();
         }
-
         async function deleteAccount(id) {
-            if (!confirm('确定删除？')) return;
+            if (!confirm(t('accounts.confirmDelete'))) return;
             await fetch('/admin/api/accounts/' + id, { method: 'DELETE', headers: { 'X-Admin-Password': password } });
             loadAccounts(); loadStats();
         }
-
         function formatNum(n) {
-            if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
-            if (n >= 1000) return (n/1000).toFixed(1) + 'K';
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
             return n.toString();
         }
-
         function copy(id) {
             navigator.clipboard.writeText(document.getElementById(id).textContent);
-            alert('已复制');
+            alert(t('common.copied'));
         }
 
         function showModal(type) {
             const modal = document.getElementById('addModal');
             const title = document.getElementById('modalTitle');
             const body = document.getElementById('modalBody');
-            
             if (type === 'add') {
-                title.textContent = '添加账号';
-                body.innerHTML = `
-                    <div style="display:flex;flex-direction:column;gap:12px">
-                        <div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal('builderid')" onmouseover="this.style.borderColor='#7c3aed'" onmouseout="this.style.borderColor='transparent'">
-                            <div style="font-weight:600;margin-bottom:6px">AWS Builder ID</div>
-                            <div style="font-size:13px;color:#64748b">通过 AWS Builder ID 授权登录添加个人账号</div>
-                        </div>
-                        <div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal('iam')" onmouseover="this.style.borderColor='#7c3aed'" onmouseout="this.style.borderColor='transparent'">
-                            <div style="font-weight:600;margin-bottom:6px">IAM Identity Center (企业 SSO) 登录</div>
-                            <div style="font-size:13px;color:#64748b">通过 IAM Identity Center (企业 SSO) 授权添加企业账号</div>
-                        </div>
-                        <div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal('sso')" onmouseover="this.style.borderColor='#7c3aed'" onmouseout="this.style.borderColor='transparent'">
-                            <div style="font-weight:600;margin-bottom:6px">SSO Token</div>
-                            <div style="font-size:13px;color:#64748b">通过浏览器 x-amz-sso_authn Token 添加账号</div>
-                        </div>
-                        <div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal('local')" onmouseover="this.style.borderColor='#7c3aed'" onmouseout="this.style.borderColor='transparent'">
-                            <div style="font-weight:600;margin-bottom:6px">Kiro 本地缓存</div>
-                            <div style="font-size:13px;color:#64748b">通过 Kiro IDE 本地缓存文件添加账号</div>
-                        </div>
-                        <div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal('credentials')" onmouseover="this.style.borderColor='#7c3aed'" onmouseout="this.style.borderColor='transparent'">
-                            <div style="font-weight:600;margin-bottom:6px">凭证 JSON</div>
-                            <div style="font-size:13px;color:#64748b">通过 Kiro Account Manager 导出的凭证添加账号</div>
-                        </div>
-                    </div>
-                    <div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">取消</button></div>`;
+                title.textContent = t('modal.addAccount');
+                body.innerHTML =
+                    '<div style="display:flex;flex-direction:column;gap:12px">' +
+                    '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'builderid\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.builderIdTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.builderIdDesc') + '</div></div>' +
+                    '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'iam\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.iamTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.iamDesc') + '</div></div>' +
+                    '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'sso\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.ssoTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.ssoDesc') + '</div></div>' +
+                    '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'local\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.localTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.localDesc') + '</div></div>' +
+                    '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'credentials\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.credentialsTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.credentialsDesc') + '</div></div>' +
+                    '</div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">' + t('common.cancel') + '</button></div>';
             } else if (type === 'builderid') {
-                title.textContent = 'AWS Builder ID';
-                body.innerHTML = `
-                    <p style="font-size:13px;color:#64748b;margin-bottom:16px">通过 AWS Builder ID 授权登录添加个人账号</p>
-                    <div id="builderIdStep1">
-                        <div class="form-group">
-                            <label>Region</label>
-                            <input type="text" id="builderIdRegion" value="us-east-1">
-                        </div>
-                        <div class="modal-footer"><button class="btn btn-secondary" onclick="showModal('add')">返回</button><button class="btn btn-primary" onclick="startBuilderIdLogin()">开始登录</button></div>
-                    </div>
-                    <div id="builderIdStep2" class="hidden">
-                        <div class="message" style="background:#ede9fe;color:#7c3aed;text-align:center">
-                            <p style="font-size:18px;font-weight:600;margin-bottom:8px" id="builderIdUserCode"></p>
-                            <p style="font-size:12px">请在浏览器中输入上方验证码</p>
-                        </div>
-                        <div class="form-group" style="margin-top:16px">
-                            <label>验证链接</label>
-                            <div class="endpoint" style="margin-bottom:0"><span id="builderIdVerifyUrl" style="font-size:12px"></span></div>
-                            <div style="display:flex;gap:8px;margin-top:8px">
-                                <button class="btn btn-sm btn-secondary" style="flex:1" onclick="window.open(document.getElementById('builderIdVerifyUrl').textContent,'_blank')">打开</button>
-                                <button class="btn btn-sm btn-secondary" style="flex:1" onclick="navigator.clipboard.writeText(document.getElementById('builderIdVerifyUrl').textContent);alert('已复制')">复制</button>
-                            </div>
-                        </div>
-                        <p id="builderIdStatus" style="color:#64748b;margin:16px 0;font-size:13px;text-align:center">等待授权中...</p>
-                        <div class="modal-footer"><button class="btn btn-secondary" onclick="cancelBuilderIdLogin()">取消</button></div>
-                    </div>`;
+                title.textContent = t('modal.builderIdTitle');
+                body.innerHTML =
+                    '<p style="font-size:13px;color:#64748b;margin-bottom:16px">' + t('modal.builderIdDesc') + '</p>' +
+                    '<div id="builderIdStep1"><div class="form-group"><label>Region</label><input type="text" id="builderIdRegion" value="us-east-1"></div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="startBuilderIdLogin()">' + t('builderid.startLogin') + '</button></div></div>' +
+                    '<div id="builderIdStep2" class="hidden">' +
+                    '<div class="message" style="background:#ede9fe;color:#7c3aed;text-align:center"><p style="font-size:18px;font-weight:600;margin-bottom:8px" id="builderIdUserCode"></p><p style="font-size:12px">' + t('builderid.verifyCode') + '</p></div>' +
+                    '<div class="form-group" style="margin-top:16px"><label>' + t('builderid.verifyUrl') + '</label><div class="endpoint" style="margin-bottom:0"><span id="builderIdVerifyUrl" style="font-size:12px"></span></div>' +
+                    '<div style="display:flex;gap:8px;margin-top:8px"><button class="btn btn-sm btn-secondary" style="flex:1" onclick="window.open(document.getElementById(\'builderIdVerifyUrl\').textContent,\'_blank\')">' + t('builderid.open') + '</button><button class="btn btn-sm btn-secondary" style="flex:1" onclick="navigator.clipboard.writeText(document.getElementById(\'builderIdVerifyUrl\').textContent);alert(\'' + t('common.copied') + '\')">' + t('common.copy') + '</button></div></div>' +
+                    '<p id="builderIdStatus" style="color:#64748b;margin:16px 0;font-size:13px;text-align:center">' + t('builderid.waiting') + '</p>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="cancelBuilderIdLogin()">' + t('common.cancel') + '</button></div>' +
+                    '</div>';
             } else if (type === 'local') {
-                title.textContent = 'Kiro 本地缓存';
-                body.innerHTML = `
-                    <p style="font-size:13px;color:#64748b;margin-bottom:16px">通过 Kiro IDE 本地缓存文件添加账号</p>
-                    <div style="font-size:13px;color:#64748b;margin-bottom:16px;line-height:1.6">
-                        <p style="margin-bottom:8px"><b>文件位置</b></p>
-                        <p style="margin-bottom:4px">Windows: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:11px">%USERPROFILE%\\.aws\\sso\\cache\\</code></p>
-                        <p>macOS/Linux: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:11px">~/.aws/sso/cache/</code></p>
-                    </div>
-                    <div class="form-group">
-                        <label>登录渠道</label>
-                        <select id="localProvider" onchange="updateLocalFields()">
-                            <option value="BuilderId">AWS Builder ID</option>
-                            <option value="Enterprise">IAM Identity Center (企业 SSO)</option>
-                            <option value="Google">Google</option>
-                            <option value="Github">GitHub</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>kiro-auth-token.json <span style="font-weight:normal;color:#64748b;font-size:12px">*必填</span></label>
-                        <div style="display:flex;gap:8px;align-items:stretch">
-                            <textarea id="localTokenJson" placeholder='粘贴文件内容或上传文件' style="flex:1;min-height:80px;font-size:12px"></textarea>
-                            <label class="btn btn-secondary" style="display:flex;align-items:center;cursor:pointer">
-                                上传<input type="file" accept=".json" style="display:none" onchange="loadLocalFile(this,'localTokenJson')">
-                            </label>
-                        </div>
-                    </div>
-                    <div id="localClientGroup" class="form-group">
-                        <label>{hash}.json <span style="font-weight:normal;color:#64748b;font-size:12px">*IdC 登录必填</span></label>
-                        <div style="display:flex;gap:8px;align-items:stretch">
-                            <textarea id="localClientJson" placeholder='粘贴文件内容或上传文件' style="flex:1;min-height:80px;font-size:12px"></textarea>
-                            <label class="btn btn-secondary" style="display:flex;align-items:center;cursor:pointer">
-                                上传<input type="file" accept=".json" style="display:none" onchange="loadLocalFile(this,'localClientJson')">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="modal-footer"><button class="btn btn-secondary" onclick="showModal('add')">返回</button><button class="btn btn-primary" onclick="importLocalKiro()">添加</button></div>`;
+                title.textContent = t('modal.localTitle');
+                body.innerHTML =
+                    '<p style="font-size:13px;color:#64748b;margin-bottom:16px">' + t('modal.localDesc') + '</p>' +
+                    '<div style="font-size:13px;color:#64748b;margin-bottom:16px;line-height:1.6"><p style="margin-bottom:8px"><b>' + t('local.fileLocation') + '</b></p><p style="margin-bottom:4px">Windows: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:11px">%USERPROFILE%\\.aws\\sso\\cache\\</code></p><p>macOS/Linux: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:11px">~/.aws/sso/cache/</code></p></div>' +
+                    '<div class="form-group"><label>' + t('local.loginChannel') + '</label><select id="localProvider" onchange="updateLocalFields()"><option value="BuilderId">AWS Builder ID</option><option value="Enterprise">IAM Identity Center (Enterprise SSO)</option><option value="Google">Google</option><option value="Github">GitHub</option></select></div>' +
+                    '<div class="form-group"><label>' + t('local.tokenFile') + ' <span style="font-weight:normal;color:#64748b;font-size:12px">' + t('local.tokenRequired') + '</span></label><div style="display:flex;gap:8px;align-items:stretch"><textarea id="localTokenJson" placeholder="' + t('local.pasteOrUpload') + '" style="flex:1;min-height:80px;font-size:12px"></textarea><label class="btn btn-secondary" style="display:flex;align-items:center;cursor:pointer">' + t('local.upload') + '<input type="file" accept=".json" style="display:none" onchange="loadLocalFile(this,\'localTokenJson\')"></label></div></div>' +
+                    '<div id="localClientGroup" class="form-group"><label>' + t('local.clientFile') + ' <span style="font-weight:normal;color:#64748b;font-size:12px">' + t('local.clientRequired') + '</span></label><div style="display:flex;gap:8px;align-items:stretch"><textarea id="localClientJson" placeholder="' + t('local.pasteOrUpload') + '" style="flex:1;min-height:80px;font-size:12px"></textarea><label class="btn btn-secondary" style="display:flex;align-items:center;cursor:pointer">' + t('local.upload') + '<input type="file" accept=".json" style="display:none" onchange="loadLocalFile(this,\'localClientJson\')"></label></div></div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importLocalKiro()">' + t('common.add') + '</button></div>';
             } else if (type === 'credentials') {
-                title.textContent = '凭证 JSON';
-                body.innerHTML = `
-                    <p style="font-size:13px;color:#64748b;margin-bottom:16px">通过 Kiro Account Manager 导出的凭证添加账号</p>
-                    <div class="form-group"><label>凭证 JSON</label><textarea id="credJson" placeholder='{"refreshToken":"...","clientId":"...","clientSecret":"..."}'></textarea></div>
-                    <div class="form-group">
-                        <label>认证方式 <span style="font-weight:normal;color:#64748b;font-size:12px">*影响 Token 刷新方式</span></label>
-                        <select id="credAuth">
-                            <option value="social">Social (AWS Builder ID / Google / GitHub)</option>
-                            <option value="idc">IAM Identity Center (企业 SSO)</option>
-                        </select>
-                    </div>
-                    <div class="modal-footer"><button class="btn btn-secondary" onclick="showModal('add')">返回</button><button class="btn btn-primary" onclick="importCredentials()">添加</button></div>`;
+                title.textContent = t('modal.credentialsTitle');
+                body.innerHTML =
+                    '<p style="font-size:13px;color:#64748b;margin-bottom:16px">' + t('modal.credentialsDesc') + '</p>' +
+                    '<div style="font-size:12px;color:#64748b;margin-bottom:12px;line-height:1.5">' + t('credentials.batchHint') + '</div>' +
+                    '<div class="form-group"><label>' + t('credentials.label') + '</label><textarea id="credJson" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderId"},{"refreshToken":"yyy","clientId":"...","clientSecret":"...","provider":"Enterprise"}]\' style="min-height:120px"></textarea></div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importCredentials()">' + t('common.add') + '</button></div>';
             } else if (type === 'sso') {
-                title.textContent = 'SSO Token';
-                body.innerHTML = `
-                    <div style="font-size:13px;color:#64748b;margin-bottom:16px;line-height:1.6">
-                        <p style="margin-bottom:8px"><b>如何获取 Token?</b></p>
-                        <ol style="margin:0;padding-left:20px">
-                            <li>在浏览器中访问并登录 <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px">view.awsapps.com/start</code></li>
-                            <li>按 F12 打开开发者工具 → Application → Cookies</li>
-                            <li>找到并复制 <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px">x-amz-sso_authn</code> 的值</li>
-                        </ol>
-                    </div>
-                    <div class="form-group"><label>x-amz-sso_authn <span style="font-weight:normal;color:#64748b;font-size:12px">*支持批量导入，每行一个 Token</span></label><textarea id="ssoToken" placeholder="粘贴 x-amz-sso_authn 值" style="min-height:120px"></textarea></div>
-                    <div class="form-group"><label>Region</label><input type="text" id="ssoRegion" value="us-east-1"></div>
-                    <div class="modal-footer"><button class="btn btn-secondary" onclick="showModal('add')">返回</button><button class="btn btn-primary" onclick="importSsoToken()">添加</button></div>`;
+                title.textContent = t('modal.ssoTitle');
+                body.innerHTML =
+                    '<div style="font-size:13px;color:#64748b;margin-bottom:16px;line-height:1.6"><p style="margin-bottom:8px"><b>' + t('sso.howToGet') + '</b></p><ol style="margin:0;padding-left:20px"><li>' + t('sso.step1') + ' <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px">view.awsapps.com/start</code></li><li>' + t('sso.step2') + '</li><li>' + t('sso.step3') + ' <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px">x-amz-sso_authn</code></li></ol></div>' +
+                    '<div class="form-group"><label>' + t('sso.tokenLabel') + ' <span style="font-weight:normal;color:#64748b;font-size:12px">' + t('sso.tokenHint') + '</span></label><textarea id="ssoToken" placeholder="' + t('sso.tokenPlaceholder') + '" style="min-height:120px"></textarea></div>' +
+                    '<div class="form-group"><label>Region</label><input type="text" id="ssoRegion" value="us-east-1"></div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importSsoToken()">' + t('common.add') + '</button></div>';
             } else if (type === 'iam') {
-                title.textContent = 'IAM Identity Center (企业 SSO) 登录';
-                body.innerHTML = `
-                    <p style="font-size:13px;color:#64748b;margin-bottom:16px">通过 IAM Identity Center (企业 SSO) 授权登录添加账号</p>
-                    <div class="form-group"><label>Start URL</label><input type="text" id="iamStartUrl" placeholder="https://xxx.awsapps.com/start"></div>
-                    <div class="form-group"><label>Region</label><input type="text" id="iamRegion" value="us-east-1"></div>
-                    <div id="iamStep2" class="hidden">
-                        <div class="form-group">
-                            <label>登录链接</label>
-                            <div class="endpoint" style="margin-bottom:0"><span id="iamAuthUrl" style="font-size:11px"></span></div>
-                            <div style="display:flex;gap:8px;margin-top:8px">
-                                <button class="btn btn-sm btn-secondary" style="flex:1" onclick="window.open(document.getElementById('iamAuthUrl').textContent,'_blank')">打开</button>
-                                <button class="btn btn-sm btn-secondary" style="flex:1" onclick="navigator.clipboard.writeText(document.getElementById('iamAuthUrl').textContent);alert('已复制')">复制</button>
-                            </div>
-                        </div>
-                        <p style="color:#16a34a;margin:12px 0;font-size:14px">请在浏览器中完成登录，然后粘贴回调 URL</p>
-                        <div class="form-group"><label>回调 URL</label><input type="text" id="iamCallback" placeholder="http://127.0.0.1:xxx/?code=..."></div>
-                    </div>
-                    <div class="modal-footer"><button class="btn btn-secondary" onclick="showModal('add')">返回</button><button class="btn btn-primary" id="iamBtn" onclick="startIamSso()">开始登录</button></div>`;
+                title.textContent = t('modal.iamTitle');
+                body.innerHTML =
+                    '<p style="font-size:13px;color:#64748b;margin-bottom:16px">' + t('modal.iamDesc') + '</p>' +
+                    '<div class="form-group"><label>' + t('iam.startUrl') + '</label><input type="text" id="iamStartUrl" placeholder="https://xxx.awsapps.com/start"></div>' +
+                    '<div class="form-group"><label>Region</label><input type="text" id="iamRegion" value="us-east-1"></div>' +
+                    '<div id="iamStep2" class="hidden"><div class="form-group"><label>' + t('iam.loginUrl') + '</label><div class="endpoint" style="margin-bottom:0"><span id="iamAuthUrl" style="font-size:11px"></span></div><div style="display:flex;gap:8px;margin-top:8px"><button class="btn btn-sm btn-secondary" style="flex:1" onclick="window.open(document.getElementById(\'iamAuthUrl\').textContent,\'_blank\')">' + t('builderid.open') + '</button><button class="btn btn-sm btn-secondary" style="flex:1" onclick="navigator.clipboard.writeText(document.getElementById(\'iamAuthUrl\').textContent);alert(\'' + t('common.copied') + '\')">' + t('common.copy') + '</button></div></div><p style="color:#16a34a;margin:12px 0;font-size:14px">' + t('iam.completeLogin') + '</p><div class="form-group"><label>' + t('iam.callbackUrl') + '</label><input type="text" id="iamCallback" placeholder="http://127.0.0.1:xxx/?code=..."></div></div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" id="iamBtn" onclick="startIamSso()">' + t('builderid.startLogin') + '</button></div>';
             }
             modal.classList.add('active');
         }
-
-        function closeModal() { 
-            document.getElementById('addModal').classList.remove('active'); 
-            iamSession = ''; 
+        function closeModal() {
+            document.getElementById('addModal').classList.remove('active');
+            iamSession = '';
             if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
             builderIdSession = '';
         }
-
         function loadLocalFile(input, targetId) {
             const file = input.files[0];
             if (!file) return;
@@ -782,97 +1685,70 @@
             reader.onload = e => { document.getElementById(targetId).value = e.target.result; };
             reader.readAsText(file);
         }
-
         function updateLocalFields() {
             const provider = document.getElementById('localProvider').value;
             const clientGroup = document.getElementById('localClientGroup');
-            if (provider === 'Google' || provider === 'Github') {
-                clientGroup.style.display = 'none';
-            } else {
-                clientGroup.style.display = 'block';
-            }
+            clientGroup.style.display = (provider === 'Google' || provider === 'Github') ? 'none' : 'block';
         }
-
         async function importLocalKiro() {
             const provider = document.getElementById('localProvider').value;
             const tokenJson = document.getElementById('localTokenJson').value.trim();
             const clientJson = document.getElementById('localClientJson').value.trim();
             const isSocial = provider === 'Google' || provider === 'Github';
-
-            if (!tokenJson) { alert('请提供 kiro-auth-token.json 内容'); return; }
-
+            if (!tokenJson) { alert(t('local.tokenMissing')); return; }
             let tokenData, clientData;
-            try {
-                tokenData = JSON.parse(tokenJson);
-            } catch { alert('kiro-auth-token.json 格式错误'); return; }
-
-            if (!tokenData.refreshToken) { alert('缺少 refreshToken'); return; }
-
+            try { tokenData = JSON.parse(tokenJson); } catch { alert(t('local.tokenInvalid')); return; }
+            if (!tokenData.refreshToken) { alert(t('local.refreshTokenMissing')); return; }
             if (!isSocial) {
-                if (!clientJson) { alert('IdC 登录需要提供 {hash}.json 内容'); return; }
-                try {
-                    clientData = JSON.parse(clientJson);
-                } catch { alert('{hash}.json 格式错误'); return; }
-                if (!clientData.clientId || !clientData.clientSecret) { alert('缺少 clientId 或 clientSecret'); return; }
+                if (!clientJson) { alert(t('local.clientMissing')); return; }
+                try { clientData = JSON.parse(clientJson); } catch { alert(t('local.clientInvalid')); return; }
+                if (!clientData.clientId || !clientData.clientSecret) { alert(t('local.clientSecretMissing')); return; }
             }
-
-            const payload = {
-                refreshToken: tokenData.refreshToken,
-                accessToken: tokenData.accessToken || '',
-                clientId: clientData?.clientId || '',
-                clientSecret: clientData?.clientSecret || '',
-                authMethod: isSocial ? 'social' : 'idc',
-                provider: provider
-            };
-
-            const res = await fetch('/admin/api/auth/credentials', {
-                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify(payload)
-            });
+            const payload = { refreshToken: tokenData.refreshToken, accessToken: tokenData.accessToken || '', clientId: clientData?.clientId || '', clientSecret: clientData?.clientSecret || '', authMethod: isSocial ? 'social' : 'idc', provider: provider };
+            const res = await fetch('/admin/api/auth/credentials', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify(payload) });
             const d = await res.json();
-            if (d.success) { closeModal(); loadAccounts(); loadStats(); alert('导入成功: ' + (d.account?.email || d.account?.id)); }
-            else alert('失败: ' + d.error);
+            if (d.success) { closeModal(); loadAccounts(); loadStats(); alert(t('local.importSuccess') + ': ' + (d.account?.email || d.account?.id)); }
+            else alert(t('common.failed') + ': ' + d.error);
         }
-
         async function importCredentials() {
             try {
-                const json = JSON.parse(document.getElementById('credJson').value);
-                json.authMethod = document.getElementById('credAuth').value;
-                const res = await fetch('/admin/api/auth/credentials', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                    body: JSON.stringify(json)
-                });
-                const d = await res.json();
-                if (d.success) { closeModal(); loadAccounts(); loadStats(); alert('导入成功: ' + (d.account?.email || d.account?.id)); }
-                else alert('失败: ' + d.error);
-            } catch (e) { alert('JSON 格式错误'); }
+                const json = JSON.parse(document.getElementById('credJson').value.trim());
+                const items = Array.isArray(json) ? json : [json];
+                let success = 0, failed = 0, errors = [];
+                for (const item of items) {
+                    if (!item.refreshToken) { failed++; errors.push('missing refreshToken'); continue; }
+                    const provider = (item.provider || 'BuilderId').toLowerCase();
+                    const isSocial = provider === 'google' || provider === 'github' || provider === 'builderid';
+                    const payload = { refreshToken: item.refreshToken, clientId: item.clientId || '', clientSecret: item.clientSecret || '', authMethod: isSocial ? 'social' : 'idc', provider: item.provider || 'BuilderId' };
+                    try {
+                        const res = await fetch('/admin/api/auth/credentials', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify(payload) });
+                        const d = await res.json();
+                        if (d.success) success++; else { failed++; errors.push(d.error || 'unknown'); }
+                    } catch { failed++; errors.push('request failed'); }
+                }
+                closeModal(); loadAccounts(); loadStats();
+                let msg = t('sso.importSuccess', success);
+                if (failed > 0) msg += t('sso.importPartial', failed);
+                alert(msg);
+            } catch (e) { alert(t('credentials.jsonError')); }
         }
-
         async function importSsoToken() {
-            const res = await fetch('/admin/api/auth/sso-token', {
-                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify({ bearerToken: document.getElementById('ssoToken').value, region: document.getElementById('ssoRegion').value })
-            });
+            const res = await fetch('/admin/api/auth/sso-token', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify({ bearerToken: document.getElementById('ssoToken').value, region: document.getElementById('ssoRegion').value }) });
             const d = await res.json();
             if (d.success) {
                 closeModal(); loadAccounts(); loadStats();
                 const count = d.accounts?.length || 0;
                 const errCount = d.errors?.length || 0;
-                let msg = '成功添加 ' + count + ' 个账号';
-                if (errCount > 0) msg += '，' + errCount + ' 个失败';
+                let msg = t('sso.importSuccess', count);
+                if (errCount > 0) msg += t('sso.importPartial', errCount);
                 alert(msg);
-            } else alert('失败: ' + d.error);
+            } else alert(t('common.failed') + ': ' + d.error);
         }
-
         let builderIdSession = '';
         let builderIdPollTimer = null;
-        
         async function startBuilderIdLogin() {
             const region = document.getElementById('builderIdRegion').value || 'us-east-1';
-            const res = await fetch('/admin/api/auth/builderid/start', {
-                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify({ region })
-            });
+            const res = await fetch('/admin/api/auth/builderid/start', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify({ region }) });
             const d = await res.json();
             if (d.sessionId) {
                 builderIdSession = d.sessionId;
@@ -880,66 +1756,50 @@
                 document.getElementById('builderIdVerifyUrl').textContent = d.verificationUri;
                 document.getElementById('builderIdStep1').classList.add('hidden');
                 document.getElementById('builderIdStep2').classList.remove('hidden');
-                // 开始轮询
                 pollBuilderIdAuth(d.interval || 5);
-            } else alert('失败: ' + d.error);
+            } else alert(t('common.failed') + ': ' + d.error);
         }
-
         function pollBuilderIdAuth(interval) {
             builderIdPollTimer = setTimeout(async () => {
-                const res = await fetch('/admin/api/auth/builderid/poll', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                    body: JSON.stringify({ sessionId: builderIdSession })
-                });
+                const res = await fetch('/admin/api/auth/builderid/poll', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify({ sessionId: builderIdSession }) });
                 const d = await res.json();
                 if (d.completed) {
                     closeModal(); loadAccounts(); loadStats();
-                    alert('登录成功: ' + (d.account?.email || d.account?.id));
+                    alert(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
                 } else if (d.success && !d.completed) {
-                    document.getElementById('builderIdStatus').textContent = '等待授权中...';
+                    document.getElementById('builderIdStatus').textContent = t('builderid.waiting');
                     pollBuilderIdAuth(d.interval || interval);
                 } else {
-                    alert('失败: ' + d.error);
+                    alert(t('common.failed') + ': ' + d.error);
                     cancelBuilderIdLogin();
                 }
             }, interval * 1000);
         }
-
         function cancelBuilderIdLogin() {
-            if (builderIdPollTimer) {
-                clearTimeout(builderIdPollTimer);
-                builderIdPollTimer = null;
-            }
+            if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
             builderIdSession = '';
             showModal('add');
         }
-
         let iamSession = '';
         async function startIamSso() {
             if (iamSession) {
-                const res = await fetch('/admin/api/auth/iam-sso/complete', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                    body: JSON.stringify({ sessionId: iamSession, callbackUrl: document.getElementById('iamCallback').value })
-                });
+                const res = await fetch('/admin/api/auth/iam-sso/complete', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify({ sessionId: iamSession, callbackUrl: document.getElementById('iamCallback').value }) });
                 const d = await res.json();
-                if (d.success) { closeModal(); loadAccounts(); loadStats(); alert('登录成功: ' + (d.account?.email || d.account?.id)); }
-                else alert('失败: ' + d.error);
+                if (d.success) { closeModal(); loadAccounts(); loadStats(); alert(t('builderid.success') + ': ' + (d.account?.email || d.account?.id)); }
+                else alert(t('common.failed') + ': ' + d.error);
             } else {
-                const res = await fetch('/admin/api/auth/iam-sso/start', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                    body: JSON.stringify({ startUrl: document.getElementById('iamStartUrl').value, region: document.getElementById('iamRegion').value })
-                });
+                const res = await fetch('/admin/api/auth/iam-sso/start', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify({ startUrl: document.getElementById('iamStartUrl').value, region: document.getElementById('iamRegion').value }) });
                 const d = await res.json();
                 if (d.authorizeUrl) {
                     iamSession = d.sessionId;
                     document.getElementById('iamAuthUrl').textContent = d.authorizeUrl;
                     document.getElementById('iamStep2').classList.remove('hidden');
-                    document.getElementById('iamBtn').textContent = '完成登录';
-                } else alert('失败: ' + d.error);
+                    document.getElementById('iamBtn').textContent = t('iam.complete');
+                } else alert(t('common.failed') + ': ' + d.error);
             }
         }
-
         setInterval(() => { if (!document.getElementById('mainPage').classList.contains('hidden')) loadStats(); }, 10000);
     </script>
 </body>
+
 </html>

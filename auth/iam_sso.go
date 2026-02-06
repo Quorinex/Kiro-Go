@@ -170,8 +170,7 @@ func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clien
 	req, _ := http.NewRequest("POST", oidcBase+"/client/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", "", err
 	}
@@ -208,8 +207,7 @@ func exchangeToken(oidcBase, clientID, clientSecret, code, codeVerifier, redirec
 	req, _ := http.NewRequest("POST", oidcBase+"/token", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", "", 0, err
 	}

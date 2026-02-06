@@ -9,6 +9,8 @@ import (
 	"kiro-api-proxy/pool"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,30 +19,35 @@ import (
 // Handler HTTP 处理器
 type Handler struct {
 	pool *pool.AccountPool
-	// 运行时统计
-	totalRequests   int
-	successRequests int
-	failedRequests  int
-	totalTokens     int
-	totalCredits    float64
+	// 运行时统计 (使用原子操作)
+	totalRequests   int64
+	successRequests int64
+	failedRequests  int64
+	totalTokens     int64
+	totalCredits    float64 // float64 需要用锁保护
+	creditsMu       sync.RWMutex
 	startTime       int64
 	stopRefresh     chan struct{}
+	stopStatsSaver  chan struct{}
 }
 
 func NewHandler() *Handler {
 	totalReq, successReq, failedReq, totalTokens, totalCredits := config.GetStats()
 	h := &Handler{
 		pool:            pool.GetPool(),
-		totalRequests:   totalReq,
-		successRequests: successReq,
-		failedRequests:  failedReq,
-		totalTokens:     totalTokens,
+		totalRequests:   int64(totalReq),
+		successRequests: int64(successReq),
+		failedRequests:  int64(failedReq),
+		totalTokens:     int64(totalTokens),
 		totalCredits:    totalCredits,
 		startTime:       time.Now().Unix(),
 		stopRefresh:     make(chan struct{}),
+		stopStatsSaver:  make(chan struct{}),
 	}
 	// 启动后台刷新
 	go h.backgroundRefresh()
+	// 启动后台统计保存 (每30秒保存一次)
+	go h.backgroundStatsSaver()
 	return h
 }
 
@@ -106,7 +113,7 @@ func (h *Handler) validateApiKey(r *http.Request) bool {
 	if !config.IsApiKeyRequired() {
 		return true
 	}
-	
+
 	expectedKey := config.GetApiKey()
 	if expectedKey == "" {
 		return true
@@ -193,11 +200,11 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":          "ok",
 		"accounts":        h.pool.Count(),
 		"available":       h.pool.AvailableCount(),
-		"totalRequests":   h.totalRequests,
-		"successRequests": h.successRequests,
-		"failedRequests":  h.failedRequests,
-		"totalTokens":     h.totalTokens,
-		"totalCredits":    h.totalCredits,
+		"totalRequests":   atomic.LoadInt64(&h.totalRequests),
+		"successRequests": atomic.LoadInt64(&h.successRequests),
+		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
+		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
+		"totalCredits":    h.getCredits(),
 		"uptime":          time.Now().Unix() - h.startTime,
 	})
 }
@@ -376,7 +383,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 			})
 			contentStarted = true
 		}
-		
+
 		if thinkingState == 0 {
 			// 普通内容
 			if text == "" {
@@ -426,7 +433,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 
 	// 处理文本，解析 <thinking> 标签
 	var thinkingStarted bool
-	
+
 	processClaudeText := func(text string, isThinking bool, forceFlush bool) {
 		// 如果是 reasoningContentEvent，直接输出
 		if isThinking {
@@ -642,20 +649,58 @@ func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event str
 	flusher.Flush()
 }
 
-// 统计记录
-func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) {
-	h.totalRequests++
-	h.successRequests++
-	h.totalTokens += inputTokens + outputTokens
+// backgroundStatsSaver 后台定时保存统计数据
+func (h *Handler) backgroundStatsSaver() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			h.saveStats()
+		case <-h.stopStatsSaver:
+			h.saveStats() // 退出前保存一次
+			return
+		}
+	}
+}
+
+// saveStats 保存统计到配置文件
+func (h *Handler) saveStats() {
+	config.UpdateStats(
+		int(atomic.LoadInt64(&h.totalRequests)),
+		int(atomic.LoadInt64(&h.successRequests)),
+		int(atomic.LoadInt64(&h.failedRequests)),
+		int(atomic.LoadInt64(&h.totalTokens)),
+		h.getCredits(),
+	)
+}
+
+// getCredits 线程安全获取 credits
+func (h *Handler) getCredits() float64 {
+	h.creditsMu.RLock()
+	defer h.creditsMu.RUnlock()
+	return h.totalCredits
+}
+
+// addCredits 线程安全增加 credits
+func (h *Handler) addCredits(credits float64) {
+	h.creditsMu.Lock()
 	h.totalCredits += credits
-	// 异步保存
-	go config.UpdateStats(h.totalRequests, h.successRequests, h.failedRequests, h.totalTokens, h.totalCredits)
+	h.creditsMu.Unlock()
+}
+
+// 统计记录 (使用原子操作)
+func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) {
+	atomic.AddInt64(&h.totalRequests, 1)
+	atomic.AddInt64(&h.successRequests, 1)
+	atomic.AddInt64(&h.totalTokens, int64(inputTokens+outputTokens))
+	h.addCredits(credits)
 }
 
 func (h *Handler) recordFailure() {
-	h.totalRequests++
-	h.failedRequests++
-	go config.UpdateStats(h.totalRequests, h.successRequests, h.failedRequests, h.totalTokens, h.totalCredits)
+	atomic.AddInt64(&h.totalRequests, 1)
+	atomic.AddInt64(&h.failedRequests, 1)
 }
 
 // handleClaudeNonStream Claude 非流式响应
@@ -807,9 +852,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		if content == "" && thinkingState == 2 {
 			return
 		}
-		
+
 		var chunk map[string]interface{}
-		
+
 		if thinkingState > 0 {
 			// thinking 内容
 			switch thinkingFormat {
@@ -903,7 +948,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	// 处理文本，解析 <thinking> 标签
 	// thinkingStarted 用于跟踪是否已发送开始标签
 	var thinkingStarted bool
-	
+
 	processText := func(text string, isThinking bool, forceFlush bool) {
 		// 如果是 reasoningContentEvent，直接输出
 		if isThinking {
@@ -1233,6 +1278,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetThinkingConfig(w, r)
 	case path == "/thinking" && r.Method == "POST":
 		h.apiUpdateThinkingConfig(w, r)
+	case path == "/endpoint" && r.Method == "GET":
+		h.apiGetEndpointConfig(w, r)
+	case path == "/endpoint" && r.Method == "POST":
+		h.apiUpdateEndpointConfig(w, r)
 	default:
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})
@@ -1242,19 +1291,19 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 	accounts := config.GetAccounts()
 	poolAccounts := h.pool.GetAllAccounts()
-	
+
 	// 合并运行时统计
 	statsMap := make(map[string]config.Account)
 	for _, a := range poolAccounts {
 		statsMap[a.ID] = a
 	}
-	
+
 	// 隐藏敏感信息
 	result := make([]map[string]interface{}, len(accounts))
 	for i, a := range accounts {
 		// 获取运行时统计
 		stats := statsMap[a.ID]
-		
+
 		result[i] = map[string]interface{}{
 			"id":                a.ID,
 			"email":             a.Email,
@@ -1765,21 +1814,23 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"totalRequests":   h.totalRequests,
-		"successRequests": h.successRequests,
-		"failedRequests":  h.failedRequests,
-		"totalTokens":     h.totalTokens,
-		"totalCredits":    h.totalCredits,
+		"totalRequests":   atomic.LoadInt64(&h.totalRequests),
+		"successRequests": atomic.LoadInt64(&h.successRequests),
+		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
+		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
+		"totalCredits":    h.getCredits(),
 		"uptime":          time.Now().Unix() - h.startTime,
 	})
 }
 
 func (h *Handler) apiResetStats(w http.ResponseWriter, r *http.Request) {
-	h.totalRequests = 0
-	h.successRequests = 0
-	h.failedRequests = 0
-	h.totalTokens = 0
+	atomic.StoreInt64(&h.totalRequests, 0)
+	atomic.StoreInt64(&h.successRequests, 0)
+	atomic.StoreInt64(&h.failedRequests, 0)
+	atomic.StoreInt64(&h.totalTokens, 0)
+	h.creditsMu.Lock()
 	h.totalCredits = 0
+	h.creditsMu.Unlock()
 	config.UpdateStats(0, 0, 0, 0, 0)
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
@@ -1923,6 +1974,40 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// apiGetEndpointConfig 获取端点配置
+func (h *Handler) apiGetEndpointConfig(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]string{
+		"preferredEndpoint": config.GetPreferredEndpoint(),
+	})
+}
+
+// apiUpdateEndpointConfig 更新端点配置
+func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PreferredEndpoint string `json:"preferredEndpoint"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	valid := map[string]bool{"auto": true, "codewhisperer": true, "amazonq": true}
+	if !valid[req.PreferredEndpoint] {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid endpoint, must be: auto, codewhisperer, or amazonq"})
+		return
+	}
+
+	if err := config.UpdatePreferredEndpoint(req.PreferredEndpoint); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

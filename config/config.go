@@ -95,6 +95,9 @@ type Config struct {
 	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
 	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
 
+	// Endpoint configuration: "auto", "codewhisperer", or "amazonq"
+	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
+
 	// Global statistics (persisted across restarts)
 	TotalRequests   int     `json:"totalRequests,omitempty"`   // Total API requests received
 	SuccessRequests int     `json:"successRequests,omitempty"` // Successful requests count
@@ -408,5 +411,23 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
 	cfg.ThinkingSuffix = suffix
 	cfg.OpenAIThinkingFormat = openaiFormat
 	cfg.ClaudeThinkingFormat = claudeFormat
+	return Save()
+}
+
+// GetPreferredEndpoint 获取首选端点配置
+func GetPreferredEndpoint() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg.PreferredEndpoint == "" {
+		return "auto"
+	}
+	return cfg.PreferredEndpoint
+}
+
+// UpdatePreferredEndpoint 更新首选端点配置
+func UpdatePreferredEndpoint(endpoint string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.PreferredEndpoint = endpoint
 	return Save()
 }

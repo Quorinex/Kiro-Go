@@ -15,10 +15,42 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	KiroEndpoint = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
-	KiroVersion  = "0.6.18"
-)
+const KiroVersion = "0.6.18"
+
+// 双端点配置（429 时自动 fallback）
+type kiroEndpoint struct {
+	URL       string
+	Origin    string
+	AmzTarget string
+	Name      string
+}
+
+var kiroEndpoints = []kiroEndpoint{
+	{
+		URL:       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+		Name:      "CodeWhisperer",
+	},
+	{
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "CLI",
+		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
+		Name:      "AmazonQ",
+	},
+}
+
+// 全局 HTTP 客户端，复用连接池
+var kiroHttpClient = &http.Client{
+	Timeout: 5 * time.Minute,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,              // 最大空闲连接数
+		MaxIdleConnsPerHost: 20,               // 每个 Host 最大空闲连接数
+		IdleConnTimeout:     90 * time.Second, // 空闲连接超时
+		DisableCompression:  false,            // 启用压缩
+		ForceAttemptHTTP2:   true,             // 尝试使用 HTTP/2
+	},
+}
 
 // ==================== 请求结构 ====================
 
@@ -113,7 +145,19 @@ type KiroStreamCallback struct {
 
 // ==================== API 调用 ====================
 
-// CallKiroAPI 调用 Kiro API（流式）
+// getSortedEndpoints 根据首选端点配置排序端点列表
+func getSortedEndpoints(preferred string) []kiroEndpoint {
+	if preferred == "amazonq" {
+		return []kiroEndpoint{kiroEndpoints[1], kiroEndpoints[0]}
+	}
+	if preferred == "codewhisperer" {
+		return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
+	}
+	// "auto" 或空值：默认顺序
+	return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
+}
+
+// CallKiroAPI 调用 Kiro API（流式），双端点自动 fallback
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -123,17 +167,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	// 预估输入 token（约 3 字符 = 1 token）
 	estimatedInputTokens := max(1, len(body)/3)
 
-	req, err := http.NewRequest("POST", KiroEndpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-
-	// 设置请求头
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("X-Amz-Target", "AmazonCodeWhispererStreamingService.GenerateAssistantResponse")
-
-	// User-Agent 包含机器码
+	// User-Agent
 	machineId := account.MachineId
 	var userAgent, amzUserAgent string
 	if machineId != "" {
@@ -143,27 +177,68 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		userAgent = fmt.Sprintf("aws-sdk-js/1.0.18 ua/2.1 os/linux lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-%s", KiroVersion)
 		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.18 KiroIDE %s", KiroVersion)
 	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("X-Amz-User-Agent", amzUserAgent)
-	req.Header.Set("x-amzn-kiro-agent-mode", "spec")
-	req.Header.Set("x-amzn-codewhisperer-optout", "true")
-	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
-	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
-	req.Header.Set("Authorization", "Bearer "+account.AccessToken)
 
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Do(req)
-	if err != nil {
+	// 根据配置排序端点
+	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
+
+	var lastErr error
+	for _, ep := range endpoints {
+		// 更新 payload 中的 origin
+		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
+
+		reqBody, _ := json.Marshal(payload)
+		req, err := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("X-Amz-Target", ep.AmzTarget)
+		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("X-Amz-User-Agent", amzUserAgent)
+		req.Header.Set("x-amzn-kiro-agent-mode", "spec")
+		req.Header.Set("x-amzn-codewhisperer-optout", "true")
+		req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
+		req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
+		req.Header.Set("Authorization", "Bearer "+account.AccessToken)
+
+		resp, err := kiroHttpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			fmt.Printf("[KiroAPI] Endpoint %s failed: %v\n", ep.Name, err)
+			continue
+		}
+
+		if resp.StatusCode == 429 {
+			resp.Body.Close()
+			fmt.Printf("[KiroAPI] Endpoint %s quota exhausted (429), trying next...\n", ep.Name)
+			lastErr = fmt.Errorf("quota exhausted on %s", ep.Name)
+			continue
+		}
+
+		if resp.StatusCode != 200 {
+			errBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, ep.Name, string(errBody))
+			// 认证错误不继续尝试
+			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				return lastErr
+			}
+			fmt.Printf("[KiroAPI] Endpoint %s error: %v\n", ep.Name, lastErr)
+			continue
+		}
+
+		err = parseEventStream(resp.Body, callback, estimatedInputTokens)
+		resp.Body.Close()
 		return err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	if lastErr != nil {
+		return lastErr
 	}
-
-	return parseEventStream(resp.Body, callback, estimatedInputTokens)
+	return fmt.Errorf("all endpoints failed")
 }
 
 // ==================== Event Stream 解析 ====================

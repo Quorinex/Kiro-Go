@@ -57,7 +57,7 @@ func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
 	regReq, _ := http.NewRequest("POST", oidcBase+"/client/register", bytes.NewReader(regBody))
 	regReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := httpClient
 	regResp, err := client.Do(regReq)
 	if err != nil {
 		return nil, fmt.Errorf("register client failed: %v", err)
@@ -175,7 +175,7 @@ func PollBuilderIdAuth(sessionID string) (accessToken, refreshToken, clientID, c
 	tokenReq, _ := http.NewRequest("POST", oidcBase+"/token", bytes.NewReader(tokenBody))
 	tokenReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := httpClient
 	tokenResp, err := client.Do(tokenReq)
 	if err != nil {
 		return "", "", "", "", "", 0, "", fmt.Errorf("token request failed: %v", err)
