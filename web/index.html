@@ -578,19 +578,42 @@
 
         .model-item {
             background: #f8fafc;
-            padding: 10px 12px;
+            padding: 14px 16px;
             border-radius: 8px;
+            margin-bottom: 10px;
+            transition: background 0.2s ease;
+        }
+
+        .model-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .model-item:hover {
+            background: #f1f5f9;
         }
 
         .model-name {
-            font-weight: 500;
+            font-weight: 600;
+            font-size: 14px;
+            color: #0f172a;
+            line-height: 1.4;
+        }
+
+        .model-credit {
             font-size: 13px;
+            margin-top: 4px;
+        }
+
+        .credit-ratio {
+            color: #7c3aed;
+            font-weight: 600;
         }
 
         .model-info {
-            font-size: 11px;
+            font-size: 12px;
             color: #64748b;
-            margin-top: 2px;
+            margin-top: 6px;
+            line-height: 1.5;
         }
 
         .btn-icon {
@@ -1495,7 +1518,21 @@
                 const res = await fetch('/admin/api/accounts/' + id + '/models', { headers: { 'X-Admin-Password': password } });
                 const d = await res.json();
                 if (d.success && d.models) {
-                    container.innerHTML = d.models.map(m => '<div class="model-item"><div class="model-name">' + m.modelId + '</div><div class="model-info">' + (m.description || '') + '</div></div>').join('') || '<p style="color:#64748b">' + t('detail.noModels') + '</p>';
+                    // 按 credit 比例排序（auto 模型优先）
+                    const sortedModels = d.models.sort((a, b) => {
+                        if (a.modelId === 'auto') return -1;
+                        if (b.modelId === 'auto') return 1;
+                        return (a.rateMultiplier || 1) - (b.rateMultiplier || 1);
+                    });
+
+                    container.innerHTML = sortedModels.map(m => {
+                        const creditRatio = m.rateMultiplier || 1;
+                        return '<div class="model-item">' +
+                            '<div class="model-name">' + m.modelId + '</div>' +
+                            '<div class="model-credit"><span class="credit-ratio">' + creditRatio + 'x credit</span></div>' +
+                            '<div class="model-info">' + (m.description || '') + '</div>' +
+                            '</div>';
+                    }).join('') || '<p style="color:#64748b">' + t('detail.noModels') + '</p>';
                 } else {
                     container.innerHTML = '<p style="color:#ef4444">' + t('detail.loadFailed') + ': ' + (d.error || '') + '</p>';
                 }
