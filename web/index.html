@@ -797,6 +797,26 @@
                 grid-template-columns: repeat(2, 1fr);
             }
         }
+
+        /* 隐私模式开关样式 */
+        .privacy-toggle {
+            white-space: nowrap;
+        }
+
+        @media (max-width: 640px) {
+            .privacy-toggle {
+                order: -1;
+                width: 100%;
+                justify-content: space-between;
+                padding: 8px 0;
+                border-bottom: 1px solid #e2e8f0;
+                margin-bottom: 8px;
+            }
+
+            .privacy-toggle span {
+                font-size: 14px;
+            }
+        }
     </style>
 </head>
 
@@ -872,8 +892,17 @@
             <div class="card">
                 <div class="card-header">
                     <span class="card-title" data-i18n="accounts.title"></span>
-                    <div class="card-actions"><button class="btn btn-secondary btn-sm" onclick="showExportModal()" data-i18n="accounts.export"></button><button class="btn btn-primary btn-sm" onclick="showModal('add')"
-                            data-i18n="accounts.add"></button></div>
+                    <div class="card-actions">
+                        <label class="privacy-toggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">
+                            <span style="font-size:13px;color:#374151;font-weight:500" data-i18n="privacy.label"></span>
+                            <label class="switch" style="margin:0">
+                                <input type="checkbox" id="privacyModeToggle" checked onchange="togglePrivacyMode()">
+                                <span class="slider"></span>
+                            </label>
+                        </label>
+                        <button class="btn btn-secondary btn-sm" onclick="showExportModal()" data-i18n="accounts.export"></button>
+                        <button class="btn btn-primary btn-sm" onclick="showModal('add')" data-i18n="accounts.add"></button>
+                    </div>
                 </div>
                 <div id="accountsList"></div>
             </div>
@@ -1172,7 +1201,9 @@
                 'update.upToDate': '已是最新版本',
                 'update.checkFailed': '检查更新失败',
                 'update.goDownload': '前往下载',
-                'update.changelog': '更新内容'
+                'update.changelog': '更新内容',
+                'privacy.label': '隐私模式',
+                'privacy.tooltip': '开启后邮箱将脱敏显示'
             },
             en: {
                 'login.subtitle': 'Enter admin password to login',
@@ -1346,7 +1377,9 @@
                 'update.upToDate': 'Up to date',
                 'update.checkFailed': 'Update check failed',
                 'update.goDownload': 'Download',
-                'update.changelog': 'Changelog'
+                'update.changelog': 'Changelog',
+                'privacy.label': 'Privacy Mode',
+                'privacy.tooltip': 'Mask email addresses when enabled'
             }
         };
         let currentLang = localStorage.getItem('kiro_lang') || 'zh';
@@ -1380,9 +1413,77 @@
         let password = localStorage.getItem('admin_password') || '';
         const baseUrl = location.origin;
         let accountsData = [];
+
+        // 隐私模式状态管理
+        let privacyModeEnabled = true;
+
+        // 初始化隐私模式
+        function initPrivacyMode() {
+            try {
+                const saved = localStorage.getItem('privacyMode');
+                privacyModeEnabled = saved === null ? true : saved === 'true';
+                const toggle = document.getElementById('privacyModeToggle');
+                if (toggle) toggle.checked = privacyModeEnabled;
+            } catch (e) {
+                console.warn('localStorage not available:', e);
+            }
+        }
+
+        // 切换隐私模式
+        function togglePrivacyMode() {
+            const toggle = document.getElementById('privacyModeToggle');
+            privacyModeEnabled = toggle.checked;
+            try {
+                localStorage.setItem('privacyMode', privacyModeEnabled);
+            } catch (e) {
+                console.warn('localStorage not available:', e);
+            }
+            renderAccounts();
+        }
+
+        // 邮箱脱敏函数
+        function maskEmail(email) {
+            if (!privacyModeEnabled || !email || email.indexOf('@') === -1) {
+                return email;
+            }
+
+            const [localPart, domain] = email.split('@');
+
+            // 本地部分脱敏：保留前 2 个字符
+            const maskedLocal = localPart.length <= 2
+                ? localPart
+                : localPart.substring(0, 2) + '***';
+
+            // 域名部分脱敏
+            const domainParts = domain.split('.');
+            if (domainParts.length >= 2) {
+                const tld = domainParts[domainParts.length - 1]; // 顶级域名
+                const sld = domainParts[domainParts.length - 2]; // 二级域名
+                const maskedSld = sld.length <= 2
+                    ? sld
+                    : sld.substring(0, 2) + '***';
+
+                // 子域名脱敏
+                const subdomains = domainParts.slice(0, -2).map(sub =>
+                    sub.length <= 2 ? sub : sub.substring(0, 2) + '***'
+                );
+
+                return maskedLocal + '@' + [...subdomains, maskedSld, tld].join('.');
+            }
+
+            return maskedLocal + '@' + domain;
+        }
+
+        // 统一获取显示用邮箱
+        function getDisplayEmail(email, accountId) {
+            const raw = email || (accountId ? accountId.substring(0, 12) + '...' : '-');
+            return maskEmail(raw);
+        }
+
         document.addEventListener('DOMContentLoaded', function () {
             updateLangButtons();
             applyTranslations();
+            initPrivacyMode();
             if (password) tryAutoLogin();
             document.getElementById('pwdField').addEventListener('keypress', e => { if (e.key === 'Enter') login(); });
             document.querySelectorAll('.tab').forEach(tab => { tab.onclick = () => switchTab(tab.dataset.tab); });
@@ -1451,7 +1552,7 @@
                 return '<div class="account-card">' +
                     '<div class="account-header">' +
                     '<div class="account-info">' +
-                    '<div class="account-email">' + (a.email || a.id.substring(0, 12) + '...') + '</div>' +
+                    '<div class="account-email">' + getDisplayEmail(a.email, a.id) + '</div>' +
                     '<div class="account-meta">' +
                     getSubBadge(a.subscriptionType) +
                     getTrialBadge(a) +
@@ -1538,7 +1639,7 @@
             if (!a) return;
             document.getElementById('detailBody').innerHTML =
                 '<div class="detail-section"><h4>' + t('detail.basicInfo') + '</h4><div class="detail-grid">' +
-                '<div class="detail-item"><div class="detail-label">' + t('detail.email') + '</div><div class="detail-value">' + (a.email || '-') + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.email') + '</div><div class="detail-value">' + getDisplayEmail(a.email, null) + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.userId') + '</div><div class="detail-value">' + (a.userId || '-') + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.authMethod') + '</div><div class="detail-value">' + formatAuthMethod(a.provider || a.authMethod) + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.region') + '</div><div class="detail-value">' + (a.region || 'us-east-1') + '</div></div>' +
@@ -2024,7 +2125,7 @@
                     const checked = exportSelectedIds.has(a.id) ? 'checked' : '';
                     return '<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;cursor:pointer;margin-bottom:4px;background:' + (exportSelectedIds.has(a.id) ? '#f0f4ff' : '#f8fafc') + '">' +
                         '<input type="checkbox" ' + checked + ' onchange="toggleExportAccount(\'' + a.id + '\')" style="width:16px;height:16px">' +
-                        '<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (a.email || a.id.substring(0, 12) + '...') + '</div>' +
+                        '<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + getDisplayEmail(a.email, a.id) + '</div>' +
                         '<div style="font-size:11px;color:#64748b">' + formatAuthMethod(a.provider || a.authMethod) + ' · ' + (a.subscriptionType || 'FREE') + '</div></div>' +
                         '</label>';
                 }).join('') +
@@ -2057,6 +2158,11 @@
                 headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
                 body: JSON.stringify({ ids: Array.from(exportSelectedIds) })
             });
+            if (!res.ok) {
+                const error = await res.json();
+                alert(t('common.failed') + ': ' + (error.error || 'Unknown error'));
+                return null;
+            }
             return await res.json();
         }
 
