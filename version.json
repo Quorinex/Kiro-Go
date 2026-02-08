@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
-  "changelog": "🎉 v1.0.0 首个正式版",
+  "version": "1.0.1",
+  "changelog": "✨ 新增隐私模式支持\n🆕 管理面板增加退出登录功能\n📊 统计数据迁移至独立接口\n🎨 优化管理面板按钮样式与交互",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }

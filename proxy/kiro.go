@@ -15,7 +15,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const KiroVersion = "0.6.18"
+const KiroVersion = "0.9.2"
 
 // 双端点配置（429 时自动 fallback）
 type kiroEndpoint struct {
@@ -27,6 +27,12 @@ type kiroEndpoint struct {
 
 var kiroEndpoints = []kiroEndpoint{
 	{
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "AmazonQDeveloperStreamingService.GenerateAssistantResponse",
+		Name:      "AmazonQ",
+	},
+	{
 		URL:       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
 		Origin:    "AI_EDITOR",
 		AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
@@ -36,7 +42,7 @@ var kiroEndpoints = []kiroEndpoint{
 		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
 		Origin:    "CLI",
 		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
-		Name:      "AmazonQ",
+		Name:      "AmazonQ-CLI",
 	},
 }
 
@@ -57,9 +63,11 @@ var kiroHttpClient = &http.Client{
 // KiroPayload Kiro API 请求体
 type KiroPayload struct {
 	ConversationState struct {
-		ChatTriggerType string `json:"chatTriggerType"`
-		ConversationID  string `json:"conversationId"`
-		CurrentMessage  struct {
+		AgentContinuationId string `json:"agentContinuationId,omitempty"`
+		AgentTaskType       string `json:"agentTaskType,omitempty"`
+		ChatTriggerType     string `json:"chatTriggerType"`
+		ConversationID      string `json:"conversationId"`
+		CurrentMessage      struct {
 			UserInputMessage KiroUserInputMessage `json:"userInputMessage"`
 		} `json:"currentMessage"`
 		History []KiroHistoryMessage `json:"history,omitempty"`
@@ -147,14 +155,15 @@ type KiroStreamCallback struct {
 
 // getSortedEndpoints 根据首选端点配置排序端点列表
 func getSortedEndpoints(preferred string) []kiroEndpoint {
-	if preferred == "amazonq" {
-		return []kiroEndpoint{kiroEndpoints[1], kiroEndpoints[0]}
+	switch preferred {
+	case "codewhisperer":
+		return []kiroEndpoint{kiroEndpoints[1], kiroEndpoints[0], kiroEndpoints[2]}
+	case "amazonq-cli":
+		return []kiroEndpoint{kiroEndpoints[2], kiroEndpoints[0], kiroEndpoints[1]}
+	default:
+		// "auto", "amazonq" 或空值：默认顺序 (AmazonQ AI_EDITOR 优先)
+		return kiroEndpoints
 	}
-	if preferred == "codewhisperer" {
-		return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
-	}
-	// "auto" 或空值：默认顺序
-	return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
 }
 
 // CallKiroAPI 调用 Kiro API（流式），双端点自动 fallback
@@ -171,11 +180,11 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	machineId := account.MachineId
 	var userAgent, amzUserAgent string
 	if machineId != "" {
-		userAgent = fmt.Sprintf("aws-sdk-js/1.0.18 ua/2.1 os/linux lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-%s-%s", KiroVersion, machineId)
-		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.18 KiroIDE %s %s", KiroVersion, machineId)
+		userAgent = fmt.Sprintf("aws-sdk-js/1.0.27 ua/2.1 os/darwin#22.6.0 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-%s-%s", KiroVersion, machineId)
+		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.27 KiroIDE %s %s", KiroVersion, machineId)
 	} else {
-		userAgent = fmt.Sprintf("aws-sdk-js/1.0.18 ua/2.1 os/linux lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-%s", KiroVersion)
-		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.18 KiroIDE %s", KiroVersion)
+		userAgent = fmt.Sprintf("aws-sdk-js/1.0.27 ua/2.1 os/darwin#22.6.0 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-%s", KiroVersion)
+		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.27 KiroIDE %s", KiroVersion)
 	}
 
 	// 根据配置排序端点
@@ -198,7 +207,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		req.Header.Set("X-Amz-Target", ep.AmzTarget)
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("X-Amz-User-Agent", amzUserAgent)
-		req.Header.Set("x-amzn-kiro-agent-mode", "spec")
+		req.Header.Set("x-amzn-kiro-agent-mode", "do")
 		req.Header.Set("x-amzn-codewhisperer-optout", "true")
 		req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 		req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())

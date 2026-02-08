@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Kiro API Proxy</title>
+    <title>Kiro-Go</title>
     <style>
         * {
             box-sizing: border-box;
@@ -304,6 +304,13 @@
             width: 44px;
             height: 24px;
             flex-shrink: 0;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+            position: absolute;
         }
 
         .slider {
@@ -831,7 +838,7 @@
             </div>
             <h1 class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                </svg>Kiro API Proxy</h1>
+                </svg>Kiro-Go</h1>
             <p data-i18n="login.subtitle"></p>
             <div class="form-group">
                 <label data-i18n="login.password"></label>
@@ -847,7 +854,7 @@
         <div class="header">
             <h1 class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                </svg>Kiro API Proxy</h1>
+                </svg>Kiro-Go</h1>
             <div class="header-right">
                 <div class="lang-switch">
                     <button class="lang-btn" data-lang="zh" onclick="setLang('zh')">中文</button>
@@ -855,6 +862,7 @@
                 </div>
                 <span class="badge badge-success" id="statusBadge" data-i18n="status.running"></span>
                 <span class="badge badge-info" id="versionBadge" style="cursor:pointer" onclick="checkUpdate(true)"></span>
+                <button class="btn btn-sm btn-danger" onclick="logout()" data-i18n="common.logout" style="padding:4px 12px;font-size:12px"></button>
             </div>
         </div>
         <div class="stats-grid">
@@ -893,13 +901,13 @@
                 <div class="card-header">
                     <span class="card-title" data-i18n="accounts.title"></span>
                     <div class="card-actions">
-                        <label class="privacy-toggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">
+                        <div class="privacy-toggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">
                             <span style="font-size:13px;color:#374151;font-weight:500" data-i18n="privacy.label"></span>
                             <label class="switch" style="margin:0">
                                 <input type="checkbox" id="privacyModeToggle" checked onchange="togglePrivacyMode()">
                                 <span class="slider"></span>
                             </label>
-                        </label>
+                        </div>
                         <button class="btn btn-secondary btn-sm" onclick="showExportModal()" data-i18n="accounts.export"></button>
                         <button class="btn btn-primary btn-sm" onclick="showModal('add')" data-i18n="accounts.add"></button>
                     </div>
@@ -954,8 +962,9 @@
                     <label data-i18n="settings.preferredEndpoint"></label>
                     <select id="preferredEndpoint">
                         <option value="auto" data-i18n="settings.endpointAuto"></option>
-                        <option value="codewhisperer">CodeWhisperer</option>
-                        <option value="amazonq">AmazonQ</option>
+                        <option value="amazonq">AmazonQ (AI_EDITOR)</option>
+                        <option value="codewhisperer">CodeWhisperer (AI_EDITOR)</option>
+                        <option value="amazonq-cli">AmazonQ (CLI)</option>
                     </select>
                     <small style="color:#64748b;font-size:12px;margin-top:4px;display:block"
                         data-i18n="settings.endpointHint"></small>
@@ -986,6 +995,10 @@
                 <p style="margin:14px 0 10px;font-weight:500;font-size:14px" data-i18n="api.modelList"></p>
                 <div class="endpoint"><span id="modelsEndpoint"></span><button class="btn btn-sm btn-secondary"
                         onclick="copy('modelsEndpoint')" data-i18n="common.copy"></button></div>
+                <p style="margin:14px 0 10px;font-weight:500;font-size:14px" data-i18n="api.stats"></p>
+                <div class="endpoint"><span id="statsEndpoint"></span><button class="btn btn-sm btn-secondary"
+                        onclick="copy('statsEndpoint')" data-i18n="common.copy"></button></div>
+                <p style="font-size:12px;color:#64748b;margin-top:4px" data-i18n="api.statsHint"></p>
             </div>
         </div>
     </div>
@@ -1091,6 +1104,8 @@
                 'settings.confirmReset': '确定重置统计？',
                 'api.endpoints': 'API 端点',
                 'api.modelList': '模型列表',
+                'api.stats': '统计数据',
+                'api.statsHint': '需要在请求头中携带 API Key 鉴权（Authorization: Bearer sk-xxx），未启用 API Key 验证时无需鉴权',
                 'detail.title': '账号详情',
                 'detail.basicInfo': '基本信息',
                 'detail.email': '邮箱',
@@ -1184,6 +1199,7 @@
                 'common.add': '添加',
                 'common.failed': '失败',
                 'common.saveFailed': '保存失败',
+                'common.logout': '退出登录',
                 'accounts.export': '导出',
                 'export.title': '导出账号',
                 'export.selectAll': '全选',
@@ -1271,6 +1287,8 @@
                 'settings.confirmReset': 'Confirm reset statistics?',
                 'api.endpoints': 'API Endpoints',
                 'api.modelList': 'Model List',
+                'api.stats': 'Statistics',
+                'api.statsHint': 'Requires API Key in header (Authorization: Bearer sk-xxx). No auth needed if API Key verification is disabled.',
                 'detail.title': 'Account Details',
                 'detail.basicInfo': 'Basic Info',
                 'detail.email': 'Email',
@@ -1360,6 +1378,7 @@
                 'common.add': 'Add',
                 'common.failed': 'Failed',
                 'common.saveFailed': 'Save failed',
+                'common.logout': 'Logout',
                 'accounts.export': 'Export',
                 'export.title': 'Export Accounts',
                 'export.selectAll': 'Select All',
@@ -1489,6 +1508,14 @@
             document.querySelectorAll('.tab').forEach(tab => { tab.onclick = () => switchTab(tab.dataset.tab); });
         });
         async function tryAutoLogin() {
+            // 72h 过期检查
+            const loginTime = parseInt(localStorage.getItem('admin_login_time') || '0');
+            if (loginTime && Date.now() - loginTime > 72 * 3600 * 1000) {
+                localStorage.removeItem('admin_password');
+                localStorage.removeItem('admin_login_time');
+                password = '';
+                return;
+            }
             try {
                 const res = await fetch('/admin/api/status', { headers: { 'X-Admin-Password': password } });
                 if (res.ok) { showMain(); loadData(); }
@@ -1500,6 +1527,7 @@
                 const res = await fetch('/admin/api/status', { headers: { 'X-Admin-Password': password } });
                 if (res.ok) {
                     localStorage.setItem('admin_password', password);
+                    localStorage.setItem('admin_login_time', Date.now().toString());
                     showMain(); loadData();
                 } else {
                     document.getElementById('loginError').textContent = t('login.error');
@@ -1510,6 +1538,11 @@
                 document.getElementById('loginError').classList.remove('hidden');
             }
         }
+        function logout() {
+            localStorage.removeItem('admin_password');
+            localStorage.removeItem('admin_login_time');
+            location.reload();
+        }
         function showMain() {
             document.getElementById('loginPage').classList.add('hidden');
             document.getElementById('mainPage').classList.remove('hidden');
@@ -1519,6 +1552,7 @@
             document.getElementById('claudeEndpoint').textContent = baseUrl + '/v1/messages';
             document.getElementById('openaiEndpoint').textContent = baseUrl + '/v1/chat/completions';
             document.getElementById('modelsEndpoint').textContent = baseUrl + '/v1/models';
+            document.getElementById('statsEndpoint').textContent = baseUrl + '/v1/stats';
             // 自动检查更新
             setTimeout(() => checkUpdate(false), 2000);
         }

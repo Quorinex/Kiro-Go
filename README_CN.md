@@ -151,6 +151,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `claude-sonnet-4.5` | claude-sonnet-4.5 |
 | `claude-haiku-4.5` | claude-haiku-4.5 |
 | `claude-opus-4.5` | claude-opus-4.5 |
+| `claude-opus-4.6` | claude-opus-4.6 |
 | `gpt-4o`, `gpt-4` | claude-sonnet-4-20250514 |
 | `gpt-3.5-turbo` | claude-sonnet-4-20250514 |
 
@@ -209,6 +210,7 @@ curl http://localhost:8080/v1/messages \
 |-----|------|
 | `GET /health` | 健康检查 |
 | `GET /v1/models` | 模型列表 |
+| `GET /v1/stats` | 统计数据 |
 | `POST /v1/messages` | Claude Messages API |
 | `POST /v1/messages/count_tokens` | Token 计数 |
 | `POST /v1/chat/completions` | OpenAI Chat API |

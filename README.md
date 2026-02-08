@@ -151,6 +151,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `claude-sonnet-4.5` | claude-sonnet-4.5 |
 | `claude-haiku-4.5` | claude-haiku-4.5 |
 | `claude-opus-4.5` | claude-opus-4.5 |
+| `claude-opus-4.6` | claude-opus-4.6 |
 | `gpt-4o`, `gpt-4` | claude-sonnet-4-20250514 |
 | `gpt-3.5-turbo` | claude-sonnet-4-20250514 |
 
@@ -209,6 +210,7 @@ Configure thinking mode in the Admin Panel under **Settings > Thinking Mode Sett
 |----------|-------------|
 | `GET /health` | Health check |
 | `GET /v1/models` | List models |
+| `GET /v1/stats` | Statistics |
 | `POST /v1/messages` | Claude Messages API |
 | `POST /v1/messages/count_tokens` | Token counting |
 | `POST /v1/chat/completions` | OpenAI Chat API |

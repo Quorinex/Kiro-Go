@@ -194,16 +194,37 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/health" || path == "/":
 		h.handleHealth(w, r)
 
+	// 统计端点（需要 API Key 鉴权）
+	case path == "/v1/stats":
+		if !h.validateApiKey(r) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(401)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing API key"})
+			return
+		}
+		h.handleStats(w, r)
+
 	default:
 		http.Error(w, "Not Found", 404)
 	}
 }
 
-// handleHealth 健康检查
+// handleHealth 健康检查（不暴露统计数据）
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"version": config.Version,
+		"uptime":  time.Now().Unix() - h.startTime,
+	})
+}
+
+// handleStats 统计数据（需要 API Key 鉴权）
+func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":          "ok",
+		"version":         config.Version,
 		"accounts":        h.pool.Count(),
 		"available":       h.pool.AvailableCount(),
 		"totalRequests":   atomic.LoadInt64(&h.totalRequests),
@@ -2099,10 +2120,10 @@ func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	valid := map[string]bool{"auto": true, "codewhisperer": true, "amazonq": true}
+	valid := map[string]bool{"auto": true, "codewhisperer": true, "amazonq": true, "amazonq-cli": true}
 	if !valid[req.PreferredEndpoint] {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid endpoint, must be: auto, codewhisperer, or amazonq"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid endpoint, must be: auto, amazonq, codewhisperer, or amazonq-cli"})
 		return
 	}
 

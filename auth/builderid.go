@@ -46,7 +46,7 @@ func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
 
 	// Step 1: 注册 OIDC 客户端
 	regPayload := map[string]interface{}{
-		"clientName": "Kiro API Proxy",
+		"clientName": "Kiro",
 		"clientType": "public",
 		"scopes":     scopes,
 		"grantTypes": []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},

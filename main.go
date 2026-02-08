@@ -54,7 +54,7 @@ func main() {
 
 	// 启动服务器
 	addr := fmt.Sprintf("%s:%d", config.GetHost(), config.GetPort())
-	log.Printf("Kiro API Proxy starting on http://%s", addr)
+	log.Printf("Kiro-Go starting on http://%s", addr)
 	log.Printf("Admin panel: http://%s/admin", addr)
 	log.Printf("Claude API: http://%s/v1/messages", addr)
 	log.Printf("OpenAI API: http://%s/v1/chat/completions", addr)
