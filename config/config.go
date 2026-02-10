@@ -51,7 +51,10 @@ type Account struct {
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
 
 	// Account status
-	Enabled bool `json:"enabled"` // Whether account is active in the pool
+	Enabled   bool   `json:"enabled"`             // Whether account is active in the pool
+	BanStatus string `json:"banStatus,omitempty"` // Ban status: "ACTIVE", "BANNED", "SUSPENDED"
+	BanReason string `json:"banReason,omitempty"` // Reason for ban/suspension
+	BanTime   int64  `json:"banTime,omitempty"`   // Timestamp when ban was detected
 
 	// Subscription information
 	SubscriptionType  string `json:"subscriptionType,omitempty"`  // Tier: FREE, PRO, PRO_PLUS, or POWER

@@ -241,6 +241,21 @@
             color: white;
         }
 
+        .badge-trial {
+            background: #10b981;
+            color: white;
+        }
+
+        .badge-banned {
+            background: #dc2626;
+            color: white;
+        }
+
+        .badge-suspended {
+            background: #f59e0b;
+            color: white;
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -1062,6 +1077,9 @@
                 'accounts.expired': '已过期',
                 'accounts.disabled': '已禁用',
                 'accounts.normal': '正常',
+                'accounts.enabled': '已启用',
+                'accounts.banned': '已封禁',
+                'accounts.suspended': '已暂停',
                 'accounts.refreshFailed': '刷新失败',
                 'accounts.confirmDelete': '确定删除？',
                 'accounts.mainQuota': '主配额',
@@ -1251,6 +1269,9 @@
                 'accounts.expired': 'Expired',
                 'accounts.disabled': 'Disabled',
                 'accounts.normal': 'Active',
+                'accounts.enabled': 'Enabled',
+                'accounts.banned': 'Banned',
+                'accounts.suspended': 'Suspended',
                 'accounts.refreshFailed': 'Refresh failed',
                 'accounts.confirmDelete': 'Confirm delete?',
                 'time.expired': 'Expired',
@@ -1596,7 +1617,9 @@
                     '<div class="account-actions">' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="refreshAccount(\'' + a.id + '\')" title="' + t('accounts.refresh') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></button>' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="showDetail(\'' + a.id + '\')" title="' + t('accounts.detail') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>' +
-                    '<button class="btn btn-sm ' + (a.enabled ? 'btn-secondary' : 'btn-primary') + '" onclick="toggleAccount(\'' + a.id + '\',' + !a.enabled + ')">' + (a.enabled ? t('accounts.disable') : t('accounts.enable')) + '</button>' +
+                    // 封禁账户不显示启用/禁用按钮
+                    (a.banStatus && a.banStatus !== 'ACTIVE' ? '' :
+                        '<button class="btn btn-sm ' + (a.enabled ? 'btn-secondary' : 'btn-primary') + '" onclick="toggleAccount(\'' + a.id + '\',' + !a.enabled + ')">' + (a.enabled ? t('accounts.disable') : t('accounts.enable')) + '</button>') +
                     '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.id + '\')">' + t('accounts.delete') + '</button>' +
                     '</div>' +
                     '</div>' +
@@ -1644,10 +1667,42 @@
             return method;
         }
         function getStatusBadge(a) {
-            if (!a.hasToken) return '<span class="badge badge-error">' + t('accounts.noToken') + '</span>';
-            if (a.expiresAt && a.expiresAt < Date.now() / 1000) return '<span class="badge badge-warning">' + t('accounts.expired') + '</span>';
-            if (!a.enabled) return '<span class="badge badge-warning">' + t('accounts.disabled') + '</span>';
-            return '<span class="badge badge-success">' + t('accounts.normal') + '</span>';
+            let badges = [];
+
+            // 检查是否为封禁状态
+            const isBanned = a.banStatus && a.banStatus !== 'ACTIVE';
+
+            if (isBanned) {
+                // 封禁账号：显示"封禁 + 禁用"
+                if (a.banStatus === 'BANNED') {
+                    badges.push('<span class="badge badge-banned">' + t('accounts.banned') + '</span>');
+                } else if (a.banStatus === 'SUSPENDED') {
+                    badges.push('<span class="badge badge-suspended">' + t('accounts.suspended') + '</span>');
+                }
+                // 封禁账号必定显示禁用状态
+                badges.push('<span class="badge badge-warning">' + t('accounts.disabled') + '</span>');
+            } else {
+                // 正常账号：显示"正常 + 启用/禁用"
+
+                // 检查Token状态
+                if (!a.hasToken) {
+                    badges.push('<span class="badge badge-error">' + t('accounts.noToken') + '</span>');
+                } else if (a.expiresAt && a.expiresAt < Date.now() / 1000) {
+                    badges.push('<span class="badge badge-warning">' + t('accounts.expired') + '</span>');
+                } else {
+                    // 有效Token的正常账号显示"正常"
+                    badges.push('<span class="badge badge-success">' + t('accounts.normal') + '</span>');
+                }
+
+                // 显示启用/禁用状态
+                if (a.enabled) {
+                    badges.push('<span class="badge badge-info">' + t('accounts.enabled') + '</span>');
+                } else {
+                    badges.push('<span class="badge badge-warning">' + t('accounts.disabled') + '</span>');
+                }
+            }
+
+            return badges.join('');
         }
         function formatTokenExpiry(ts) {
             if (!ts) return '-';

@@ -1401,6 +1401,9 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"provider":          a.Provider,
 			"region":            a.Region,
 			"enabled":           a.Enabled,
+			"banStatus":         a.BanStatus,
+			"banReason":         a.BanReason,
+			"banTime":           a.BanTime,
 			"expiresAt":         a.ExpiresAt,
 			"hasToken":          a.AccessToken != "",
 			"machineId":         a.MachineId,
@@ -1993,14 +1996,36 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	// 获取账户信息
 	info, err := RefreshAccountInfo(account)
 	if err != nil {
-		// 如果是 403/401，说明 token 无效，尝试刷新后重试
+		// 检查是否为封禁相关错误
 		errMsg := err.Error()
+		if strings.Contains(errMsg, "TEMPORARILY_SUSPENDED") || strings.Contains(errMsg, "Account suspended") {
+			// 封禁状态已在 RefreshAccountInfo 中处理，静默返回成功
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": "Account status updated",
+			})
+			return
+		}
+
+		// 如果是 403/401，说明 token 无效，尝试刷新后重试
 		if strings.Contains(errMsg, "403") || strings.Contains(errMsg, "401") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "expired") {
 			if refreshErr := refreshTokenIfNeeded(); refreshErr == nil {
 				// 重试
 				info, err = RefreshAccountInfo(account)
+				if err != nil {
+					// 重试后仍然失败，检查是否为封禁状态
+					if strings.Contains(err.Error(), "TEMPORARILY_SUSPENDED") || strings.Contains(err.Error(), "Account suspended") {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"success": true,
+							"message": "Account status updated",
+						})
+						return
+					}
+				}
 			}
 		}
+
+		// 其他错误才显示错误信息
 		if err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
