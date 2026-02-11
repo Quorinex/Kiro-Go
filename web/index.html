@@ -130,6 +130,11 @@
             color: #374151;
         }
 
+        .btn-success {
+            background: #10B981;
+            color: white;
+        }
+
         .btn-sm {
             padding: 8px 12px;
             font-size: 13px;
@@ -1087,6 +1092,8 @@
                 'accounts.trial': '试用中',
                 'accounts.trialExpired': '已过期',
                 'accounts.trialToday': '今天到期',
+                'accounts.copyJSON': '复制 JSON',
+                'accounts.copyJSONSuccess': 'JSON 已复制到剪贴板',
                 'accounts.trialDays': '天后到期',
                 'time.expired': '已过期',
                 'time.minutes': '分钟',
@@ -1274,6 +1281,8 @@
                 'accounts.suspended': 'Suspended',
                 'accounts.refreshFailed': 'Refresh failed',
                 'accounts.confirmDelete': 'Confirm delete?',
+                'accounts.copyJSON': 'Copy JSON',
+                'accounts.copyJSONSuccess': 'JSON copied to clipboard',
                 'time.expired': 'Expired',
                 'time.minutes': 'min',
                 'time.hours': 'hr',
@@ -1617,6 +1626,7 @@
                     '<div class="account-actions">' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="refreshAccount(\'' + a.id + '\')" title="' + t('accounts.refresh') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></button>' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="showDetail(\'' + a.id + '\')" title="' + t('accounts.detail') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>' +
+                    '<button class="btn btn-sm btn-icon btn-secondary" onclick="copyAccountJSON(\'' + a.id + '\', this)" title="' + t('accounts.copyJSON') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>' +
                     // 封禁账户不显示启用/禁用按钮
                     (a.banStatus && a.banStatus !== 'ACTIVE' ? '' :
                         '<button class="btn btn-sm ' + (a.enabled ? 'btn-secondary' : 'btn-primary') + '" onclick="toggleAccount(\'' + a.id + '\',' + !a.enabled + ')">' + (a.enabled ? t('accounts.disable') : t('accounts.enable')) + '</button>') +
@@ -1900,6 +1910,53 @@
         function copy(id) {
             navigator.clipboard.writeText(document.getElementById(id).textContent);
             alert(t('common.copied'));
+        }
+
+        async function copyAccountJSON(accountId, buttonElement) {
+            const account = accountsData.find(a => a.id === accountId);
+            if (!account) {
+                alert(t('common.failed'));
+                return;
+            }
+
+            const jsonString = JSON.stringify(account, null, 2);
+
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(jsonString);
+                } else {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = jsonString;
+                    textarea.style.position = 'fixed';
+                    textarea.style.opacity = '0';
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    const success = document.execCommand('copy');
+                    document.body.removeChild(textarea);
+                    if (!success) throw new Error('execCommand failed');
+                }
+
+                showCopySuccess(buttonElement);
+                alert(t('accounts.copyJSONSuccess'));
+            } catch (error) {
+                console.error('Copy failed:', error);
+                alert(t('common.failed'));
+            }
+        }
+
+        function showCopySuccess(buttonElement) {
+            const originalHTML = buttonElement.innerHTML;
+            const originalClass = buttonElement.className;
+
+            buttonElement.disabled = true;
+            buttonElement.className = 'btn btn-sm btn-icon btn-success';
+            buttonElement.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+            setTimeout(() => {
+                buttonElement.disabled = false;
+                buttonElement.className = originalClass;
+                buttonElement.innerHTML = originalHTML;
+            }, 800);
         }
 
         function showModal(type) {
