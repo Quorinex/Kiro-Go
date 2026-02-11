@@ -1330,6 +1330,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models")
 		h.apiGetAccountModels(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/full") && r.Method == "GET":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/full")
+		h.apiGetAccountFull(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && r.Method == "DELETE":
 		h.apiDeleteAccount(w, r, strings.TrimPrefix(path, "/accounts/"))
 	case strings.HasPrefix(path, "/accounts/") && r.Method == "PUT":
@@ -2046,6 +2049,77 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	})
 }
 
+// apiGetAccountFull 获取单个账号的完整信息（包含敏感字段）
+func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	poolAccounts := h.pool.GetAllAccounts()
+
+	// 查找指定账号
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+
+	// 获取运行时统计
+	var stats config.Account
+	for _, a := range poolAccounts {
+		if a.ID == id {
+			stats = a
+			break
+		}
+	}
+
+	// 返回完整账号信息（包含敏感字段）
+	result := map[string]interface{}{
+		"id":                  account.ID,
+		"email":               account.Email,
+		"userId":              account.UserId,
+		"nickname":            account.Nickname,
+		"accessToken":         account.AccessToken,
+		"refreshToken":        account.RefreshToken,
+		"clientId":            account.ClientID,
+		"clientSecret":        account.ClientSecret,
+		"authMethod":          account.AuthMethod,
+		"provider":            account.Provider,
+		"region":              account.Region,
+		"expiresAt":           account.ExpiresAt,
+		"machineId":           account.MachineId,
+		"enabled":             account.Enabled,
+		"banStatus":           account.BanStatus,
+		"banReason":           account.BanReason,
+		"banTime":             account.BanTime,
+		"subscriptionType":    account.SubscriptionType,
+		"subscriptionTitle":   account.SubscriptionTitle,
+		"daysRemaining":       account.DaysRemaining,
+		"usageCurrent":        account.UsageCurrent,
+		"usageLimit":          account.UsageLimit,
+		"usagePercent":        account.UsagePercent,
+		"nextResetDate":       account.NextResetDate,
+		"lastRefresh":         account.LastRefresh,
+		"trialUsageCurrent":   account.TrialUsageCurrent,
+		"trialUsageLimit":     account.TrialUsageLimit,
+		"trialUsagePercent":   account.TrialUsagePercent,
+		"trialStatus":         account.TrialStatus,
+		"trialExpiresAt":      account.TrialExpiresAt,
+		"requestCount":        stats.RequestCount,
+		"errorCount":          stats.ErrorCount,
+		"totalTokens":         stats.TotalTokens,
+		"totalCredits":        stats.TotalCredits,
+		"lastUsed":            stats.LastUsed,
+	}
+
+	json.NewEncoder(w).Encode(result)
+}
+
 // apiGetAccountModels 获取账户可用模型
 func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id string) {
 	accounts := config.GetAccounts()
@@ -2204,7 +2278,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	type ExportCredentials struct {
 		AccessToken  string `json:"accessToken"`
 		CsrfToken    string `json:"csrfToken"`
-		RefreshToken string `json:"refreshToken,omitempty"`
+		RefreshToken string `json:"refreshToken"`
 		ClientID     string `json:"clientId,omitempty"`
 		ClientSecret string `json:"clientSecret,omitempty"`
 		Region       string `json:"region,omitempty"`

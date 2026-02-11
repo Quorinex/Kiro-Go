@@ -1913,15 +1913,19 @@
         }
 
         async function copyAccountJSON(accountId, buttonElement) {
-            const account = accountsData.find(a => a.id === accountId);
-            if (!account) {
-                alert(t('common.failed'));
-                return;
-            }
-
-            const jsonString = JSON.stringify(account, null, 2);
-
             try {
+                // 从后端获取完整账号信息（包含敏感字段）
+                const res = await fetch('/admin/api/accounts/' + accountId + '/full', {
+                    headers: { 'X-Admin-Password': password }
+                });
+
+                if (!res.ok) {
+                    throw new Error('Failed to fetch account data');
+                }
+
+                const account = await res.json();
+                const jsonString = JSON.stringify(account, null, 2);
+
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     await navigator.clipboard.writeText(jsonString);
                 } else {
