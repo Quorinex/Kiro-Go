@@ -1924,7 +1924,8 @@
                 }
 
                 const account = await res.json();
-                const jsonString = JSON.stringify(account, null, 2);
+                const { clientId, clientSecret, accessToken, refreshToken } = account;
+                const jsonString = JSON.stringify({ clientId, clientSecret, accessToken, refreshToken }, null, 2);
 
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     await navigator.clipboard.writeText(jsonString);
@@ -2327,7 +2328,11 @@
         async function exportCopyJson() {
             const data = await getExportData();
             if (!data) return;
-            await navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+            const filtered = data.accounts.map(a => {
+                const { clientId, clientSecret, accessToken, refreshToken } = a.credentials || {};
+                return { clientId, clientSecret, accessToken, refreshToken };
+            });
+            await navigator.clipboard.writeText(JSON.stringify(filtered, null, 2));
             alert(t('export.copied'));
         }
 
