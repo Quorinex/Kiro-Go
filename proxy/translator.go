@@ -16,8 +16,10 @@ var modelMap = map[string]string{
 	"claude-sonnet-4.5":        "claude-sonnet-4.5",
 	"claude-haiku-4-5":         "claude-haiku-4.5",
 	"claude-haiku-4.5":         "claude-haiku-4.5",
-	"claude-opus-4-6":         "claude-opus-4.6",
-	"claude-opus-4.6":         "claude-opus-4.6",
+	"claude-sonnet-4-6":        "claude-sonnet-4.6",
+	"claude-sonnet-4.6":        "claude-sonnet-4.6",
+	"claude-opus-4-6":          "claude-opus-4.6",
+	"claude-opus-4.6":          "claude-opus-4.6",
 	"claude-opus-4-5":          "claude-opus-4.5",
 	"claude-opus-4.5":          "claude-opus-4.5",
 	"claude-sonnet-4":          "claude-sonnet-4",
@@ -40,7 +42,7 @@ const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
 func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	lower := strings.ToLower(model)
 	thinking := false
-	
+
 	// 使用配置的后缀检查
 	suffixLower := strings.ToLower(thinkingSuffix)
 	if strings.HasSuffix(lower, suffixLower) {
@@ -48,19 +50,19 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 		model = model[:len(model)-len(thinkingSuffix)]
 		lower = strings.ToLower(model)
 	}
-	
+
 	// 映射模型
 	for k, v := range modelMap {
 		if strings.Contains(lower, k) {
 			return v, thinking
 		}
 	}
-	
+
 	// 如果已经是有效的 Kiro 模型，直接返回
 	if strings.HasPrefix(lower, "claude-") {
 		return model, thinking
 	}
-	
+
 	return "claude-sonnet-4.5", thinking
 }
 
@@ -89,13 +91,13 @@ type ClaudeMessage struct {
 }
 
 type ClaudeContentBlock struct {
-	Type      string      `json:"type"`
-	Text      string      `json:"text,omitempty"`
-	ID        string      `json:"id,omitempty"`
-	Name      string      `json:"name,omitempty"`
-	Input     interface{} `json:"input,omitempty"`
-	ToolUseID string      `json:"tool_use_id,omitempty"`
-	Content   interface{} `json:"content,omitempty"` // for tool_result
+	Type      string       `json:"type"`
+	Text      string       `json:"text,omitempty"`
+	ID        string       `json:"id,omitempty"`
+	Name      string       `json:"name,omitempty"`
+	Input     interface{}  `json:"input,omitempty"`
+	ToolUseID string       `json:"tool_use_id,omitempty"`
+	Content   interface{}  `json:"content,omitempty"` // for tool_result
 	Source    *ImageSource `json:"source,omitempty"`
 }
 
@@ -137,12 +139,12 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	// 提取系统提示
 	systemPrompt := extractSystemPrompt(req.System)
-	
+
 	// 如果启用 thinking 模式，注入 thinking 提示
 	if thinking {
 		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
 	}
-	
+
 	// 注入时间戳
 	timestamp := time.Now().Format(time.RFC3339)
 	systemPrompt = "[Context: Current time is " + timestamp + "]\n\n" + systemPrompt
@@ -172,7 +174,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 		if msg.Role == "user" {
 			content, images, toolResults := extractClaudeUserContent(msg.Content)
-			
+
 			if isLast {
 				currentContent = content
 				currentImages = images
@@ -591,7 +593,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		switch msg.Role {
 		case "user":
 			content, images := extractOpenAIUserContent(msg.Content)
-			
+
 			// 第一条 user 消息合并 system prompt
 			if !systemMerged && systemPrompt != "" {
 				content = systemPrompt + "\n" + content
@@ -617,7 +619,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			if content == "" && len(msg.ToolCalls) > 0 {
 				content = "Using tools."
 			}
-			
+
 			var toolUses []KiroToolUse
 			for _, tc := range msg.ToolCalls {
 				var input map[string]interface{}
