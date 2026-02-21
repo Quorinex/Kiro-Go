@@ -35,6 +35,32 @@ type Handler struct {
 	modelsCacheTime int64
 }
 
+type thinkingStreamSource int
+
+const (
+	thinkingSourceUnknown thinkingStreamSource = iota
+	thinkingSourceReasoningEvent
+	thinkingSourceTagBlock
+)
+
+func allowReasoningSource(source *thinkingStreamSource) bool {
+	if *source == thinkingSourceTagBlock {
+		return false
+	}
+	*source = thinkingSourceReasoningEvent
+	return true
+}
+
+func allowTagSource(source *thinkingStreamSource) bool {
+	if *source == thinkingSourceReasoningEvent {
+		return false
+	}
+	if *source == thinkingSourceUnknown {
+		*source = thinkingSourceTagBlock
+	}
+	return *source == thinkingSourceTagBlock
+}
+
 func NewHandler() *Handler {
 	totalReq, successReq, failedReq, totalTokens, totalCredits := config.GetStats()
 	h := &Handler{
@@ -541,7 +567,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	var textBuffer string
 	var inThinkingBlock bool
 	var dropTagThinking bool
-	var sawReasoningEvent bool
+	var thinkingSource thinkingStreamSource
 
 	// 发送文本的辅助函数
 	// thinkingState: 0=普通内容, 1=thinking开始, 2=thinking中间, 3=thinking结束
@@ -626,7 +652,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 
 		// 如果是 reasoningContentEvent，直接输出
 		if isThinking {
-			sawReasoningEvent = true
+			if !allowReasoningSource(&thinkingSource) {
+				return
+			}
 			if !thinkingStarted {
 				sendText(text, 1)
 				thinkingStarted = true
@@ -654,7 +682,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 					}
 					textBuffer = textBuffer[thinkingStart+10:]
 					inThinkingBlock = true
-					dropTagThinking = sawReasoningEvent
+					dropTagThinking = !allowTagSource(&thinkingSource)
 					thinkingStarted = false
 				} else if forceFlush || len([]rune(textBuffer)) > 50 {
 					// 使用 rune 切片来正确处理 Unicode 字符
@@ -1054,7 +1082,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	var textBuffer string
 	var inThinkingBlock bool
 	var dropTagThinking bool
-	var sawReasoningEvent bool
+	var thinkingSource thinkingStreamSource
 
 	// 发送 chunk 的辅助函数
 	// thinkingState: 0=普通内容, 1=thinking开始, 2=thinking中间, 3=thinking结束
@@ -1170,7 +1198,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 
 		// 如果是 reasoningContentEvent，直接输出
 		if isThinking {
-			sawReasoningEvent = true
+			if !allowReasoningSource(&thinkingSource) {
+				return
+			}
 			if !thinkingStarted {
 				sendChunk(text, 1) // 开始
 				thinkingStarted = true
@@ -1200,7 +1230,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 					}
 					textBuffer = textBuffer[thinkingStart+10:] // 移除 <thinking>
 					inThinkingBlock = true
-					dropTagThinking = sawReasoningEvent
+					dropTagThinking = !allowTagSource(&thinkingSource)
 					thinkingStarted = false // 重置，准备发送新的开始标签
 				} else if forceFlush || len([]rune(textBuffer)) > 50 {
 					// 没有找到标签，安全输出（保留可能的部分标签）

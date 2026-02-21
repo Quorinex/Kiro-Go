@@ -251,36 +251,6 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 	var lastAssistantContent string
 	var lastReasoningContent string
 
-	normalizeChunk := func(chunk string, previous *string) string {
-		if chunk == "" {
-			return ""
-		}
-
-		prev := *previous
-		if prev == "" {
-			*previous = chunk
-			return chunk
-		}
-
-		if chunk == prev {
-			return ""
-		}
-
-		if strings.HasPrefix(chunk, prev) {
-			delta := chunk[len(prev):]
-			*previous = chunk
-			return delta
-		}
-
-		if strings.HasPrefix(prev, chunk) {
-			*previous = chunk
-			return ""
-		}
-
-		*previous = chunk
-		return chunk
-	}
-
 	for {
 		// Prelude: 12 bytes (total_len + headers_len + crc)
 		prelude := make([]byte, 12)
@@ -381,6 +351,51 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 
 	callback.OnComplete(inputTokens, outputTokens)
 	return nil
+}
+
+func normalizeChunk(chunk string, previous *string) string {
+	if chunk == "" {
+		return ""
+	}
+
+	prev := *previous
+	if prev == "" {
+		*previous = chunk
+		return chunk
+	}
+
+	if chunk == prev {
+		return ""
+	}
+
+	if strings.HasPrefix(chunk, prev) {
+		delta := chunk[len(prev):]
+		*previous = chunk
+		return delta
+	}
+
+	if strings.HasPrefix(prev, chunk) {
+		return ""
+	}
+
+	maxOverlap := 0
+	maxLen := len(prev)
+	if len(chunk) < maxLen {
+		maxLen = len(chunk)
+	}
+	for i := maxLen; i > 0; i-- {
+		if strings.HasSuffix(prev, chunk[:i]) {
+			maxOverlap = i
+			break
+		}
+	}
+
+	*previous = chunk
+	if maxOverlap > 0 {
+		return chunk[maxOverlap:]
+	}
+
+	return chunk
 }
 
 func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {

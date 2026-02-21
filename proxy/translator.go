@@ -42,6 +42,8 @@ var modelRules = []modelRule{
 const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
 <max_thinking_length>200000</max_thinking_length>`
 
+const minimalFallbackUserContent = "."
+
 // ParseModelAndThinking 解析模型名称，返回实际模型和是否启用 thinking
 func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	lower := strings.ToLower(model)
@@ -216,9 +218,9 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	} else if len(currentImages) > 0 {
 		finalContent += normalizeUserContent("", true)
 	} else if len(currentToolResults) > 0 {
-		finalContent += "Tool results provided."
+		finalContent += buildToolResultsContinuation(currentToolResults)
 	} else {
-		finalContent += "Continue"
+		finalContent += minimalFallbackUserContent
 	}
 
 	// 转换工具
@@ -227,7 +229,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// 构建 payload
 	payload := &KiroPayload{}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
-	payload.ConversationState.ConversationID = uuid.New().String()
+	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstClaudeConversationAnchor(req.Messages))
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: finalContent,
 		ModelID: modelID,
@@ -412,10 +414,6 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) 
 		}
 	}
 
-	if text == "" && len(toolUses) > 0 {
-		text = "Using tools."
-	}
-
 	return text, toolUses
 }
 
@@ -572,7 +570,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
-			if s, ok := msg.Content.(string); ok {
+			if s := extractOpenAIMessageText(msg.Content); s != "" {
 				systemPrompt += s + "\n"
 			}
 		} else {
@@ -621,10 +619,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			}
 
 		case "assistant":
-			content, _ := msg.Content.(string)
-			if content == "" && len(msg.ToolCalls) > 0 {
-				content = "Using tools."
-			}
+			content := extractOpenAIMessageText(msg.Content)
 
 			var toolUses []KiroToolUse
 			for _, tc := range msg.ToolCalls {
@@ -648,7 +643,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			})
 
 		case "tool":
-			content, _ := msg.Content.(string)
+			content := extractOpenAIMessageText(msg.Content)
 			currentToolResults = append(currentToolResults, KiroToolResult{
 				ToolUseID: msg.ToolCallID,
 				Content:   []KiroResultContent{{Text: content}},
@@ -661,7 +656,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 				if !isLast {
 					history = append(history, KiroHistoryMessage{
 						UserInputMessage: &KiroUserInputMessage{
-							Content: "Tool results provided.",
+							Content: buildToolResultsContinuation(currentToolResults),
 							ModelID: modelID,
 							Origin:  origin,
 							UserInputMessageContext: &UserInputMessageContext{
@@ -681,9 +676,9 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		if len(currentImages) > 0 {
 			finalContent = normalizeUserContent("", true)
 		} else if len(currentToolResults) > 0 {
-			finalContent = "Tool results provided."
+			finalContent = buildToolResultsContinuation(currentToolResults)
 		} else {
-			finalContent = "Continue"
+			finalContent = minimalFallbackUserContent
 		}
 	}
 	if !systemMerged && systemPrompt != "" {
@@ -696,7 +691,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	// 构建 payload
 	payload := &KiroPayload{}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
-	payload.ConversationState.ConversationID = uuid.New().String()
+	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: finalContent,
 		ModelID: modelID,
@@ -764,6 +759,135 @@ func extractOpenAIUserContent(content interface{}) (string, []KiroImage) {
 	}
 
 	return text, images
+}
+
+func extractOpenAIMessageText(content interface{}) string {
+	if content == nil {
+		return ""
+	}
+
+	if s, ok := content.(string); ok {
+		return s
+	}
+
+	if text, _ := extractOpenAIUserContent(content); strings.TrimSpace(text) != "" {
+		return text
+	}
+
+	switch v := content.(type) {
+	case map[string]interface{}:
+		if nested, ok := v["content"]; ok {
+			if nestedText := extractOpenAIMessageText(nested); strings.TrimSpace(nestedText) != "" {
+				return nestedText
+			}
+		}
+		if raw, err := json.Marshal(v); err == nil {
+			return string(raw)
+		}
+	case []interface{}:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			partText := extractOpenAIMessageText(item)
+			if strings.TrimSpace(partText) != "" {
+				parts = append(parts, partText)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "")
+		}
+		if raw, err := json.Marshal(v); err == nil {
+			return string(raw)
+		}
+	default:
+		if raw, err := json.Marshal(v); err == nil {
+			return string(raw)
+		}
+	}
+
+	return ""
+}
+
+func buildToolResultsContinuation(toolResults []KiroToolResult) string {
+	if len(toolResults) == 0 {
+		return minimalFallbackUserContent
+	}
+
+	parts := make([]string, 0, len(toolResults))
+	for _, tr := range toolResults {
+		if len(tr.Content) == 0 {
+			continue
+		}
+		for _, c := range tr.Content {
+			if strings.TrimSpace(c.Text) != "" {
+				parts = append(parts, c.Text)
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return minimalFallbackUserContent
+	}
+
+	joined := strings.Join(parts, "\n\n")
+	if len(joined) > 4000 {
+		return joined[:4000]
+	}
+	return joined
+}
+
+func firstClaudeConversationAnchor(messages []ClaudeMessage) string {
+	for _, msg := range messages {
+		if msg.Role != "user" {
+			continue
+		}
+		text, _, toolResults := extractClaudeUserContent(msg.Content)
+		if strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+		if len(toolResults) > 0 {
+			return buildToolResultsContinuation(toolResults)
+		}
+	}
+
+	for _, msg := range messages {
+		if strings.TrimSpace(msg.Role) != "" {
+			if text := extractOpenAIMessageText(msg.Content); strings.TrimSpace(text) != "" {
+				return strings.TrimSpace(text)
+			}
+		}
+	}
+
+	return ""
+}
+
+func firstOpenAIConversationAnchor(messages []OpenAIMessage) string {
+	for _, msg := range messages {
+		if msg.Role != "user" {
+			continue
+		}
+		text := extractOpenAIMessageText(msg.Content)
+		if strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+
+	for _, msg := range messages {
+		text := extractOpenAIMessageText(msg.Content)
+		if strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+
+	return ""
+}
+
+func buildConversationID(modelID, systemPrompt, anchor string) string {
+	anchor = strings.TrimSpace(anchor)
+	if anchor == "" {
+		return uuid.New().String()
+	}
+	seed := strings.Join([]string{modelID, strings.TrimSpace(systemPrompt), anchor}, "\n")
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)).String()
 }
 
 func extractOpenAITextPart(part map[string]interface{}) (string, bool) {
