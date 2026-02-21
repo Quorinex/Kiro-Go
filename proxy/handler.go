@@ -248,36 +248,33 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	var models []map[string]interface{}
 	if len(cached) > 0 {
 		for _, m := range cached {
-			models = append(models, map[string]interface{}{
-				"id": m.ModelId, "object": "model", "owned_by": "anthropic",
-			})
+			supportsImage := modelSupportsImage(m.InputTypes)
+			models = append(models, buildModelInfo(m.ModelId, "anthropic", supportsImage))
 			// 自动生成 thinking 变体
-			models = append(models, map[string]interface{}{
-				"id": m.ModelId + thinkingSuffix, "object": "model", "owned_by": "anthropic",
-			})
+			models = append(models, buildModelInfo(m.ModelId+thinkingSuffix, "anthropic", supportsImage))
 		}
 	} else {
 		// fallback 静态列表
 		models = []map[string]interface{}{
-			{"id": "claude-sonnet-4.6", "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-sonnet-4.6" + thinkingSuffix, "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-opus-4.6", "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-opus-4.6" + thinkingSuffix, "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-sonnet-4.5", "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-sonnet-4.5" + thinkingSuffix, "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-sonnet-4", "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-sonnet-4" + thinkingSuffix, "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-haiku-4.5", "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-haiku-4.5" + thinkingSuffix, "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-opus-4.5", "object": "model", "owned_by": "anthropic"},
-			{"id": "claude-opus-4.5" + thinkingSuffix, "object": "model", "owned_by": "anthropic"},
+			buildModelInfo("claude-sonnet-4.6", "anthropic", true),
+			buildModelInfo("claude-sonnet-4.6"+thinkingSuffix, "anthropic", true),
+			buildModelInfo("claude-opus-4.6", "anthropic", true),
+			buildModelInfo("claude-opus-4.6"+thinkingSuffix, "anthropic", true),
+			buildModelInfo("claude-sonnet-4.5", "anthropic", true),
+			buildModelInfo("claude-sonnet-4.5"+thinkingSuffix, "anthropic", true),
+			buildModelInfo("claude-sonnet-4", "anthropic", true),
+			buildModelInfo("claude-sonnet-4"+thinkingSuffix, "anthropic", true),
+			buildModelInfo("claude-haiku-4.5", "anthropic", true),
+			buildModelInfo("claude-haiku-4.5"+thinkingSuffix, "anthropic", true),
+			buildModelInfo("claude-opus-4.5", "anthropic", true),
+			buildModelInfo("claude-opus-4.5"+thinkingSuffix, "anthropic", true),
 		}
 	}
 	// 添加别名模型
 	models = append(models,
-		map[string]interface{}{"id": "auto", "object": "model", "owned_by": "kiro-proxy"},
-		map[string]interface{}{"id": "gpt-4o", "object": "model", "owned_by": "kiro-proxy"},
-		map[string]interface{}{"id": "gpt-4", "object": "model", "owned_by": "kiro-proxy"},
+		buildModelInfo("auto", "kiro-proxy", true),
+		buildModelInfo("gpt-4o", "kiro-proxy", true),
+		buildModelInfo("gpt-4", "kiro-proxy", true),
 	)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -285,6 +282,49 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		"object": "list",
 		"data":   models,
 	})
+}
+
+func modelSupportsImage(inputTypes []string) bool {
+	for _, t := range inputTypes {
+		lt := strings.ToLower(t)
+		if strings.Contains(lt, "image") || strings.Contains(lt, "vision") {
+			return true
+		}
+	}
+	return false
+}
+
+func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface{} {
+	modalities := []string{"text"}
+	if supportsImage {
+		modalities = append(modalities, "image")
+	}
+	modalitiesMap := map[string][]string{
+		"input":  modalities,
+		"output": []string{"text"},
+	}
+
+	return map[string]interface{}{
+		"id":               id,
+		"object":           "model",
+		"owned_by":         ownedBy,
+		"supports_image":   supportsImage,
+		"input_modalities": modalities,
+		"modalities":       modalitiesMap,
+		"capabilities": map[string]bool{
+			"vision":       supportsImage,
+			"image":        supportsImage,
+			"image_vision": supportsImage,
+		},
+		"info": map[string]interface{}{
+			"meta": map[string]interface{}{
+				"capabilities": map[string]bool{
+					"vision":       supportsImage,
+					"image_vision": supportsImage,
+				},
+			},
+		},
+	}
 }
 
 // refreshModelsCache 从 Kiro API 拉取模型列表并缓存

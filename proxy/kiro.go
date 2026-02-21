@@ -159,13 +159,11 @@ func getSortedEndpoints(preferred string) []kiroEndpoint {
 
 // CallKiroAPI 调用 Kiro API（流式），双端点自动 fallback
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
+	if _, err := json.Marshal(payload); err != nil {
 		return err
 	}
 
-	// 预估输入 token（约 3 字符 = 1 token）
-	estimatedInputTokens := max(1, len(body)/3)
+	estimatedInputTokens := estimateInputTokens(payload)
 
 	// User-Agent
 	machineId := account.MachineId
@@ -308,13 +306,20 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 			currentToolUse = handleToolUseEvent(event, currentToolUse, callback)
 		case "messageMetadataEvent", "metadataEvent":
 			if tokenUsage, ok := event["tokenUsage"].(map[string]interface{}); ok {
-				if v, ok := tokenUsage["outputTokens"].(float64); ok {
-					outputTokens = int(v)
+				if v, ok := readTokenNumber(tokenUsage, "outputTokens", "completionTokens"); ok {
+					outputTokens = v
 				}
-				uncached, _ := tokenUsage["uncachedInputTokens"].(float64)
-				cacheRead, _ := tokenUsage["cacheReadInputTokens"].(float64)
-				cacheWrite, _ := tokenUsage["cacheWriteInputTokens"].(float64)
-				inputTokens = int(uncached + cacheRead + cacheWrite)
+
+				if v, ok := readTokenNumber(tokenUsage, "inputTokens", "promptTokens", "totalInputTokens"); ok {
+					inputTokens = v
+				} else {
+					uncached, _ := readTokenNumber(tokenUsage, "uncachedInputTokens")
+					cacheRead, _ := readTokenNumber(tokenUsage, "cacheReadInputTokens")
+					cacheWrite, _ := readTokenNumber(tokenUsage, "cacheWriteInputTokens")
+					if uncached+cacheRead+cacheWrite > 0 {
+						inputTokens = uncached + cacheRead + cacheWrite
+					}
+				}
 			}
 		case "meteringEvent":
 			if usage, ok := event["usage"].(float64); ok {
@@ -338,6 +343,75 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 
 	callback.OnComplete(inputTokens, outputTokens)
 	return nil
+}
+
+func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
+	for _, k := range keys {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		switch n := v.(type) {
+		case float64:
+			return int(n), true
+		case int:
+			return n, true
+		case int64:
+			return int(n), true
+		case json.Number:
+			if parsed, err := n.Int64(); err == nil {
+				return int(parsed), true
+			}
+		}
+	}
+	return 0, false
+}
+
+func estimateInputTokens(payload *KiroPayload) int {
+	const imageTokenEstimate = 1200
+
+	chars := 0
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	chars += len(cur.Content) + len(cur.ModelID)
+	chars += len(cur.Images) * imageTokenEstimate * 3
+
+	if cur.UserInputMessageContext != nil {
+		for _, tool := range cur.UserInputMessageContext.Tools {
+			chars += len(tool.ToolSpecification.Name) + len(tool.ToolSpecification.Description)
+			if b, err := json.Marshal(tool.ToolSpecification.InputSchema.JSON); err == nil {
+				chars += len(b)
+			}
+		}
+		for _, tr := range cur.UserInputMessageContext.ToolResults {
+			chars += len(tr.ToolUseID) + len(tr.Status)
+			for _, c := range tr.Content {
+				chars += len(c.Text)
+			}
+		}
+	}
+
+	for _, h := range payload.ConversationState.History {
+		if h.UserInputMessage != nil {
+			u := h.UserInputMessage
+			chars += len(u.Content) + len(u.ModelID)
+			chars += len(u.Images) * imageTokenEstimate * 3
+		}
+		if h.AssistantResponseMessage != nil {
+			a := h.AssistantResponseMessage
+			chars += len(a.Content)
+			for _, tu := range a.ToolUses {
+				chars += len(tu.ToolUseID) + len(tu.Name)
+				if b, err := json.Marshal(tu.Input); err == nil {
+					chars += len(b)
+				}
+			}
+		}
+	}
+
+	if chars <= 0 {
+		return 1
+	}
+	return max(1, chars/3)
 }
 
 // ==================== Tool Use 处理 ====================
