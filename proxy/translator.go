@@ -148,24 +148,6 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
 	}
 
-	// 注入时间戳
-	timestamp := time.Now().Format(time.RFC3339)
-	systemPrompt = "[Context: Current time is " + timestamp + "]\n\n" + systemPrompt
-
-	// 注入执行导向指令（防止 AI 在探索过程中丢失目标）
-	executionDirective := `
-<execution_discipline>
-当用户要求执行特定任务时，你必须遵循以下纪律：
-1. **目标锁定**：在整个会话中始终牢记用户的原始目标，不要在代码探索过程中迷失方向
-2. **行动优先**：优先执行任务而非仅分析或总结，除非用户明确只要求分析
-3. **计划执行**：为任务创建明确的步骤计划，逐步执行并标记完成状态
-4. **禁止确认性收尾**：在任务未完成前，禁止输出"需要我继续吗？"、"需要深入分析吗？"等确认性问题
-5. **持续推进**：如果发现部分任务已完成，立即继续执行剩余未完成的任务
-6. **完整交付**：直到所有任务步骤都执行完毕才算完成
-</execution_discipline>
-`
-	systemPrompt = systemPrompt + "\n\n" + executionDirective
-
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
 	var currentContent string
@@ -594,24 +576,6 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	if thinking {
 		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
 	}
-
-	// 注入时间戳
-	timestamp := time.Now().Format(time.RFC3339)
-	systemPrompt = "[Context: Current time is " + timestamp + "]\n\n" + systemPrompt
-
-	// 注入执行导向指令（防止 AI 在探索过程中丢失目标）
-	executionDirective := `
-<execution_discipline>
-当用户要求执行特定任务时，你必须遵循以下纪律：
-1. **目标锁定**：在整个会话中始终牢记用户的原始目标，不要在代码探索过程中迷失方向
-2. **行动优先**：优先执行任务而非仅分析或总结，除非用户明确只要求分析
-3. **计划执行**：为任务创建明确的步骤计划，逐步执行并标记完成状态
-4. **禁止确认性收尾**：在任务未完成前，禁止输出"需要我继续吗？"、"需要深入分析吗？"等确认性问题
-5. **持续推进**：如果发现部分任务已完成，立即继续执行剩余未完成的任务
-6. **完整交付**：直到所有任务步骤都执行完毕才算完成
-</execution_discipline>
-`
-	systemPrompt = systemPrompt + "\n\n" + executionDirective
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)

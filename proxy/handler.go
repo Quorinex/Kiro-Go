@@ -462,14 +462,14 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 
 	// 流式或非流式
 	if req.Stream {
-		h.handleClaudeStream(w, account, kiroPayload, req.Model)
+		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking)
 	} else {
-		h.handleClaudeNonStream(w, account, kiroPayload, req.Model)
+		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -493,6 +493,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	// Thinking 标签解析状态
 	var textBuffer string
 	var inThinkingBlock bool
+	var dropTagThinking bool
+	var sawReasoningEvent bool
 
 	// 发送文本的辅助函数
 	// thinkingState: 0=普通内容, 1=thinking开始, 2=thinking中间, 3=thinking结束
@@ -518,6 +520,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 				"delta": map[string]string{"type": "text_delta", "text": text},
 			})
 		} else {
+			if !thinking {
+				return
+			}
 			// thinking 内容
 			var outputText string
 			switch thinkingFormat {
@@ -556,17 +561,30 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 
 	// 处理文本，解析 <thinking> 标签
 	var thinkingStarted bool
+	var eventThinkingOpen bool
 
 	processClaudeText := func(text string, isThinking bool, forceFlush bool) {
+		if isThinking && !thinking {
+			return
+		}
+
 		// 如果是 reasoningContentEvent，直接输出
 		if isThinking {
+			sawReasoningEvent = true
 			if !thinkingStarted {
 				sendText(text, 1)
 				thinkingStarted = true
+				eventThinkingOpen = true
 			} else {
 				sendText(text, 2)
 			}
 			return
+		}
+
+		if eventThinkingOpen {
+			sendText("", 3)
+			eventThinkingOpen = false
+			thinkingStarted = false
 		}
 
 		textBuffer += text
@@ -580,6 +598,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 					}
 					textBuffer = textBuffer[thinkingStart+10:]
 					inThinkingBlock = true
+					dropTagThinking = sawReasoningEvent
 					thinkingStarted = false
 				} else if forceFlush || len([]rune(textBuffer)) > 50 {
 					// 使用 rune 切片来正确处理 Unicode 字符
@@ -600,25 +619,33 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 				thinkingEnd := strings.Index(textBuffer, "</thinking>")
 				if thinkingEnd != -1 {
 					content := textBuffer[:thinkingEnd]
-					if !thinkingStarted {
-						sendText(content, 1)
-						sendText("", 3)
-					} else {
-						sendText(content, 3)
+					if !dropTagThinking {
+						if !thinkingStarted {
+							sendText(content, 1)
+							sendText("", 3)
+						} else {
+							sendText(content, 3)
+						}
 					}
 					textBuffer = textBuffer[thinkingEnd+11:]
 					inThinkingBlock = false
+					dropTagThinking = false
 					thinkingStarted = false
 				} else if forceFlush {
 					if textBuffer != "" {
-						if !thinkingStarted {
-							sendText(textBuffer, 1)
-							sendText("", 3)
-						} else {
-							sendText(textBuffer, 3)
+						if !dropTagThinking {
+							if !thinkingStarted {
+								sendText(textBuffer, 1)
+								sendText("", 3)
+							} else {
+								sendText(textBuffer, 3)
+							}
 						}
 						textBuffer = ""
 					}
+					inThinkingBlock = false
+					dropTagThinking = false
+					thinkingStarted = false
 					break
 				} else {
 					// 流式输出 thinking 块内的内容
@@ -626,11 +653,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 					if len(runes) > 20 {
 						safeLen := len(runes) - 15
 						if safeLen > 0 {
-							if !thinkingStarted {
-								sendText(string(runes[:safeLen]), 1)
-								thinkingStarted = true
-							} else {
-								sendText(string(runes[:safeLen]), 2)
+							if !dropTagThinking {
+								if !thinkingStarted {
+									sendText(string(runes[:safeLen]), 1)
+									thinkingStarted = true
+								} else {
+									sendText(string(runes[:safeLen]), 2)
+								}
 							}
 							textBuffer = string(runes[safeLen:])
 						}
@@ -731,6 +760,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 
 	// 刷新剩余缓冲区
 	processClaudeText("", false, true)
+	if eventThinkingOpen {
+		sendText("", 3)
+		eventThinkingOpen = false
+	}
 
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
@@ -827,7 +860,7 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool) {
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
@@ -871,15 +904,18 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 
 	// 合并 thinking 内容（如果有 reasoningContentEvent 的内容）
 	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
-	finalContent := content
-	if thinkingContent != "" {
+	finalContent, extractedReasoning := extractThinkingFromContent(content)
+	if thinking && thinkingContent == "" && extractedReasoning != "" {
+		thinkingContent = extractedReasoning
+	}
+	if thinking && thinkingContent != "" {
 		switch thinkingFormat {
 		case "think":
-			finalContent = "<think>" + thinkingContent + "</think>" + content
+			finalContent = "<think>" + thinkingContent + "</think>" + finalContent
 		case "reasoning_content":
-			finalContent = thinkingContent + content // Claude 格式不支持 reasoning_content，直接拼接
+			finalContent = thinkingContent + finalContent // Claude 格式不支持 reasoning_content，直接拼接
 		default: // "thinking"
-			finalContent = "<thinking>" + thinkingContent + "</thinking>" + content
+			finalContent = "<thinking>" + thinkingContent + "</thinking>" + finalContent
 		}
 	}
 
@@ -938,14 +974,14 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	if req.Stream {
-		h.handleOpenAIStream(w, account, kiroPayload, req.Model)
+		h.handleOpenAIStream(w, account, kiroPayload, req.Model, thinking)
 	} else {
-		h.handleOpenAINonStream(w, account, kiroPayload, req.Model)
+		h.handleOpenAINonStream(w, account, kiroPayload, req.Model, thinking)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string) {
+func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -968,6 +1004,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	// Thinking 标签解析状态
 	var textBuffer string
 	var inThinkingBlock bool
+	var dropTagThinking bool
+	var sawReasoningEvent bool
 
 	// 发送 chunk 的辅助函数
 	// thinkingState: 0=普通内容, 1=thinking开始, 2=thinking中间, 3=thinking结束
@@ -979,6 +1017,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		var chunk map[string]interface{}
 
 		if thinkingState > 0 {
+			if !thinking {
+				return
+			}
 			// thinking 内容
 			switch thinkingFormat {
 			case "thinking":
@@ -1071,17 +1112,30 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	// 处理文本，解析 <thinking> 标签
 	// thinkingStarted 用于跟踪是否已发送开始标签
 	var thinkingStarted bool
+	var eventThinkingOpen bool
 
 	processText := func(text string, isThinking bool, forceFlush bool) {
+		if isThinking && !thinking {
+			return
+		}
+
 		// 如果是 reasoningContentEvent，直接输出
 		if isThinking {
+			sawReasoningEvent = true
 			if !thinkingStarted {
 				sendChunk(text, 1) // 开始
 				thinkingStarted = true
+				eventThinkingOpen = true
 			} else {
 				sendChunk(text, 2) // 中间
 			}
 			return
+		}
+
+		if eventThinkingOpen {
+			sendChunk("", 3)
+			eventThinkingOpen = false
+			thinkingStarted = false
 		}
 
 		textBuffer += text
@@ -1097,6 +1151,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 					}
 					textBuffer = textBuffer[thinkingStart+10:] // 移除 <thinking>
 					inThinkingBlock = true
+					dropTagThinking = sawReasoningEvent
 					thinkingStarted = false // 重置，准备发送新的开始标签
 				} else if forceFlush || len([]rune(textBuffer)) > 50 {
 					// 没有找到标签，安全输出（保留可能的部分标签）
@@ -1119,28 +1174,36 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 				if thinkingEnd != -1 {
 					// 输出 thinking 内容
 					content := textBuffer[:thinkingEnd]
-					if !thinkingStarted {
-						// 一次性输出完整内容（开始+内容+结束）
-						sendChunk(content, 1) // 开始
-						sendChunk("", 3)      // 结束（空内容，只发结束标签）
-					} else {
-						// 已经开始了，发送剩余内容和结束
-						sendChunk(content, 3) // 结束
+					if !dropTagThinking {
+						if !thinkingStarted {
+							// 一次性输出完整内容（开始+内容+结束）
+							sendChunk(content, 1) // 开始
+							sendChunk("", 3)      // 结束（空内容，只发结束标签）
+						} else {
+							// 已经开始了，发送剩余内容和结束
+							sendChunk(content, 3) // 结束
+						}
 					}
 					textBuffer = textBuffer[thinkingEnd+11:] // 移除 </thinking>
 					inThinkingBlock = false
+					dropTagThinking = false
 					thinkingStarted = false
 				} else if forceFlush {
 					// 强制刷新：输出剩余内容
 					if textBuffer != "" {
-						if !thinkingStarted {
-							sendChunk(textBuffer, 1) // 开始
-							sendChunk("", 3)         // 结束
-						} else {
-							sendChunk(textBuffer, 3) // 结束
+						if !dropTagThinking {
+							if !thinkingStarted {
+								sendChunk(textBuffer, 1) // 开始
+								sendChunk("", 3)         // 结束
+							} else {
+								sendChunk(textBuffer, 3) // 结束
+							}
 						}
 						textBuffer = ""
 					}
+					inThinkingBlock = false
+					dropTagThinking = false
+					thinkingStarted = false
 					break
 				} else {
 					// 流式输出 thinking 块内的内容
@@ -1148,11 +1211,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 					if len(runes) > 20 {
 						safeLen := len(runes) - 15 // 保留可能的 </thinking> 部分
 						if safeLen > 0 {
-							if !thinkingStarted {
-								sendChunk(string(runes[:safeLen]), 1) // 开始
-								thinkingStarted = true
-							} else {
-								sendChunk(string(runes[:safeLen]), 2) // 中间
+							if !dropTagThinking {
+								if !thinkingStarted {
+									sendChunk(string(runes[:safeLen]), 1) // 开始
+									thinkingStarted = true
+								} else {
+									sendChunk(string(runes[:safeLen]), 2) // 中间
+								}
 							}
 							textBuffer = string(runes[safeLen:])
 						}
@@ -1227,6 +1292,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 
 	// 刷新剩余缓冲区
 	processText("", false, true)
+	if eventThinkingOpen {
+		sendChunk("", 3)
+		eventThinkingOpen = false
+	}
 
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
@@ -1261,7 +1330,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string) {
+func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool) {
 	var content string
 	var reasoningContent string
 	var toolUses []KiroToolUse
@@ -1296,8 +1365,10 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 
 	// 解析 content 中的 <thinking> 标签
 	finalContent, extractedReasoning := extractThinkingFromContent(content)
-	if extractedReasoning != "" {
-		reasoningContent = extractedReasoning + reasoningContent
+	if thinking && reasoningContent == "" && extractedReasoning != "" {
+		reasoningContent = extractedReasoning
+	} else if !thinking {
+		reasoningContent = ""
 	}
 
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat

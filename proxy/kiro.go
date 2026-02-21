@@ -248,6 +248,38 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 	var totalOutputChars int
 	var totalCredits float64
 	var currentToolUse *toolUseState
+	var lastAssistantContent string
+	var lastReasoningContent string
+
+	normalizeChunk := func(chunk string, previous *string) string {
+		if chunk == "" {
+			return ""
+		}
+
+		prev := *previous
+		if prev == "" {
+			*previous = chunk
+			return chunk
+		}
+
+		if chunk == prev {
+			return ""
+		}
+
+		if strings.HasPrefix(chunk, prev) {
+			delta := chunk[len(prev):]
+			*previous = chunk
+			return delta
+		}
+
+		if strings.HasPrefix(prev, chunk) {
+			*previous = chunk
+			return ""
+		}
+
+		*previous = chunk
+		return chunk
+	}
 
 	for {
 		// Prelude: 12 bytes (total_len + headers_len + crc)
@@ -294,13 +326,19 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 		switch eventType {
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
-				callback.OnText(content, false)
-				totalOutputChars += len(content)
+				normalized := normalizeChunk(content, &lastAssistantContent)
+				if normalized != "" {
+					callback.OnText(normalized, false)
+					totalOutputChars += len(normalized)
+				}
 			}
 		case "reasoningContentEvent":
 			if text, ok := event["text"].(string); ok && text != "" {
-				callback.OnText(text, true)
-				totalOutputChars += len(text)
+				normalized := normalizeChunk(text, &lastReasoningContent)
+				if normalized != "" {
+					callback.OnText(normalized, true)
+					totalOutputChars += len(normalized)
+				}
 			}
 		case "toolUseEvent":
 			currentToolUse = handleToolUseEvent(event, currentToolUse, callback)
