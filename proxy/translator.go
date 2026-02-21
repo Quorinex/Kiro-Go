@@ -96,6 +96,7 @@ type ClaudeMessage struct {
 type ClaudeContentBlock struct {
 	Type      string       `json:"type"`
 	Text      string       `json:"text,omitempty"`
+	Thinking  string       `json:"thinking,omitempty"`
 	ID        string       `json:"id,omitempty"`
 	Name      string       `json:"name,omitempty"`
 	Input     interface{}  `json:"input,omitempty"`
@@ -456,8 +457,15 @@ func shortenToolName(name string) string {
 
 // ==================== Kiro -> Claude 转换 ====================
 
-func KiroToClaudeResponse(content string, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
+func KiroToClaudeResponse(content, thinkingContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
 	blocks := make([]ClaudeContentBlock, 0)
+
+	if thinkingContent != "" {
+		blocks = append(blocks, ClaudeContentBlock{
+			Type:     "thinking",
+			Thinking: thinkingContent,
+		})
+	}
 
 	if content != "" {
 		blocks = append(blocks, ClaudeContentBlock{

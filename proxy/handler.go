@@ -484,11 +484,58 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
 
 	msgID := "msg_" + uuid.New().String()
-	var contentStarted bool
-	var toolUseIndex int
 	var inputTokens, outputTokens int
 	var credits float64
 	var toolUses []KiroToolUse
+	initialInputTokens := estimateInputTokens(payload)
+	var nextContentIndex int
+	activeBlockIndex := -1
+	activeBlockType := ""
+
+	closeActiveBlock := func() {
+		if activeBlockIndex < 0 {
+			return
+		}
+		h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": activeBlockIndex,
+		})
+		activeBlockIndex = -1
+		activeBlockType = ""
+	}
+
+	startContentBlock := func(blockType string) {
+		if activeBlockType == blockType {
+			return
+		}
+		closeActiveBlock()
+
+		idx := nextContentIndex
+		nextContentIndex++
+
+		if blockType == "thinking" {
+			h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				"type":  "content_block_start",
+				"index": idx,
+				"content_block": map[string]string{
+					"type":     "thinking",
+					"thinking": "",
+				},
+			})
+		} else {
+			h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				"type":  "content_block_start",
+				"index": idx,
+				"content_block": map[string]string{
+					"type": "text",
+					"text": "",
+				},
+			})
+		}
+
+		activeBlockIndex = idx
+		activeBlockType = blockType
+	}
 
 	// Thinking 标签解析状态
 	var textBuffer string
@@ -499,63 +546,72 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	// 发送文本的辅助函数
 	// thinkingState: 0=普通内容, 1=thinking开始, 2=thinking中间, 3=thinking结束
 	sendText := func(text string, thinkingState int) {
-		// 确保 content_block 已开始
-		if !contentStarted {
-			h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
-				"type":          "content_block_start",
-				"index":         0,
-				"content_block": map[string]string{"type": "text", "text": ""},
-			})
-			contentStarted = true
-		}
-
 		if thinkingState == 0 {
 			// 普通内容
 			if text == "" {
 				return
 			}
+			startContentBlock("text")
 			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
-				"index": 0,
+				"index": activeBlockIndex,
 				"delta": map[string]string{"type": "text_delta", "text": text},
 			})
-		} else {
-			if !thinking {
-				return
-			}
-			// thinking 内容
+			return
+		}
+
+		if !thinking {
+			return
+		}
+
+		switch thinkingFormat {
+		case "think":
 			var outputText string
-			switch thinkingFormat {
-			case "think":
-				switch thinkingState {
-				case 1:
-					outputText = "<think>" + text
-				case 2:
-					outputText = text
-				case 3:
-					outputText = text + "</think>"
-				}
-			case "reasoning_content":
-				// Claude 格式不支持 reasoning_content，直接输出内容
+			switch thinkingState {
+			case 1:
+				outputText = "<think>" + text
+			case 2:
 				outputText = text
-			default: // "thinking"
-				switch thinkingState {
-				case 1:
-					outputText = "<thinking>" + text
-				case 2:
-					outputText = text
-				case 3:
-					outputText = text + "</thinking>"
-				}
+			case 3:
+				outputText = text + "</think>"
 			}
 			if outputText == "" {
 				return
 			}
+			startContentBlock("text")
 			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
-				"index": 0,
+				"index": activeBlockIndex,
 				"delta": map[string]string{"type": "text_delta", "text": outputText},
 			})
+		case "reasoning_content":
+			if text == "" {
+				return
+			}
+			startContentBlock("text")
+			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": activeBlockIndex,
+				"delta": map[string]string{"type": "text_delta", "text": text},
+			})
+		default:
+			if thinkingState == 3 && text == "" {
+				if activeBlockType == "thinking" {
+					closeActiveBlock()
+				}
+				return
+			}
+			if text != "" {
+				startContentBlock("thinking")
+				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": activeBlockIndex,
+					"delta": map[string]string{"type": "thinking_delta", "thinking": text},
+				})
+			}
+			if thinkingState == 3 && activeBlockType == "thinking" {
+				closeActiveBlock()
+			}
 		}
 	}
 
@@ -674,11 +730,17 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	h.sendSSE(w, flusher, "message_start", map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
-			"id":      msgID,
-			"type":    "message",
-			"role":    "assistant",
-			"content": []interface{}{},
-			"model":   model,
+			"id":            msgID,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []interface{}{},
+			"model":         model,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]int{
+				"input_tokens":  initialInputTokens,
+				"output_tokens": 0,
+			},
 		},
 	})
 
@@ -694,20 +756,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 			processClaudeText("", false, true)
 
 			toolUses = append(toolUses, tu)
+			closeActiveBlock()
 
-			// 关闭文本块
-			if contentStarted && toolUseIndex == 0 {
-				h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
-					"type":  "content_block_stop",
-					"index": 0,
-				})
-			}
-
-			idx := toolUseIndex
-			if contentStarted {
-				idx = toolUseIndex + 1
-			}
-			toolUseIndex++
+			idx := nextContentIndex
+			nextContentIndex++
 
 			h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
 				"type":  "content_block_start",
@@ -764,18 +816,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 		sendText("", 3)
 		eventThinkingOpen = false
 	}
+	closeActiveBlock()
 
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-
-	// 关闭最后的内容块
-	if contentStarted && toolUseIndex == 0 {
-		h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
-			"type":  "content_block_stop",
-			"index": 0,
-		})
-	}
 
 	// 发送 message_delta
 	stopReason := "end_turn"
@@ -908,18 +953,22 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	if thinking && thinkingContent == "" && extractedReasoning != "" {
 		thinkingContent = extractedReasoning
 	}
+	if !thinking {
+		thinkingContent = ""
+	}
 	if thinking && thinkingContent != "" {
 		switch thinkingFormat {
 		case "think":
 			finalContent = "<think>" + thinkingContent + "</think>" + finalContent
+			thinkingContent = ""
 		case "reasoning_content":
 			finalContent = thinkingContent + finalContent // Claude 格式不支持 reasoning_content，直接拼接
-		default: // "thinking"
-			finalContent = "<thinking>" + thinkingContent + "</thinking>" + finalContent
+			thinkingContent = ""
+		default:
 		}
 	}
 
-	resp := KiroToClaudeResponse(finalContent, toolUses, inputTokens, outputTokens, model)
+	resp := KiroToClaudeResponse(finalContent, thinkingContent, toolUses, inputTokens, outputTokens, model)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
 }
