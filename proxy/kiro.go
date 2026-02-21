@@ -9,6 +9,7 @@ import (
 	"io"
 	"kiro-api-proxy/config"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -163,8 +164,6 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		return err
 	}
 
-	estimatedInputTokens := estimateInputTokens(payload)
-
 	// User-Agent
 	machineId := account.MachineId
 	var userAgent, amzUserAgent string
@@ -228,7 +227,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			continue
 		}
 
-		err = parseEventStream(resp.Body, callback, estimatedInputTokens)
+		err = parseEventStream(resp.Body, callback)
 		resp.Body.Close()
 		return err
 	}
@@ -242,10 +241,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 // ==================== Event Stream 解析 ====================
 
 // parseEventStream 解析 AWS Event Stream 二进制格式
-func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInputTokens int) error {
+func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	// 不使用 bufio，直接读取避免缓冲延迟
 	var inputTokens, outputTokens int
-	var totalOutputChars int
 	var totalCredits float64
 	var currentToolUse *toolUseState
 	var lastAssistantContent string
@@ -292,6 +290,8 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 			continue
 		}
 
+		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
+
 		// 处理事件
 		switch eventType {
 		case "assistantResponseEvent":
@@ -299,7 +299,6 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 				normalized := normalizeChunk(content, &lastAssistantContent)
 				if normalized != "" {
 					callback.OnText(normalized, false)
-					totalOutputChars += len(normalized)
 				}
 			}
 		case "reasoningContentEvent":
@@ -307,42 +306,15 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 				normalized := normalizeChunk(text, &lastReasoningContent)
 				if normalized != "" {
 					callback.OnText(normalized, true)
-					totalOutputChars += len(normalized)
 				}
 			}
 		case "toolUseEvent":
 			currentToolUse = handleToolUseEvent(event, currentToolUse, callback)
-		case "messageMetadataEvent", "metadataEvent":
-			if tokenUsage, ok := event["tokenUsage"].(map[string]interface{}); ok {
-				if v, ok := readTokenNumber(tokenUsage, "outputTokens", "completionTokens"); ok {
-					outputTokens = v
-				}
-
-				if v, ok := readTokenNumber(tokenUsage, "inputTokens", "promptTokens", "totalInputTokens"); ok {
-					inputTokens = v
-				} else {
-					uncached, _ := readTokenNumber(tokenUsage, "uncachedInputTokens")
-					cacheRead, _ := readTokenNumber(tokenUsage, "cacheReadInputTokens")
-					cacheWrite, _ := readTokenNumber(tokenUsage, "cacheWriteInputTokens")
-					if uncached+cacheRead+cacheWrite > 0 {
-						inputTokens = uncached + cacheRead + cacheWrite
-					}
-				}
-			}
 		case "meteringEvent":
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}
 		}
-	}
-
-	// 估算 token（约 3 字符 = 1 token）
-	if outputTokens == 0 && totalOutputChars > 0 {
-		outputTokens = max(1, totalOutputChars/3)
-	}
-	// 如果 Kiro 没返回 inputTokens，使用预估值
-	if inputTokens == 0 {
-		inputTokens = estimatedInputTokens
 	}
 
 	if callback.OnCredits != nil && totalCredits > 0 {
@@ -351,6 +323,78 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback, estimatedInp
 
 	callback.OnComplete(inputTokens, outputTokens)
 	return nil
+}
+
+func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int) {
+	candidates := []map[string]interface{}{event}
+	collectUsageMaps(event, &candidates)
+
+	inputTokens := currentInputTokens
+	outputTokens := currentOutputTokens
+
+	for _, usage := range candidates {
+		if usage == nil {
+			continue
+		}
+
+		if v, ok := readTokenNumber(usage,
+			"outputTokens", "completionTokens", "totalOutputTokens",
+			"output_tokens", "completion_tokens", "total_output_tokens",
+		); ok {
+			outputTokens = v
+		}
+
+		if v, ok := readTokenNumber(usage,
+			"inputTokens", "promptTokens", "totalInputTokens",
+			"input_tokens", "prompt_tokens", "total_input_tokens",
+		); ok {
+			inputTokens = v
+			continue
+		}
+
+		uncached, _ := readTokenNumber(usage, "uncachedInputTokens", "uncached_input_tokens")
+		cacheRead, _ := readTokenNumber(usage, "cacheReadInputTokens", "cache_read_input_tokens")
+		cacheWrite, _ := readTokenNumber(usage, "cacheWriteInputTokens", "cache_write_input_tokens", "cacheCreationInputTokens", "cache_creation_input_tokens")
+		if uncached+cacheRead+cacheWrite > 0 {
+			inputTokens = uncached + cacheRead + cacheWrite
+			continue
+		}
+
+		total, ok := readTokenNumber(usage, "totalTokens", "total_tokens")
+		if ok && total > 0 {
+			candidateOutput := outputTokens
+			if v, vok := readTokenNumber(usage,
+				"outputTokens", "completionTokens", "totalOutputTokens",
+				"output_tokens", "completion_tokens", "total_output_tokens",
+			); vok {
+				candidateOutput = v
+			}
+			if total-candidateOutput > 0 {
+				inputTokens = total - candidateOutput
+			}
+		}
+	}
+
+	return inputTokens, outputTokens
+}
+
+func collectUsageMaps(v interface{}, out *[]map[string]interface{}) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, child := range t {
+			lk := strings.ToLower(k)
+			if lk == "usage" || lk == "tokenusage" || lk == "token_usage" {
+				if m, ok := child.(map[string]interface{}); ok {
+					*out = append(*out, m)
+				}
+			}
+			collectUsageMaps(child, out)
+		}
+	case []interface{}:
+		for _, child := range t {
+			collectUsageMaps(child, out)
+		}
+	}
 }
 
 func normalizeChunk(chunk string, previous *string) string {
@@ -415,56 +459,16 @@ func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 			if parsed, err := n.Int64(); err == nil {
 				return int(parsed), true
 			}
+		case string:
+			if parsed, err := strconv.Atoi(n); err == nil {
+				return parsed, true
+			}
+			if parsed, err := strconv.ParseFloat(n, 64); err == nil {
+				return int(parsed), true
+			}
 		}
 	}
 	return 0, false
-}
-
-func estimateInputTokens(payload *KiroPayload) int {
-	const imageTokenEstimate = 1200
-
-	chars := 0
-	cur := payload.ConversationState.CurrentMessage.UserInputMessage
-	chars += len(cur.Content) + len(cur.ModelID)
-	chars += len(cur.Images) * imageTokenEstimate * 3
-
-	if cur.UserInputMessageContext != nil {
-		for _, tool := range cur.UserInputMessageContext.Tools {
-			chars += len(tool.ToolSpecification.Name) + len(tool.ToolSpecification.Description)
-			if b, err := json.Marshal(tool.ToolSpecification.InputSchema.JSON); err == nil {
-				chars += len(b)
-			}
-		}
-		for _, tr := range cur.UserInputMessageContext.ToolResults {
-			chars += len(tr.ToolUseID) + len(tr.Status)
-			for _, c := range tr.Content {
-				chars += len(c.Text)
-			}
-		}
-	}
-
-	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil {
-			u := h.UserInputMessage
-			chars += len(u.Content) + len(u.ModelID)
-			chars += len(u.Images) * imageTokenEstimate * 3
-		}
-		if h.AssistantResponseMessage != nil {
-			a := h.AssistantResponseMessage
-			chars += len(a.Content)
-			for _, tu := range a.ToolUses {
-				chars += len(tu.ToolUseID) + len(tu.Name)
-				if b, err := json.Marshal(tu.Input); err == nil {
-					chars += len(b)
-				}
-			}
-		}
-	}
-
-	if chars <= 0 {
-		return 1
-	}
-	return max(1, chars/3)
 }
 
 // ==================== Tool Use 处理 ====================

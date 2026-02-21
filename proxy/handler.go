@@ -393,50 +393,13 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Messages []struct {
-			Role    string      `json:"role"`
-			Content interface{} `json:"content"`
-		} `json:"messages"`
-		System interface{} `json:"system"`
-	}
+	var req ClaudeRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
 
-	// 简单估算 token 数量（每 4 个字符约 1 个 token）
-	var totalChars int
-	for _, msg := range req.Messages {
-		switch content := msg.Content.(type) {
-		case string:
-			totalChars += len(content)
-		case []interface{}:
-			for _, part := range content {
-				if p, ok := part.(map[string]interface{}); ok {
-					if text, ok := p["text"].(string); ok {
-						totalChars += len(text)
-					}
-				}
-			}
-		}
-	}
-
-	// 系统提示
-	switch system := req.System.(type) {
-	case string:
-		totalChars += len(system)
-	case []interface{}:
-		for _, part := range system {
-			if p, ok := part.(map[string]interface{}); ok {
-				if text, ok := p["text"].(string); ok {
-					totalChars += len(text)
-				}
-			}
-		}
-	}
-
-	estimatedTokens := (totalChars + 3) / 4 // 向上取整
+	estimatedTokens := estimateClaudeRequestInputTokens(&req)
 	if estimatedTokens < 1 {
 		estimatedTokens = 1
 	}
@@ -447,6 +410,10 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 
 // handleClaudeMessages Claude API 处理
 func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
+	h.handleClaudeMessagesInternal(w, r)
+}
+
+func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", 405)
 		return
@@ -482,20 +449,21 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
+	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
 
 	// 转换请求
 	kiroPayload := ClaudeToKiro(&req, thinking)
 
 	// 流式或非流式
 	if req.Stream {
-		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking)
+		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
 	} else {
-		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking)
+		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -513,10 +481,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	var inputTokens, outputTokens int
 	var credits float64
 	var toolUses []KiroToolUse
-	initialInputTokens := estimateInputTokens(payload)
 	var nextContentIndex int
+	var rawContentBuilder strings.Builder
+	var rawThinkingBuilder strings.Builder
 	activeBlockIndex := -1
 	activeBlockType := ""
+	startInputTokens := estimatedInputTokens
 
 	closeActiveBlock := func() {
 		if activeBlockIndex < 0 {
@@ -766,7 +736,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 			"stop_reason":   nil,
 			"stop_sequence": nil,
 			"usage": map[string]int{
-				"input_tokens":  initialInputTokens,
+				"input_tokens":  startInputTokens,
 				"output_tokens": 0,
 			},
 		},
@@ -777,11 +747,20 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 			if text == "" {
 				return
 			}
+			if isThinking {
+				rawThinkingBuilder.WriteString(text)
+			} else {
+				rawContentBuilder.WriteString(text)
+			}
 			processClaudeText(text, isThinking, false)
 		},
 		OnToolUse: func(tu KiroToolUse) {
 			// 先刷新缓冲区
 			processClaudeText("", false, true)
+			rawContentBuilder.WriteString(tu.Name)
+			if b, err := json.Marshal(tu.Input); err == nil {
+				rawContentBuilder.Write(b)
+			}
 
 			toolUses = append(toolUses, tu)
 			closeActiveBlock()
@@ -845,6 +824,17 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 		eventThinkingOpen = false
 	}
 	closeActiveBlock()
+
+	inputTokens = estimatedInputTokens
+	outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
+	thinkingOutput := rawThinkingBuilder.String()
+	if thinking && thinkingOutput == "" && extractedReasoning != "" {
+		thinkingOutput = extractedReasoning
+	}
+	if !thinking {
+		thinkingOutput = ""
+	}
+	outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
@@ -933,7 +923,7 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
@@ -971,10 +961,6 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		return
 	}
 
-	h.recordSuccess(inputTokens, outputTokens, credits)
-	h.pool.RecordSuccess(account.ID)
-	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-
 	// 合并 thinking 内容（如果有 reasoningContentEvent 的内容）
 	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
 	finalContent, extractedReasoning := extractThinkingFromContent(content)
@@ -984,6 +970,14 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	if !thinking {
 		thinkingContent = ""
 	}
+
+	inputTokens = estimatedInputTokens
+	outputTokens = estimateClaudeOutputTokens(finalContent, thinkingContent, toolUses)
+
+	h.recordSuccess(inputTokens, outputTokens, credits)
+	h.pool.RecordSuccess(account.ID)
+	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+
 	if thinking && thinkingContent != "" {
 		switch thinkingFormat {
 		case "think":
@@ -1047,18 +1041,19 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
+	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	if req.Stream {
-		h.handleOpenAIStream(w, account, kiroPayload, req.Model, thinking)
+		h.handleOpenAIStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
 	} else {
-		h.handleOpenAINonStream(w, account, kiroPayload, req.Model, thinking)
+		h.handleOpenAINonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool) {
+func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1077,6 +1072,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	var toolCallIndex int
 	var inputTokens, outputTokens int
 	var credits float64
+	var rawContentBuilder strings.Builder
+	var rawReasoningBuilder strings.Builder
 
 	// Thinking 标签解析状态
 	var textBuffer string
@@ -1312,6 +1309,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 			if text == "" {
 				return
 			}
+			if isThinking {
+				rawReasoningBuilder.WriteString(text)
+			} else {
+				rawContentBuilder.WriteString(text)
+			}
 			processText(text, isThinking, false)
 		},
 		OnToolUse: func(tu KiroToolUse) {
@@ -1319,6 +1321,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 			processText("", false, true)
 
 			args, _ := json.Marshal(tu.Input)
+			rawContentBuilder.WriteString(tu.Name)
+			rawContentBuilder.Write(args)
 			tc := ToolCall{ID: tu.ToolUseID, Type: "function"}
 			tc.Function.Name = tu.Name
 			tc.Function.Arguments = string(args)
@@ -1376,6 +1380,21 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		eventThinkingOpen = false
 	}
 
+	inputTokens = estimatedInputTokens
+	outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
+	reasoningOutput := rawReasoningBuilder.String()
+	if thinking && reasoningOutput == "" && extractedReasoning != "" {
+		reasoningOutput = extractedReasoning
+	}
+	if !thinking {
+		reasoningOutput = ""
+	}
+	outputTokens = estimateApproxTokens(outputContent) + estimateApproxTokens(reasoningOutput)
+	for _, tc := range toolCalls {
+		outputTokens += estimateApproxTokens(tc.Function.Name)
+		outputTokens += estimateApproxTokens(tc.Function.Arguments)
+	}
+
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
@@ -1409,7 +1428,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool) {
+func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
 	var content string
 	var reasoningContent string
 	var toolUses []KiroToolUse
@@ -1438,10 +1457,6 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		return
 	}
 
-	h.recordSuccess(inputTokens, outputTokens, credits)
-	h.pool.RecordSuccess(account.ID)
-	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-
 	// 解析 content 中的 <thinking> 标签
 	finalContent, extractedReasoning := extractThinkingFromContent(content)
 	if thinking && reasoningContent == "" && extractedReasoning != "" {
@@ -1449,6 +1464,13 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	} else if !thinking {
 		reasoningContent = ""
 	}
+
+	inputTokens = estimatedInputTokens
+	outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+
+	h.recordSuccess(inputTokens, outputTokens, credits)
+	h.pool.RecordSuccess(account.ID)
+	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 	resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
