@@ -1328,6 +1328,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetAccounts(w, r)
 	case path == "/accounts" && r.Method == "POST":
 		h.apiAddAccount(w, r)
+	case path == "/accounts/batch" && r.Method == "POST":
+		h.apiBatchAccounts(w, r)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/refresh") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/refresh")
 		h.apiRefreshAccount(w, r, id)
@@ -1414,6 +1416,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"expiresAt":         a.ExpiresAt,
 			"hasToken":          a.AccessToken != "",
 			"machineId":         a.MachineId,
+			"weight":            a.Weight,
 			"subscriptionType":  a.SubscriptionType,
 			"subscriptionTitle": a.SubscriptionTitle,
 			"daysRemaining":     a.DaysRemaining,
@@ -1505,6 +1508,9 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	if v, ok := updates["machineId"].(string); ok {
 		existing.MachineId = v
 	}
+	if v, ok := updates["weight"].(float64); ok {
+		existing.Weight = int(v)
+	}
 
 	if err := config.UpdateAccount(id, *existing); err != nil {
 		w.WriteHeader(500)
@@ -1514,6 +1520,95 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 
 	h.pool.Reload()
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// apiBatchAccounts 批量操作账号（启用/禁用/刷新）
+func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs    []string `json:"ids"`
+		Action string   `json:"action"` // "enable", "disable", "refresh"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if len(req.IDs) == 0 {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "No account IDs provided"})
+		return
+	}
+
+	switch req.Action {
+	case "enable", "disable":
+		enabled := req.Action == "enable"
+		accounts := config.GetAccounts()
+		idSet := make(map[string]bool)
+		for _, id := range req.IDs {
+			idSet[id] = true
+		}
+		for _, a := range accounts {
+			if idSet[a.ID] {
+				a.Enabled = enabled
+				if enabled && a.BanStatus != "" && a.BanStatus != "ACTIVE" {
+					a.BanStatus = "ACTIVE"
+					a.BanReason = ""
+					a.BanTime = 0
+				}
+				config.UpdateAccount(a.ID, a)
+			}
+		}
+		h.pool.Reload()
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "count": len(req.IDs)})
+
+	case "refresh":
+		successCount := 0
+		failCount := 0
+		for _, id := range req.IDs {
+			accounts := config.GetAccounts()
+			var account *config.Account
+			for i := range accounts {
+				if accounts[i].ID == id {
+					account = &accounts[i]
+					break
+				}
+			}
+			if account == nil {
+				failCount++
+				continue
+			}
+			// 刷新 token
+			if account.RefreshToken != "" {
+				if newAccess, newRefresh, newExpires, err := auth.RefreshToken(account); err == nil {
+					account.AccessToken = newAccess
+					if newRefresh != "" {
+						account.RefreshToken = newRefresh
+					}
+					account.ExpiresAt = newExpires
+					config.UpdateAccountToken(id, newAccess, newRefresh, newExpires)
+					h.pool.UpdateToken(id, newAccess, newRefresh, newExpires)
+				}
+			}
+			// 刷新账户信息
+			info, err := RefreshAccountInfo(account)
+			if err != nil {
+				failCount++
+				continue
+			}
+			config.UpdateAccountInfo(id, *info)
+			successCount++
+		}
+		h.pool.Reload()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"refreshed": successCount,
+			"failed":    failCount,
+		})
+
+	default:
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid action: " + req.Action})
+	}
 }
 
 func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {

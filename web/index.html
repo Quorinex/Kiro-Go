@@ -532,7 +532,7 @@
 
         .account-stats {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 6px;
             margin-top: 10px;
             padding-top: 10px;
@@ -932,6 +932,26 @@
                         <button class="btn btn-primary btn-sm" onclick="showModal('add')" data-i18n="accounts.add"></button>
                     </div>
                 </div>
+                <div id="accountsToolbar" style="display:flex;gap:8px;align-items:center;padding:0 20px 12px">
+                    <label style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;flex-shrink:0"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this.checked)" style="width:15px;height:15px;cursor:pointer"> <span style="font-size:13px;color:#374151" data-i18n="batch.selectAll"></span></label>
+                    <div style="height:16px;width:1px;background:#e2e8f0;flex-shrink:0"></div>
+                    <div id="batchBar" style="display:none;align-items:center;gap:6px;flex-shrink:0">
+                        <span id="batchCount" style="font-size:12px;color:#7c3aed;font-weight:600;white-space:nowrap"></span>
+                        <button class="btn btn-sm btn-primary" onclick="batchAction('enable')" style="padding:3px 10px;font-size:12px" data-i18n="batch.enable"></button>
+                        <button class="btn btn-sm btn-secondary" onclick="batchAction('disable')" style="padding:3px 10px;font-size:12px" data-i18n="batch.disable"></button>
+                        <button class="btn btn-sm btn-secondary" onclick="batchAction('refresh')" style="padding:3px 10px;font-size:12px" data-i18n="batch.refresh"></button>
+                        <div style="height:16px;width:1px;background:#e2e8f0;flex-shrink:0"></div>
+                    </div>
+                    <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-shrink:0">
+                        <input type="text" id="filterSearch" oninput="onFilterChange()" style="width:260px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px;font-size:14px;outline:none" data-i18n-placeholder="filter.search">
+                        <select id="filterStatusSelect" onchange="onFilterChange()" style="padding:4px 6px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;background:#fff;cursor:pointer">
+                            <option value="all" data-i18n="filter.all"></option>
+                            <option value="enabled" data-i18n="filter.enabled"></option>
+                            <option value="disabled" data-i18n="filter.disabled"></option>
+                            <option value="banned" data-i18n="filter.banned"></option>
+                        </select>
+                    </div>
+                </div>
                 <div id="accountsList"></div>
             </div>
         </div>
@@ -1243,7 +1263,25 @@
                 'update.goDownload': '前往下载',
                 'update.changelog': '更新内容',
                 'privacy.label': '隐私模式',
-                'privacy.tooltip': '开启后邮箱将脱敏显示'
+                'privacy.tooltip': '开启后邮箱将脱敏显示',
+                'batch.enable': '批量启用',
+                'batch.disable': '批量禁用',
+                'batch.refresh': '批量刷新',
+                'batch.selected': '已选 {0} 个',
+                'batch.selectAll': '全选',
+                'batch.confirmEnable': '确定批量启用 {0} 个账号？',
+                'batch.confirmDisable': '确定批量禁用 {0} 个账号？',
+                'batch.confirmRefresh': '确定批量刷新 {0} 个账号？',
+                'batch.refreshResult': '刷新完成：成功 {0}，失败 {1}',
+                'batch.done': '操作完成',
+                'filter.search': '搜索邮箱/昵称...',
+                'filter.all': '全部',
+                'filter.enabled': '已启用',
+                'filter.disabled': '已禁用',
+                'filter.banned': '已封禁',
+                'accounts.weight': '权重',
+                'detail.weight': '请求权重',
+                'detail.weightHint': '0-1=普通, 2+=高优先级'
             },
             en: {
                 'login.subtitle': 'Enter admin password to login',
@@ -1427,7 +1465,25 @@
                 'update.goDownload': 'Download',
                 'update.changelog': 'Changelog',
                 'privacy.label': 'Privacy Mode',
-                'privacy.tooltip': 'Mask email addresses when enabled'
+                'privacy.tooltip': 'Mask email addresses when enabled',
+                'batch.enable': 'Batch Enable',
+                'batch.disable': 'Batch Disable',
+                'batch.refresh': 'Batch Refresh',
+                'batch.selected': '{0} selected',
+                'batch.selectAll': 'Select All',
+                'batch.confirmEnable': 'Enable {0} accounts?',
+                'batch.confirmDisable': 'Disable {0} accounts?',
+                'batch.confirmRefresh': 'Refresh {0} accounts?',
+                'batch.refreshResult': 'Refresh done: {0} success, {1} failed',
+                'batch.done': 'Done',
+                'filter.search': 'Search email/nickname...',
+                'filter.all': 'All',
+                'filter.enabled': 'Enabled',
+                'filter.disabled': 'Disabled',
+                'filter.banned': 'Banned',
+                'accounts.weight': 'Weight',
+                'detail.weight': 'Request Weight',
+                'detail.weightHint': '0-1=normal, 2+=higher priority'
             }
         };
         let currentLang = localStorage.getItem('kiro_lang') || 'zh';
@@ -1461,6 +1517,9 @@
         let password = localStorage.getItem('admin_password') || '';
         const baseUrl = location.origin;
         let accountsData = [];
+        let selectedAccounts = new Set();
+        let filterKeyword = '';
+        let filterStatus = 'all';
 
         // 隐私模式状态管理
         let privacyModeEnabled = true;
@@ -1600,34 +1659,115 @@
             accountsData = await res.json();
             renderAccounts();
         }
+        function getFilteredAccounts() {
+            return accountsData.filter(a => {
+                if (filterStatus === 'enabled' && !a.enabled) return false;
+                if (filterStatus === 'disabled' && (a.enabled || (a.banStatus && a.banStatus !== 'ACTIVE'))) return false;
+                if (filterStatus === 'banned' && (!a.banStatus || a.banStatus === 'ACTIVE')) return false;
+                if (filterKeyword) {
+                    const kw = filterKeyword.toLowerCase();
+                    const email = (a.email || '').toLowerCase();
+                    if (!email.includes(kw)) return false;
+                }
+                return true;
+            });
+        }
+        function onFilterChange() {
+            filterKeyword = document.getElementById('filterSearch').value;
+            filterStatus = document.getElementById('filterStatusSelect').value;
+            renderAccounts();
+        }
+        function toggleSelectAll(checked) {
+            const filtered = getFilteredAccounts();
+            if (checked) {
+                filtered.forEach(a => selectedAccounts.add(a.id));
+            } else {
+                selectedAccounts.clear();
+            }
+            renderAccounts();
+            updateBatchBar();
+        }
+        function toggleSelectAccount(id) {
+            if (selectedAccounts.has(id)) {
+                selectedAccounts.delete(id);
+            } else {
+                selectedAccounts.add(id);
+            }
+            updateBatchBar();
+            const cb = document.getElementById('selectAllCheckbox');
+            if (cb) {
+                const filtered = getFilteredAccounts();
+                cb.checked = filtered.length > 0 && filtered.every(a => selectedAccounts.has(a.id));
+            }
+        }
+        function updateBatchBar() {
+            const bar = document.getElementById('batchBar');
+            const count = selectedAccounts.size;
+            if (count > 0) {
+                bar.style.display = 'flex';
+                document.getElementById('batchCount').textContent = t('batch.selected', count);
+            } else {
+                bar.style.display = 'none';
+            }
+        }
+        async function batchAction(action) {
+            const ids = Array.from(selectedAccounts);
+            if (ids.length === 0) return;
+            const confirmKey = 'batch.confirm' + action.charAt(0).toUpperCase() + action.slice(1);
+            if (!confirm(t(confirmKey, ids.length))) return;
+            try {
+                const res = await fetch('/admin/api/accounts/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ ids, action })
+                });
+                const d = await res.json();
+                if (action === 'refresh' && d.success) {
+                    alert(t('batch.refreshResult', d.refreshed, d.failed));
+                }
+                selectedAccounts.clear();
+                updateBatchBar();
+                loadAccounts();
+                loadStats();
+            } catch (e) {
+                alert(t('common.failed'));
+            }
+        }
         function renderAccounts() {
             const container = document.getElementById('accountsList');
             if (!container) return;
-            if (accountsData.length === 0) {
+            const filtered = getFilteredAccounts();
+            if (filtered.length === 0) {
                 container.innerHTML = '<p style="text-align:center;color:#64748b;padding:30px">' + t('accounts.empty') + '</p>';
                 return;
             }
-            container.innerHTML = accountsData.map(a => {
+            container.innerHTML = filtered.map(a => {
                 const usagePercent = (a.usagePercent || 0) * 100;
                 const usageClass = usagePercent > 90 ? 'critical' : usagePercent > 70 ? 'high' : '';
                 const trialUsagePercent = (a.trialUsagePercent || 0) * 100;
                 const trialUsageClass = trialUsagePercent > 90 ? 'critical' : trialUsagePercent > 70 ? 'high' : '';
-                return '<div class="account-card">' +
+                const isSelected = selectedAccounts.has(a.id);
+                const weightVal = a.weight || 0;
+                const weightBadge = weightVal >= 2 ? '<span class="badge" style="background:#f59e0b;color:#fff">W:' + weightVal + '</span>' : '';
+                return '<div class="account-card" style="' + (isSelected ? 'border-color:#7c3aed;background:#faf5ff' : '') + '">' +
                     '<div class="account-header">' +
-                    '<div class="account-info">' +
+                    '<div class="account-info" style="display:flex;align-items:center;gap:8px">' +
+                    '<input type="checkbox" ' + (isSelected ? 'checked' : '') + ' onchange="toggleSelectAccount(\'' + a.id + '\')" style="cursor:pointer;width:16px;height:16px;flex-shrink:0">' +
+                    '<div>' +
                     '<div class="account-email">' + getDisplayEmail(a.email, a.id) + '</div>' +
                     '<div class="account-meta">' +
                     getSubBadge(a.subscriptionType) +
                     getTrialBadge(a) +
+                    weightBadge +
                     '<span class="badge badge-info">' + formatAuthMethod(a.provider || a.authMethod) + '</span>' +
                     getStatusBadge(a) +
+                    '</div>' +
                     '</div>' +
                     '</div>' +
                     '<div class="account-actions">' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="refreshAccount(\'' + a.id + '\')" title="' + t('accounts.refresh') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></button>' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="showDetail(\'' + a.id + '\')" title="' + t('accounts.detail') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="copyAccountJSON(\'' + a.id + '\', this)" title="' + t('accounts.copyJSON') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>' +
-                    // 封禁账户不显示启用/禁用按钮
                     (a.banStatus && a.banStatus !== 'ACTIVE' ? '' :
                         '<button class="btn btn-sm ' + (a.enabled ? 'btn-secondary' : 'btn-primary') + '" onclick="toggleAccount(\'' + a.id + '\',' + !a.enabled + ')">' + (a.enabled ? t('accounts.disable') : t('accounts.enable')) + '</button>') +
                     '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.id + '\')">' + t('accounts.delete') + '</button>' +
@@ -1640,6 +1780,9 @@
                     '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + t('accounts.tokens') + '</div></div>' +
                     '<div class="account-stat"><div class="account-stat-value">' + (a.totalCredits || 0).toFixed(1) + '</div><div class="account-stat-label">' + t('accounts.credits') + '</div></div>' +
                     '<div class="account-stat"><div class="account-stat-value">' + formatTokenExpiry(a.expiresAt) + '</div><div class="account-stat-label">' + t('accounts.expiry') + '</div></div>' +
+                    '<div class="account-stat"><div class="account-stat-value"><select onchange="quickSetWeight(\'' + a.id + '\',this.value)" style="width:52px;padding:1px 2px;border:1px solid #e2e8f0;border-radius:4px;font-size:12px;text-align:center;cursor:pointer;background:#fff">' +
+                    [0,1,2,3,4,5].map(w => '<option value="' + w + '"' + (weightVal === w ? ' selected' : '') + '>' + w + '</option>').join('') +
+                    '</select></div><div class="account-stat-label">' + t('accounts.weight') + '</div></div>' +
                     '</div>' +
                     '</div>';
             }).join('');
@@ -1747,6 +1890,11 @@
                 '<button class="btn btn-sm btn-secondary" onclick="generateMachineId()">' + t('detail.generate') + '</button>' +
                 '<button class="btn btn-sm btn-primary" onclick="saveMachineId(\'' + id + '\')">' + t('common.saved').split(' ')[0] + '</button>' +
                 '</div></div>' +
+                '<div class="detail-section"><h4>' + t('detail.weight') + '</h4><div class="machine-id-row">' +
+                '<input type="number" id="weightInput" value="' + (a.weight || 0) + '" min="0" max="10" style="width:80px">' +
+                '<span style="color:#64748b;font-size:12px;flex:1">' + t('detail.weightHint') + '</span>' +
+                '<button class="btn btn-sm btn-primary" onclick="saveWeight(\'' + id + '\')">' + t('common.saved').split(' ')[0] + '</button>' +
+                '</div></div>' +
                 '<div class="detail-section"><h4>' + t('detail.subscription') + '</h4><div class="detail-grid">' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.subscriptionType') + '</div><div class="detail-value">' + (a.subscriptionTitle || a.subscriptionType || '-') + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.tokenExpiry') + '</div><div class="detail-value">' + (a.expiresAt ? new Date(a.expiresAt * 1000).toLocaleString() : '-') + '</div></div>' +
@@ -1813,6 +1961,28 @@
                 const d = await res.json();
                 if (d.success) { alert(t('detail.saved')); loadAccounts(); } else { alert(t('detail.saveFailed') + ': ' + d.error); }
             } catch (e) { alert(t('detail.saveFailed')); }
+        }
+        async function saveWeight(id) {
+            const weight = parseInt(document.getElementById('weightInput').value) || 0;
+            try {
+                const res = await fetch('/admin/api/accounts/' + id, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ weight })
+                });
+                const d = await res.json();
+                if (d.success) { alert(t('detail.saved')); loadAccounts(); } else { alert(t('detail.saveFailed') + ': ' + d.error); }
+            } catch (e) { alert(t('detail.saveFailed')); }
+        }
+        async function quickSetWeight(id, value) {
+            const weight = parseInt(value) || 0;
+            try {
+                await fetch('/admin/api/accounts/' + id, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ weight })
+                });
+                const acc = accountsData.find(a => a.id === id);
+                if (acc) acc.weight = weight;
+            } catch (e) { /* silent */ }
         }
         async function loadSettings() {
             const res = await fetch('/admin/api/settings', { headers: { 'X-Admin-Password': password } });

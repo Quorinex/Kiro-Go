@@ -12,7 +12,7 @@ import (
 
 const (
 	kiroRestAPIBase = "https://codewhisperer.us-east-1.amazonaws.com"
-	kiroVersion     = "0.6.18"
+	kiroVersion     = "0.7.45"
 )
 
 // GetUsageLimits 获取账户使用量和订阅信息
@@ -113,11 +113,11 @@ func setKiroHeaders(req *http.Request, account *config.Account) {
 	machineId := account.MachineId
 	var userAgent, amzUserAgent string
 	if machineId != "" {
-		userAgent = fmt.Sprintf("aws-sdk-js/1.0.18 ua/2.1 os/windows lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-%s-%s", kiroVersion, machineId)
-		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.18 KiroIDE %s %s", kiroVersion, machineId)
+		userAgent = fmt.Sprintf("aws-sdk-js/1.0.27 ua/2.1 os/linux lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-%s-%s", kiroVersion, machineId)
+		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.27 KiroIDE %s %s", kiroVersion, machineId)
 	} else {
-		userAgent = fmt.Sprintf("aws-sdk-js/1.0.18 ua/2.1 os/windows lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-%s", kiroVersion)
-		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.18 KiroIDE-%s", kiroVersion)
+		userAgent = fmt.Sprintf("aws-sdk-js/1.0.27 ua/2.1 os/linux lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-%s", kiroVersion)
+		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.27 KiroIDE %s", kiroVersion)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+account.AccessToken)

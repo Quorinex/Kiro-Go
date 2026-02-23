@@ -50,6 +50,9 @@ type Account struct {
 	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
 
+	// Priority weight for load balancing (higher = more requests)
+	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
+
 	// Account status
 	Enabled   bool   `json:"enabled"`             // Whether account is active in the pool
 	BanStatus string `json:"banStatus,omitempty"` // Ban status: "ACTIVE", "BANNED", "SUSPENDED"

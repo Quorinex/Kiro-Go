@@ -20,6 +20,9 @@ func RefreshToken(account *config.Account) (string, string, int64, error) {
 
 // refreshOIDCToken IdC/Builder ID token 刷新
 func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (string, string, int64, error) {
+	if clientID == "" || clientSecret == "" {
+		return "", "", 0, fmt.Errorf("OIDC refresh requires clientId and clientSecret")
+	}
 	if region == "" {
 		region = "us-east-1"
 	}

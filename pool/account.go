@@ -36,13 +36,25 @@ func GetPool() *AccountPool {
 }
 
 // Reload 从配置重新加载账号
+// 构建加权列表：weight<=1 出现 1 次，weight>=2 出现 weight 次
 func (p *AccountPool) Reload() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.accounts = config.GetEnabledAccounts()
+	enabled := config.GetEnabledAccounts()
+	var weighted []config.Account
+	for _, a := range enabled {
+		w := a.Weight
+		if w < 1 {
+			w = 1
+		}
+		for j := 0; j < w; j++ {
+			weighted = append(weighted, a)
+		}
+	}
+	p.accounts = weighted
 }
 
-// GetNext 获取下一个可用账号（轮询）
+// GetNext 获取下一个可用账号（加权轮询）
 func (p *AccountPool) GetNext() *config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -53,19 +65,26 @@ func (p *AccountPool) GetNext() *config.Account {
 
 	now := time.Now()
 	n := len(p.accounts)
+	seen := make(map[string]bool)
 
-	// 轮询查找可用账号
+	// 加权轮询查找可用账号
 	for i := 0; i < n; i++ {
 		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
 		acc := &p.accounts[idx]
 
+		if seen[acc.ID] {
+			continue
+		}
+
 		// 跳过冷却中的账号
 		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			seen[acc.ID] = true
 			continue
 		}
 
 		// 跳过即将过期的 Token
 		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-300 {
+			seen[acc.ID] = true
 			continue
 		}
 

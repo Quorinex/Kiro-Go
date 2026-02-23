@@ -10,28 +10,33 @@ import (
 	"github.com/google/uuid"
 )
 
-// 模型映射
-var modelMap = map[string]string{
-	"claude-sonnet-4-5":        "claude-sonnet-4.5",
-	"claude-sonnet-4.5":        "claude-sonnet-4.5",
-	"claude-haiku-4-5":         "claude-haiku-4.5",
-	"claude-haiku-4.5":         "claude-haiku-4.5",
-	"claude-sonnet-4-6":        "claude-sonnet-4.6",
-	"claude-sonnet-4.6":        "claude-sonnet-4.6",
-	"claude-opus-4-6":          "claude-opus-4.6",
-	"claude-opus-4.6":          "claude-opus-4.6",
-	"claude-opus-4-5":          "claude-opus-4.5",
-	"claude-opus-4.5":          "claude-opus-4.5",
-	"claude-sonnet-4":          "claude-sonnet-4",
-	"claude-sonnet-4-20250514": "claude-sonnet-4",
-	"claude-3-5-sonnet":        "claude-sonnet-4.5",
-	"claude-3-opus":            "claude-sonnet-4.5",
-	"claude-3-sonnet":          "claude-sonnet-4",
-	"claude-3-haiku":           "claude-haiku-4.5",
-	"gpt-4":                    "claude-sonnet-4.5",
-	"gpt-4o":                   "claude-sonnet-4.5",
-	"gpt-4-turbo":              "claude-sonnet-4.5",
-	"gpt-3.5-turbo":            "claude-sonnet-4.5",
+// 模型映射（有序，长 key 优先匹配，避免 "claude-sonnet-4" 误匹配 "claude-sonnet-4.5"）
+type modelMapping struct {
+	key   string
+	value string
+}
+
+var modelMapOrdered = []modelMapping{
+	{"claude-sonnet-4-20250514", "claude-sonnet-4"},
+	{"claude-sonnet-4-5", "claude-sonnet-4.5"},
+	{"claude-sonnet-4.5", "claude-sonnet-4.5"},
+	{"claude-sonnet-4-6", "claude-sonnet-4.6"},
+	{"claude-sonnet-4.6", "claude-sonnet-4.6"},
+	{"claude-haiku-4-5", "claude-haiku-4.5"},
+	{"claude-haiku-4.5", "claude-haiku-4.5"},
+	{"claude-opus-4-5", "claude-opus-4.5"},
+	{"claude-opus-4.5", "claude-opus-4.5"},
+	{"claude-opus-4-6", "claude-opus-4.6"},
+	{"claude-opus-4.6", "claude-opus-4.6"},
+	{"claude-sonnet-4", "claude-sonnet-4"},
+	{"claude-3-5-sonnet", "claude-sonnet-4.5"},
+	{"claude-3-opus", "claude-sonnet-4.5"},
+	{"claude-3-sonnet", "claude-sonnet-4"},
+	{"claude-3-haiku", "claude-haiku-4.5"},
+	{"gpt-4-turbo", "claude-sonnet-4.5"},
+	{"gpt-4o", "claude-sonnet-4.5"},
+	{"gpt-4", "claude-sonnet-4.5"},
+	{"gpt-3.5-turbo", "claude-sonnet-4.5"},
 }
 
 // Thinking 模式提示
@@ -51,10 +56,10 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 		lower = strings.ToLower(model)
 	}
 
-	// 映射模型
-	for k, v := range modelMap {
-		if strings.Contains(lower, k) {
-			return v, thinking
+	// 映射模型（有序匹配，长 key 优先）
+	for _, m := range modelMapOrdered {
+		if strings.Contains(lower, m.key) {
+			return m.value, thinking
 		}
 	}
 
