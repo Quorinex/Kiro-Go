@@ -88,14 +88,24 @@ func (p *AccountPool) GetNext() *config.Account {
 			continue
 		}
 
+		// 跳过额度已用尽的账号（适用于所有订阅类型）
+		if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
+			seen[acc.ID] = true
+			continue
+		}
+
 		return acc
 	}
 
-	// 无可用账号，返回冷却时间最短的
+	// 无可用账号，返回冷却时间最短的（排除额度用尽的）
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
 		acc := &p.accounts[i]
+		// 额度用尽的账号不作为 fallback
+		if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
+			continue
+		}
 		if cooldown, ok := p.cooldowns[acc.ID]; ok {
 			if best == nil || cooldown.Before(earliest) {
 				best = acc
