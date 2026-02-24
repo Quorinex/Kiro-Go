@@ -44,6 +44,7 @@ const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
 <max_thinking_length>200000</max_thinking_length>`
 
 const minimalFallbackUserContent = "."
+const toolResultsContinuationPrefix = "Tool results:"
 
 // ParseModelAndThinking 解析模型名称，返回实际模型和是否启用 thinking
 func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
@@ -199,21 +200,12 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	// 确保 history 以 user 开始
-	if len(history) > 0 && history[0].AssistantResponseMessage != nil {
-		history = append([]KiroHistoryMessage{{
-			UserInputMessage: &KiroUserInputMessage{
-				Content: "Begin conversation",
-				ModelID: modelID,
-				Origin:  origin,
-			},
-		}}, history...)
-	}
+	history = trimLeadingAssistantHistory(history)
 
 	// 构建最终内容
 	finalContent := ""
 	if systemPrompt != "" {
-		finalContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n\n"
+		finalContent = strings.TrimSpace(systemPrompt) + "\n\n"
 	}
 	if currentContent != "" {
 		finalContent += currentContent
@@ -830,11 +822,27 @@ func buildToolResultsContinuation(toolResults []KiroToolResult) string {
 		return minimalFallbackUserContent
 	}
 
-	joined := strings.Join(parts, "\n\n")
+	joined := toolResultsContinuationPrefix + "\n\n" + strings.Join(parts, "\n\n")
 	if len(joined) > 4000 {
 		return joined[:4000]
 	}
 	return joined
+}
+
+func trimLeadingAssistantHistory(history []KiroHistoryMessage) []KiroHistoryMessage {
+	idx := 0
+	for idx < len(history) && history[idx].AssistantResponseMessage != nil {
+		idx++
+	}
+
+	if idx == 0 {
+		return history
+	}
+	if idx >= len(history) {
+		return nil
+	}
+
+	return history[idx:]
 }
 
 func firstClaudeConversationAnchor(messages []ClaudeMessage) string {
@@ -847,15 +855,7 @@ func firstClaudeConversationAnchor(messages []ClaudeMessage) string {
 			return strings.TrimSpace(text)
 		}
 		if len(toolResults) > 0 {
-			return buildToolResultsContinuation(toolResults)
-		}
-	}
-
-	for _, msg := range messages {
-		if strings.TrimSpace(msg.Role) != "" {
-			if text := extractOpenAIMessageText(msg.Content); strings.TrimSpace(text) != "" {
-				return strings.TrimSpace(text)
-			}
+			continue
 		}
 	}
 
@@ -873,23 +873,30 @@ func firstOpenAIConversationAnchor(messages []OpenAIMessage) string {
 		}
 	}
 
-	for _, msg := range messages {
-		text := extractOpenAIMessageText(msg.Content)
-		if strings.TrimSpace(text) != "" {
-			return strings.TrimSpace(text)
-		}
-	}
-
 	return ""
 }
 
 func buildConversationID(modelID, systemPrompt, anchor string) string {
 	anchor = strings.TrimSpace(anchor)
-	if anchor == "" {
+	if isSyntheticConversationAnchor(anchor) {
 		return uuid.New().String()
 	}
 	seed := strings.Join([]string{modelID, strings.TrimSpace(systemPrompt), anchor}, "\n")
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)).String()
+}
+
+func isSyntheticConversationAnchor(anchor string) bool {
+	if strings.TrimSpace(anchor) == "" {
+		return true
+	}
+
+	normalized := strings.ToLower(strings.Join(strings.Fields(anchor), " "))
+	switch normalized {
+	case ".", "begin conversation", "please analyze the attached image.", strings.ToLower(minimalFallbackUserContent):
+		return true
+	default:
+		return false
+	}
 }
 
 func extractOpenAITextPart(part map[string]interface{}) (string, bool) {

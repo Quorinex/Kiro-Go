@@ -48,3 +48,53 @@ func TestThinkingSourceSameSourceRemainsAllowed(t *testing.T) {
 		t.Fatalf("expected repeated reasoning source selection to stay allowed")
 	}
 }
+
+func TestValidateOpenAIRequestShapeRejectsAssistantPrefill(t *testing.T) {
+	req := &OpenAIRequest{
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "prefill"},
+		},
+	}
+
+	if msg := validateOpenAIRequestShape(req); msg == "" {
+		t.Fatalf("expected assistant-prefill final message to be rejected")
+	}
+}
+
+func TestValidateOpenAIRequestShapeAllowsToolResultFinalTurn(t *testing.T) {
+	req := &OpenAIRequest{
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "find weather"},
+			{
+				Role: "assistant",
+				ToolCalls: []ToolCall{{
+					ID:   "call_1",
+					Type: "function",
+					Function: struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					}{Name: "get_weather", Arguments: "{}"},
+				}},
+			},
+			{Role: "tool", ToolCallID: "call_1", Content: "sunny"},
+		},
+	}
+
+	if msg := validateOpenAIRequestShape(req); msg != "" {
+		t.Fatalf("expected tool-result final turn to be valid, got %q", msg)
+	}
+}
+
+func TestValidateClaudeRequestShapeRejectsAssistantPrefill(t *testing.T) {
+	req := &ClaudeRequest{
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "prefill"},
+		},
+	}
+
+	if msg := validateClaudeRequestShape(req); msg == "" {
+		t.Fatalf("expected assistant-prefill final message to be rejected")
+	}
+}

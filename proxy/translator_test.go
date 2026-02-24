@@ -76,8 +76,8 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 	}
 
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage
-	if cur.Content != "tool-result-structured" {
-		t.Fatalf("expected tool-result continuation content, got %q", cur.Content)
+	if !strings.Contains(cur.Content, "tool-result-structured") {
+		t.Fatalf("expected tool-result continuation content to include tool text, got %q", cur.Content)
 	}
 	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
 		t.Fatalf("expected one tool result in current context")
@@ -194,5 +194,69 @@ func TestClaudeConversationIDStableFromAnchor(t *testing.T) {
 	}
 	if payloadA.ConversationState.ConversationID != payloadB.ConversationState.ConversationID {
 		t.Fatalf("expected stable conversation ID across turns, got %q vs %q", payloadA.ConversationState.ConversationID, payloadB.ConversationState.ConversationID)
+	}
+}
+
+func TestOpenAIConversationIDRandomForSyntheticAnchor(t *testing.T) {
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "assistant", Content: "prefill"},
+		},
+	}
+
+	payloadA := OpenAIToKiro(req, false)
+	payloadB := OpenAIToKiro(req, false)
+
+	if payloadA.ConversationState.ConversationID == payloadB.ConversationState.ConversationID {
+		t.Fatalf("expected synthetic anchor to generate non-deterministic conversation IDs")
+	}
+}
+
+func TestClaudeToKiroDropsLeadingAssistantHistory(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{
+			{Role: "assistant", Content: "prefill"},
+			{Role: "user", Content: "real user message"},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+
+	if len(payload.ConversationState.History) != 0 {
+		t.Fatalf("expected leading assistant-only history to be dropped, got %d entries", len(payload.ConversationState.History))
+	}
+
+	if strings.Contains(payload.ConversationState.CurrentMessage.UserInputMessage.Content, "Begin conversation") {
+		t.Fatalf("unexpected synthetic Begin conversation injection in current content: %q", payload.ConversationState.CurrentMessage.UserInputMessage.Content)
+	}
+}
+
+func TestToolResultsContinuationIncludesInstructionPrefix(t *testing.T) {
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "find data"},
+			{Role: "assistant", ToolCalls: []ToolCall{{
+				ID:   "call_1",
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{Name: "fetch", Arguments: "{}"},
+			}}},
+			{Role: "tool", ToolCallID: "call_1", Content: "result-1"},
+		},
+	}
+
+	payload := OpenAIToKiro(req, false)
+	content := payload.ConversationState.CurrentMessage.UserInputMessage.Content
+
+	if !strings.Contains(content, toolResultsContinuationPrefix) {
+		t.Fatalf("expected tool continuation prefix, got %q", content)
+	}
+	if !strings.Contains(content, "result-1") {
+		t.Fatalf("expected tool result text in continuation content, got %q", content)
 	}
 }

@@ -61,6 +61,77 @@ func allowTagSource(source *thinkingStreamSource) bool {
 	return *source == thinkingSourceTagBlock
 }
 
+func validateClaudeRequestShape(req *ClaudeRequest) string {
+	if len(req.Messages) == 0 {
+		return "messages must not be empty"
+	}
+
+	hasUserContext := false
+	lastRole := ""
+	for _, msg := range req.Messages {
+		role := strings.TrimSpace(msg.Role)
+		if role == "" {
+			continue
+		}
+		lastRole = role
+		if role != "user" {
+			continue
+		}
+
+		text, images, toolResults := extractClaudeUserContent(msg.Content)
+		if normalizeUserContent(text, len(images) > 0) != "" || len(toolResults) > 0 {
+			hasUserContext = true
+		}
+	}
+
+	if lastRole == "assistant" {
+		return "assistant-prefill final message is not supported; last message must be user"
+	}
+	if !hasUserContext {
+		return "at least one non-empty user message is required"
+	}
+	return ""
+}
+
+func validateOpenAIRequestShape(req *OpenAIRequest) string {
+	if len(req.Messages) == 0 {
+		return "messages must not be empty"
+	}
+
+	hasNonSystem := false
+	hasUserContext := false
+	lastRole := ""
+	for _, msg := range req.Messages {
+		role := strings.TrimSpace(msg.Role)
+		if role == "" {
+			continue
+		}
+		if role != "system" {
+			hasNonSystem = true
+			lastRole = role
+		}
+
+		if role != "user" {
+			continue
+		}
+		text, images := extractOpenAIUserContent(msg.Content)
+		if normalizeUserContent(text, len(images) > 0) != "" {
+			hasUserContext = true
+		}
+	}
+
+	if !hasNonSystem {
+		return "at least one non-system message is required"
+	}
+	if lastRole == "assistant" {
+		return "assistant-prefill final message is not supported; last message must be user or tool"
+	}
+	if !hasUserContext {
+		return "at least one non-empty user message is required"
+	}
+	return ""
+}
+
 func NewHandler() *Handler {
 	totalReq, successReq, failedReq, totalTokens, totalCredits := config.GetStats()
 	h := &Handler{
@@ -429,6 +500,10 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	var req ClaudeRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON: "+err.Error())
+		return
+	}
+	if msg := validateClaudeRequestShape(&req); msg != "" {
+		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
 	}
 
@@ -1023,6 +1098,10 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	var req OpenAIRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Invalid JSON")
+		return
+	}
+	if msg := validateOpenAIRequestShape(&req); msg != "" {
+		h.sendOpenAIError(w, 400, "invalid_request_error", msg)
 		return
 	}
 
