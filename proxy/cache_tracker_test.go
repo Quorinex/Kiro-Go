@@ -77,7 +77,7 @@ func TestBuildClaudeUsageMapIncludesCacheFields(t *testing.T) {
 // TestPromptCacheStableAcrossBillingHeaderDrift verifies that Claude Code's
 // per-request "x-anthropic-billing-header: cc_version=...; cch=...;" system
 // block (whose content drifts on every request) does not break cache hits.
-// The normalization logic should ensure the same conversation still matches.
+// The tracker should ignore that metadata when fingerprinting cached prefixes.
 func TestPromptCacheStableAcrossBillingHeaderDrift(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	mainSystem := strings.Repeat("You are a helpful coding assistant with deep knowledge of Go, Rust, Python, and TypeScript. ", 80)
@@ -121,6 +121,92 @@ func TestPromptCacheStableAcrossBillingHeaderDrift(t *testing.T) {
 	second := tracker.Compute("acct-1", profile2)
 	if second.CacheReadInputTokens == 0 {
 		t.Fatalf("expected cache read after billing header drift, got %+v", second)
+	}
+}
+
+func TestPromptCacheStableWhenBillingHeaderAppearsOrDisappears(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	mainSystem := strings.Repeat("You are a helpful coding assistant with deep knowledge of Go, Rust, Python, and TypeScript. ", 80)
+
+	build := func(includeBilling bool) *ClaudeRequest {
+		system := []interface{}{}
+		if includeBilling {
+			system = append(system, map[string]interface{}{
+				"type": "text",
+				"text": "x-anthropic-billing-header: cc_version=2.1.87.1; cch=aaaa;",
+			})
+		}
+		system = append(system, map[string]interface{}{
+			"type": "text",
+			"text": mainSystem,
+			"cache_control": map[string]interface{}{
+				"type": "ephemeral",
+			},
+		})
+		return &ClaudeRequest{
+			Model:    "claude-sonnet-4.5",
+			System:   system,
+			Messages: []ClaudeMessage{{Role: "user", Content: "hello world"}},
+		}
+	}
+
+	withBilling := tracker.BuildClaudeProfile(build(true), 2048)
+	if withBilling == nil {
+		t.Fatalf("profile with billing header should be built")
+	}
+	tracker.Update("acct-1", withBilling)
+
+	withoutBilling := tracker.BuildClaudeProfile(build(false), 2048)
+	if withoutBilling == nil {
+		t.Fatalf("profile without billing header should be built")
+	}
+	result := tracker.Compute("acct-1", withoutBilling)
+	if result.CacheReadInputTokens == 0 {
+		t.Fatalf("expected cache read when billing header disappears, got %+v", result)
+	}
+}
+
+func TestCanonicalCacheValueIgnoresPositionKeys(t *testing.T) {
+	first := canonicalizeCacheValue(stripCachePositionKeys(map[string]interface{}{
+		"kind":         "system",
+		"system_index": 0,
+		"block": map[string]interface{}{
+			"type": "text",
+			"text": "stable",
+		},
+	}))
+	second := canonicalizeCacheValue(stripCachePositionKeys(map[string]interface{}{
+		"kind":         "system",
+		"system_index": 1,
+		"block": map[string]interface{}{
+			"type": "text",
+			"text": "stable",
+		},
+	}))
+	if first != second {
+		t.Fatalf("expected position keys to be ignored, got %q vs %q", first, second)
+	}
+}
+
+func TestCanonicalCacheValuePreservesSemanticPositionKeys(t *testing.T) {
+	first := canonicalizeCacheValue(map[string]interface{}{
+		"kind": "system",
+		"block": map[string]interface{}{
+			"type":        "text",
+			"text":        "stable",
+			"block_index": 1,
+		},
+	})
+	second := canonicalizeCacheValue(map[string]interface{}{
+		"kind": "system",
+		"block": map[string]interface{}{
+			"type":        "text",
+			"text":        "stable",
+			"block_index": 2,
+		},
+	})
+	if first == second {
+		t.Fatalf("expected semantic block_index fields to remain fingerprinted")
 	}
 }
 

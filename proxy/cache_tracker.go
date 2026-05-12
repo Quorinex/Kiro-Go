@@ -254,9 +254,10 @@ func flattenClaudeCacheBlocks(req *ClaudeRequest) []cacheablePromptBlock {
 			"description":  tool.Description,
 			"input_schema": tool.InputSchema,
 		}
+		fingerprintValue := stripCachePositionKeys(toolValue)
 		blocks = append(blocks, cacheablePromptBlock{
-			Value:  toolValue,
-			Tokens: estimateApproxTokens(canonicalizeCacheValue(toolValue)),
+			Value:  fingerprintValue,
+			Tokens: estimateApproxTokens(canonicalizeCacheValue(fingerprintValue)),
 			TTL:    normalizePromptCacheTTL(extractPromptCacheTTL(tool)),
 		})
 	}
@@ -357,59 +358,52 @@ func appendPromptBlock(blocks *[]cacheablePromptBlock, wrapper map[string]interf
 	blockValue := wrapper["block"]
 	ttl := normalizePromptCacheTTL(extractPromptCacheTTL(blockValue))
 
-	// Normalize volatile text (e.g. Claude Code's x-anthropic-billing-header
-	// which drifts on every request) so that fingerprints remain stable across
-	// requests within the same conversation.
-	if normalized, changed := normalizeCacheBlockContent(blockValue); changed {
-		cloned := make(map[string]interface{}, len(wrapper))
-		for k, v := range wrapper {
-			cloned[k] = v
-		}
-		cloned["block"] = normalized
-		wrapper = cloned
+	// Drop volatile billing metadata from the cache fingerprint. Claude Code's
+	// x-anthropic-billing-header can drift, appear, or disappear across
+	// otherwise identical requests, and it does not change model semantics.
+	if isAnthropicBillingHeaderBlock(blockValue) {
+		return
 	}
 
-	canonical := canonicalizeCacheValue(wrapper)
+	fingerprintValue := stripCachePositionKeys(wrapper)
+	canonical := canonicalizeCacheValue(fingerprintValue)
 	*blocks = append(*blocks, cacheablePromptBlock{
-		Value:        wrapper,
+		Value:        fingerprintValue,
 		Tokens:       estimateApproxTokens(canonical),
 		TTL:          ttl,
 		IsMessageEnd: isMessageEnd,
 	})
 }
 
-// normalizeCacheBlockContent replaces volatile but semantically irrelevant
-// fields with a placeholder so that the cumulative fingerprint stays stable
-// across requests in the same session. Currently handles:
-//   - Claude Code's "x-anthropic-billing-header: ..." system text block
-//     whose content drifts on every request (version, telemetry hash, etc.)
-func normalizeCacheBlockContent(value interface{}) (interface{}, bool) {
+func stripCachePositionKeys(value map[string]interface{}) map[string]interface{} {
+	cloned := make(map[string]interface{}, len(value))
+	for key, item := range value {
+		if isCachePositionKey(key) {
+			continue
+		}
+		cloned[key] = item
+	}
+	return cloned
+}
+
+func isAnthropicBillingHeaderBlock(value interface{}) bool {
 	blockMap, ok := value.(map[string]interface{})
 	if !ok {
-		return value, false
+		return false
 	}
 
 	// Only normalize text blocks (or blocks without an explicit type but containing text).
 	if t, ok := blockMap["type"].(string); ok && t != "" && t != "text" {
-		return value, false
+		return false
 	}
 
 	text, ok := blockMap["text"].(string)
 	if !ok {
-		return value, false
+		return false
 	}
 
 	trimmed := strings.TrimLeft(text, " \t\r\n")
-	if !strings.HasPrefix(strings.ToLower(trimmed), "x-anthropic-billing-header:") {
-		return value, false
-	}
-
-	cloned := make(map[string]interface{}, len(blockMap))
-	for k, v := range blockMap {
-		cloned[k] = v
-	}
-	cloned["text"] = "__anthropic_billing_header__"
-	return cloned, true
+	return strings.HasPrefix(strings.ToLower(trimmed), "x-anthropic-billing-header:")
 }
 
 func extractPromptCacheTTL(value interface{}) time.Duration {
@@ -587,6 +581,15 @@ func writeCanonicalJSON(buf *bytes.Buffer, value interface{}) {
 	default:
 		encoded, _ := json.Marshal(v)
 		buf.Write(encoded)
+	}
+}
+
+func isCachePositionKey(key string) bool {
+	switch key {
+	case "tool_index", "system_index", "message_index", "block_index":
+		return true
+	default:
+		return false
 	}
 }
 
