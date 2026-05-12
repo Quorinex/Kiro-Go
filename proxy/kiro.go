@@ -196,6 +196,17 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	if _, err := json.Marshal(payload); err != nil {
 		return err
 	}
+	if payload != nil && strings.TrimSpace(payload.ProfileArn) == "" {
+		if profileArn, err := ResolveProfileArn(account); err == nil {
+			payload.ProfileArn = profileArn
+		} else {
+			accountEmail := "<nil>"
+			if account != nil {
+				accountEmail = account.Email
+			}
+			fmt.Printf("[ProfileArn] Failed to resolve profile ARN for %s: %v\n", accountEmail, err)
+		}
+	}
 
 	// 根据配置排序端点
 	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())

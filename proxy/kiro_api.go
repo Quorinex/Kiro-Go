@@ -6,6 +6,7 @@ import (
 	"io"
 	"kiro-go/config"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -17,6 +18,7 @@ const (
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
+	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -77,6 +79,7 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 // ListAvailableModels 获取可用模型列表
 func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
+	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -103,6 +106,66 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 		return nil, err
 	}
 	return result.Models, nil
+}
+
+// ResolveProfileArn returns the account profile ARN, fetching and caching it
+// when it is missing. Some Kiro generation requests require this profile for
+// model authorization even when model listing works without it.
+func ResolveProfileArn(account *config.Account) (string, error) {
+	if account == nil {
+		return "", fmt.Errorf("account is nil")
+	}
+	if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {
+		return profileArn, nil
+	}
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), strings.NewReader(`{"maxResults":10}`))
+	if err != nil {
+		return "", err
+	}
+	setKiroHeaders(req, account)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := kiroRestHttpStore.Load().Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Profiles []struct {
+			Arn string `json:"arn"`
+		} `json:"profiles"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	for _, profile := range result.Profiles {
+		if profileArn := strings.TrimSpace(profile.Arn); profileArn != "" {
+			if updateErr := config.UpdateAccountProfileArn(account.ID, profileArn); updateErr != nil {
+				fmt.Printf("[ProfileArn] Failed to cache profile ARN for %s: %v\n", account.Email, updateErr)
+			}
+			account.ProfileArn = profileArn
+			return profileArn, nil
+		}
+	}
+	return "", fmt.Errorf("no available Kiro profile")
+}
+
+func withProfileArnQuery(rawURL string, account *config.Account) string {
+	if account == nil {
+		return rawURL
+	}
+	profileArn := strings.TrimSpace(account.ProfileArn)
+	if profileArn == "" {
+		return rawURL
+	}
+	return rawURL + "&profileArn=" + neturl.QueryEscape(profileArn)
 }
 
 func setKiroHeaders(req *http.Request, account *config.Account) {
