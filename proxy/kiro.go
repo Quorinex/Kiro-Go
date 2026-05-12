@@ -43,6 +43,7 @@ var kiroEndpoints = []kiroEndpoint{
 
 // 全局 HTTP 客户端，支持运行时更换（代理重配置）
 var kiroHttpStore atomic.Pointer[http.Client]
+var kiroRestHttpStore atomic.Pointer[http.Client]
 
 func init() {
 	InitKiroHttpClient("")
@@ -63,6 +64,8 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 			// 代理不支持 HTTP/2 协议升级
 			t.ForceAttemptHTTP2 = false
 		}
+	} else {
+		t.Proxy = http.ProxyFromEnvironment
 	}
 	return t
 }
@@ -74,6 +77,12 @@ func InitKiroHttpClient(proxyURL string) {
 		Transport: buildKiroTransport(proxyURL),
 	}
 	kiroHttpStore.Store(client)
+
+	restClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: buildKiroTransport(proxyURL),
+	}
+	kiroRestHttpStore.Store(restClient)
 }
 
 // ==================== 请求结构 ====================

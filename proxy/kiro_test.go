@@ -1,6 +1,11 @@
 package proxy
 
-import "testing"
+import (
+	"net/http"
+	"net/url"
+	"testing"
+	"time"
+)
 
 func TestNormalizeChunkBasicProgression(t *testing.T) {
 	prev := ""
@@ -33,5 +38,65 @@ func TestNormalizeChunkOverlapDelta(t *testing.T) {
 
 	if got := normalizeChunk("world!!!", &prev); got != "!!!" {
 		t.Fatalf("expected overlap suffix delta, got %q", got)
+	}
+}
+
+func TestBuildKiroTransportUsesExplicitProxyURL(t *testing.T) {
+	transport := buildKiroTransport("http://proxy.local:8080")
+	req := &http.Request{URL: mustParseURL(t, "https://q.us-east-1.amazonaws.com")}
+
+	got, err := transport.Proxy(req)
+	if err != nil {
+		t.Fatalf("unexpected proxy error: %v", err)
+	}
+	assertProxyURL(t, got, "http://proxy.local:8080")
+}
+
+func TestBuildKiroTransportFallsBackToEnvironmentProxy(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://env-proxy.local:2323")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	transport := buildKiroTransport("")
+	req := &http.Request{URL: mustParseURL(t, "https://q.us-east-1.amazonaws.com")}
+
+	got, err := transport.Proxy(req)
+	if err != nil {
+		t.Fatalf("unexpected proxy error: %v", err)
+	}
+	assertProxyURL(t, got, "http://env-proxy.local:2323")
+}
+
+func TestInitKiroHttpClientKeepsShortRestTimeout(t *testing.T) {
+	InitKiroHttpClient("")
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	streamClient := kiroHttpStore.Load()
+	restClient := kiroRestHttpStore.Load()
+
+	if streamClient.Timeout != 5*time.Minute {
+		t.Fatalf("expected streaming timeout to be 5m, got %s", streamClient.Timeout)
+	}
+	if restClient.Timeout != 30*time.Second {
+		t.Fatalf("expected REST timeout to stay 30s, got %s", restClient.Timeout)
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("invalid test URL: %v", err)
+	}
+	return parsed
+}
+
+func assertProxyURL(t *testing.T, got *url.URL, want string) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("expected proxy URL %q, got nil", want)
+	}
+	if got.String() != want {
+		t.Fatalf("expected proxy URL %q, got %q", want, got.String())
 	}
 }

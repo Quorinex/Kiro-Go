@@ -25,8 +25,7 @@ func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 
 	setKiroHeaders(req, account)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := kiroRestHttpStore.Load().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -57,8 +56,7 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 	setKiroHeaders(req, account)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := kiroRestHttpStore.Load().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -87,8 +85,7 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 
 	setKiroHeaders(req, account)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := kiroRestHttpStore.Load().Do(req)
 	if err != nil {
 		return nil, err
 	}
