@@ -191,12 +191,19 @@ func getSortedEndpoints(preferred string) []kiroEndpoint {
 	return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
 }
 
+func shouldResolveProfileArn(account *config.Account) bool {
+	if account == nil {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(account.Provider), "GitHub")
+}
+
 // CallKiroAPI 调用 Kiro API（流式），双端点自动 fallback
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	if _, err := json.Marshal(payload); err != nil {
 		return err
 	}
-	if payload != nil && strings.TrimSpace(payload.ProfileArn) == "" {
+	if payload != nil && strings.TrimSpace(payload.ProfileArn) == "" && shouldResolveProfileArn(account) {
 		if profileArn, err := ResolveProfileArn(account); err == nil {
 			payload.ProfileArn = profileArn
 		} else {

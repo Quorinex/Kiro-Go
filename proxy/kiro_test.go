@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"kiro-go/config"
 	"net/http"
 	"net/url"
 	"testing"
@@ -38,6 +39,17 @@ func TestNormalizeChunkOverlapDelta(t *testing.T) {
 
 	if got := normalizeChunk("world!!!", &prev); got != "!!!" {
 		t.Fatalf("expected overlap suffix delta, got %q", got)
+	}
+}
+
+func TestShouldResolveProfileArnSkipsGitHubProvider(t *testing.T) {
+	account := &config.Account{
+		AuthMethod: "social",
+		Provider:   "GitHub",
+	}
+
+	if shouldResolveProfileArn(account) {
+		t.Fatal("expected GitHub provider to skip profile ARN resolution")
 	}
 }
 
