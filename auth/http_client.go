@@ -4,12 +4,16 @@ package auth
 import (
 	"net/http"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // 全局 HTTP 客户端存储，支持运行时代理重配置
 var httpClientStore atomic.Pointer[http.Client]
+
+// authProxyClientCache caches per-proxy auth HTTP clients.
+var authProxyClientCache sync.Map
 
 // httpClient 返回当前全局 auth HTTP 客户端
 func httpClient() *http.Client {
@@ -18,6 +22,23 @@ func httpClient() *http.Client {
 
 func init() {
 	InitHttpClient("")
+}
+
+// GetAuthClientForProxy returns an auth HTTP client for the given proxy URL.
+// If proxyURL is empty, returns the global auth HTTP client.
+func GetAuthClientForProxy(proxyURL string) *http.Client {
+	if proxyURL == "" {
+		return httpClient()
+	}
+	if cached, ok := authProxyClientCache.Load(proxyURL); ok {
+		return cached.(*http.Client)
+	}
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: buildAuthTransport(proxyURL),
+	}
+	authProxyClientCache.Store(proxyURL, client)
+	return client
 }
 
 // buildAuthTransport 构建带可选代理的 Transport

@@ -13,14 +13,21 @@ import (
 // RefreshToken 刷新 access token
 // Returns: accessToken, refreshToken, expiresAt, profileArn, error
 func RefreshToken(account *config.Account) (string, string, int64, string, error) {
-	if account.AuthMethod == "social" {
-		return refreshSocialToken(account.RefreshToken)
+	// Resolve per-account proxy: account.ProxyURL > global config
+	proxyURL := account.ProxyURL
+	if proxyURL == "" {
+		proxyURL = config.GetProxyURL()
 	}
-	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.Region)
+	client := GetAuthClientForProxy(proxyURL)
+
+	if account.AuthMethod == "social" {
+		return refreshSocialToken(account.RefreshToken, client)
+	}
+	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
 }
 
 // refreshOIDCToken IdC/Builder ID token 刷新
-func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (string, string, int64, string, error) {
+func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, client *http.Client) (string, string, int64, string, error) {
 	if clientID == "" || clientSecret == "" {
 		return "", "", 0, "", fmt.Errorf("OIDC refresh requires clientId and clientSecret")
 	}
@@ -41,7 +48,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (stri
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", 0, "", err
 	}
@@ -68,7 +75,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (stri
 }
 
 // refreshSocialToken Social (GitHub/Google) token 刷新
-func refreshSocialToken(refreshToken string) (string, string, int64, string, error) {
+func refreshSocialToken(refreshToken string, client *http.Client) (string, string, int64, string, error) {
 	url := "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
 
 	payload := map[string]string{
@@ -79,7 +86,7 @@ func refreshSocialToken(refreshToken string) (string, string, int64, string, err
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", 0, "", err
 	}

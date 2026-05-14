@@ -52,6 +52,9 @@ type Account struct {
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
 	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
 
+	// Per-account outbound proxy (falls back to global ProxyURL if empty)
+	ProxyURL string `json:"proxyURL,omitempty"`
+
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 
