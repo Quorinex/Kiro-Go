@@ -700,7 +700,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	}
 
 	// 获取账号
-	account := h.pool.GetNext()
+	account := h.pool.GetNextForModel(req.Model)
 	if account == nil {
 		h.sendClaudeError(w, 503, "api_error", "No available accounts")
 		return
@@ -1342,7 +1342,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	account := h.pool.GetNext()
+	account := h.pool.GetNextForModel(req.Model)
 	if account == nil {
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return

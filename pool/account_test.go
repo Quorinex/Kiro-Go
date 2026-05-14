@@ -1,7 +1,7 @@
 package pool
 
 import (
-	"kiro-api-proxy/config"
+	"kiro-go/config"
 	"testing"
 )
 

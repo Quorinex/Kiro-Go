@@ -1,5 +1,5 @@
 {
-  "version": "1.0.7",
-  "changelog": "✨ Added and fixed several improvements across the project.\n✨ 新增并修复了一些内容，包含若干功能改进与问题修复。",
+  "version": "1.0.8",
+  "changelog": "🐛 Fix model routing: premium models (Opus, Sonnet 4.5+, 4.7) now only route to PRO+ accounts when Free and Pro accounts are mixed.\n🐛 修复模型分流问题：高级模型（Opus、Sonnet 4.5+、4.7）在 Free 和 Pro 账号混用时，只会分配给 PRO 及以上订阅的账号。",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }

@@ -4,6 +4,7 @@ package pool
 
 import (
 	"kiro-go/config"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -275,4 +276,148 @@ func effectiveOverageWeight(weight int) int {
 		return overageFrequencyScale
 	}
 	return weight
+}
+
+// subscriptionTier returns a numeric tier level for a subscription type.
+// Higher tier = more model access.
+// FREE=0, PRO=1, PRO_PLUS=2, POWER=3
+func subscriptionTier(subType string) int {
+	upper := strings.ToUpper(subType)
+	if strings.Contains(upper, "POWER") {
+		return 3
+	}
+	if strings.Contains(upper, "PRO_PLUS") || strings.Contains(upper, "PROPLUS") {
+		return 2
+	}
+	if strings.Contains(upper, "PRO") {
+		return 1
+	}
+	return 0
+}
+
+// modelRequiredTier returns the minimum subscription tier required for a model.
+// Opus models and high-end models require PRO or above.
+// FREE tier only supports haiku and sonnet-4 (basic models).
+func modelRequiredTier(model string) int {
+	lower := strings.ToLower(model)
+
+	// Remove thinking suffix for matching
+	lower = strings.TrimSuffix(lower, "-thinking")
+
+	// Opus models require PRO (tier 1)
+	if strings.Contains(lower, "opus") {
+		return 1
+	}
+
+	// Claude 4.7 and above require PRO
+	if strings.Contains(lower, "4.7") {
+		return 1
+	}
+
+	// Sonnet 4.5 and above require PRO
+	if strings.Contains(lower, "sonnet-4.5") || strings.Contains(lower, "sonnet-4.6") {
+		return 1
+	}
+
+	// Basic models (haiku, sonnet-4, gpt-4o, auto) work on FREE
+	return 0
+}
+
+// accountMatchesModel checks if an account's subscription tier is sufficient for the requested model.
+func accountMatchesModel(acc config.Account, model string) bool {
+	requiredTier := modelRequiredTier(model)
+	if requiredTier == 0 {
+		// Basic model, any account works
+		return true
+	}
+	accountTier := subscriptionTier(acc.SubscriptionType)
+	return accountTier >= requiredTier
+}
+
+// GetNextForModel 获取下一个可用且支持指定模型的账号（加权轮询）
+// 如果模型需要高级订阅，只返回满足条件的账号。
+// 如果没有满足条件的账号，回退到 GetNext() 行为（尝试所有账号）。
+func (p *AccountPool) GetNextForModel(model string) *config.Account {
+	requiredTier := modelRequiredTier(model)
+	if requiredTier == 0 {
+		// Basic model, no filtering needed
+		return p.GetNext()
+	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if len(p.accounts) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	n := len(p.accounts)
+	seen := make(map[string]bool)
+
+	// First pass: find accounts that match the model tier
+	for i := 0; i < n; i++ {
+		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
+		acc := &p.accounts[idx]
+
+		if seen[acc.ID] {
+			continue
+		}
+
+		// Must match model tier
+		if !accountMatchesModel(*acc, model) {
+			seen[acc.ID] = true
+			continue
+		}
+
+		// Skip cooldown accounts
+		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			seen[acc.ID] = true
+			continue
+		}
+
+		// Skip expiring tokens
+		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-300 {
+			seen[acc.ID] = true
+			continue
+		}
+
+		// Skip over-limit accounts
+		if isOverUsageLimit(*acc) && !acc.AllowOverage {
+			seen[acc.ID] = true
+			continue
+		}
+
+		return acc
+	}
+
+	// Fallback: find the tier-matching account with shortest cooldown
+	var best *config.Account
+	var earliest time.Time
+	seenFallback := make(map[string]bool)
+	for i := range p.accounts {
+		acc := &p.accounts[i]
+		if seenFallback[acc.ID] {
+			continue
+		}
+		seenFallback[acc.ID] = true
+
+		if !accountMatchesModel(*acc, model) {
+			continue
+		}
+		if isOverUsageLimit(*acc) && !acc.AllowOverage {
+			continue
+		}
+
+		if cooldown, ok := p.cooldowns[acc.ID]; ok {
+			if best == nil || cooldown.Before(earliest) {
+				best = acc
+				earliest = cooldown
+			}
+		} else {
+			return acc
+		}
+	}
+
+	return best
 }
