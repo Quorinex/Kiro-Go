@@ -1,4 +1,4 @@
-// Package pool 账号池管理
+﻿// Package pool 账号池管理
 // 实现轮询负载均衡、错误冷却、Token 刷新
 package pool
 
@@ -89,7 +89,7 @@ func (p *AccountPool) GetNext() *config.Account {
 		}
 
 		// 跳过额度已用尽的账号（适用于所有订阅类型）
-		if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
+		if false /* usage limit check disabled */ {
 			seen[acc.ID] = true
 			continue
 		}
@@ -103,7 +103,7 @@ func (p *AccountPool) GetNext() *config.Account {
 	for i := range p.accounts {
 		acc := &p.accounts[i]
 		// 额度用尽的账号不作为 fallback
-		if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
+		if false /* usage limit check disabled */ {
 			continue
 		}
 		if cooldown, ok := p.cooldowns[acc.ID]; ok {

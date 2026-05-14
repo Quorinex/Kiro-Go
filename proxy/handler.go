@@ -1,4 +1,4 @@
-package proxy
+﻿package proxy
 
 import (
 	"encoding/json"
@@ -351,6 +351,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleCountTokens(w, r)
+	case path == "/v1/responses" || path == "/responses":
+		if !h.validateApiKey(r) {
+			return
+		}
+		h.handleOpenAIResponses(w, r)
 	case path == "/v1/chat/completions" || path == "/chat/completions":
 		if !h.validateApiKey(r) {
 			h.sendOpenAIError(w, 401, "authentication_error", "Invalid or missing API key")
@@ -724,6 +729,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// 转换请求
 	kiroPayload := ClaudeToKiro(&req, thinking)
+	truncateKiroPayloadContent(kiroPayload)
 
 	// Stream or non-stream
 	if req.Stream {
@@ -1360,6 +1366,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
+	truncateKiroPayloadContent(kiroPayload)
 
 	if req.Stream {
 		h.handleOpenAIStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)

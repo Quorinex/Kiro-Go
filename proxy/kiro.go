@@ -1,4 +1,4 @@
-// Package proxy is the core proxy layer for the Kiro API.
+﻿// Package proxy is the core proxy layer for the Kiro API.
 // It handles streaming API calls to the Kiro backend and parses AWS Event Stream responses.
 package proxy
 
@@ -11,6 +11,7 @@ import (
 	"kiro-go/logger"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -232,9 +233,10 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		return err
 	}
 
-	// Debug: dump full payload for troubleshooting upstream rejections
+	// Debug: dump payload to file for troubleshooting
 	if payloadJSON, err := json.Marshal(payload); err == nil {
-		logger.Debugf("[KiroAPI] Request payload: %s", string(payloadJSON))
+		logger.Debugf("[KiroAPI] Payload size: %d bytes, history: %d entries", len(payloadJSON), len(payload.ConversationState.History))
+		os.WriteFile("/app/data/last_payload.json", payloadJSON, 0644)
 	}
 
 	// Wrap OnToolUse to restore original tool names for the client.
