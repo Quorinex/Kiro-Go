@@ -1152,6 +1152,7 @@
                 'accounts.copyJSON': '复制 JSON',
                 'accounts.copyJSONSuccess': 'JSON 已复制到剪贴板',
                 'accounts.trialDays': '天后到期',
+                'accounts.overage': '超额调用',
                 'time.expired': '已过期',
                 'time.minutes': '分钟',
                 'time.hours': '小时',
@@ -1241,6 +1242,20 @@
                 'modal.localDesc': '通过 Kiro IDE 本地缓存文件添加账号',
                 'modal.credentialsTitle': '凭证 JSON',
                 'modal.credentialsDesc': '通过 Kiro Account Manager 导出的凭证添加账号',
+                'modal.cookieTitle': 'Kiro 网页 Cookie',
+                'modal.cookieDesc': '通过从 Kiro 网页 Cookie 中获取的 RefreshToken 添加账号',
+                'cookie.howToGet': '如何获取 RefreshToken？',
+                'cookie.step1': '打开浏览器，访问并登录',
+                'cookie.step2': '在页面空白处右键 → 检查 → Application → Cookies → https://app.kiro.dev',
+                'cookie.step3': '在列表中找到 <b>RefreshToken</b>，双击其 Value 列并复制',
+                'cookie.refreshToken': 'RefreshToken',
+                'cookie.provider': '登录方式',
+                'cookie.github': 'GitHub',
+                'cookie.google': 'Google',
+                'cookie.refreshTokenPlaceholder': '粘贴 RefreshToken Cookie 的值',
+                'cookie.refreshTokenMissing': '请填写 RefreshToken',
+                'cookie.importSuccess': '账号添加成功',
+                'cookie.link': 'https://app.kiro.dev/account/usage',
                 'builderid.startLogin': '开始登录',
                 'builderid.verifyCode': '请在浏览器中输入上方验证码',
                 'builderid.verifyUrl': '验证链接',
@@ -1330,7 +1345,10 @@
                 'filter.banned': '已封禁',
                 'accounts.weight': '权重',
                 'detail.weight': '请求权重',
-                'detail.weightHint': '0-1=普通, 2+=高优先级'
+                'detail.weightHint': '0-1=普通, 2+=高优先级',
+                'detail.overage': '超额调用设置',
+                'detail.allowOverage': '配额耗尽后继续调用',
+                'detail.overageHint': '超额后调用频率权重（1~10），值越大频率越高'
             },
             en: {
                 'login.subtitle': 'Enter admin password to login',
@@ -1370,6 +1388,7 @@
                 'accounts.confirmDelete': 'Confirm delete?',
                 'accounts.copyJSON': 'Copy JSON',
                 'accounts.copyJSONSuccess': 'JSON copied to clipboard',
+                'accounts.overage': 'Overage',
                 'time.expired': 'Expired',
                 'time.minutes': 'min',
                 'time.hours': 'hr',
@@ -1455,6 +1474,20 @@
                 'modal.localDesc': 'Add account via Kiro IDE local cache files',
                 'modal.credentialsTitle': 'Credentials JSON',
                 'modal.credentialsDesc': 'Add account via Kiro Account Manager exported credentials',
+                'modal.cookieTitle': 'Kiro Web Cookie',
+                'modal.cookieDesc': 'Add account via RefreshToken obtained from Kiro Web Cookie',
+                'cookie.howToGet': 'How to get the RefreshToken?',
+                'cookie.step1': 'Open your browser and sign in at',
+                'cookie.step2': 'Right-click on blank area → Inspect → Application → Cookies → https://app.kiro.dev',
+                'cookie.step3': 'Find <b>RefreshToken</b> in the list, double-click its Value and copy it',
+                'cookie.refreshToken': 'RefreshToken',
+                'cookie.provider': 'Login Provider',
+                'cookie.github': 'GitHub',
+                'cookie.google': 'Google',
+                'cookie.refreshTokenPlaceholder': 'Paste the RefreshToken cookie value here',
+                'cookie.refreshTokenMissing': 'RefreshToken is required',
+                'cookie.importSuccess': 'Account added successfully',
+                'cookie.link': 'https://app.kiro.dev/account/usage',
                 'builderid.startLogin': 'Start Login',
                 'builderid.verifyCode': 'Enter the code above in your browser',
                 'builderid.verifyUrl': 'Verification URL',
@@ -1544,7 +1577,10 @@
                 'filter.banned': 'Banned',
                 'accounts.weight': 'Weight',
                 'detail.weight': 'Request Weight',
-                'detail.weightHint': '0-1=normal, 2+=higher priority'
+                'detail.weightHint': '0-1=normal, 2+=higher priority',
+                'detail.overage': 'Overage Settings',
+                'detail.allowOverage': 'Continue calling after quota is exhausted',
+                'detail.overageHint': 'Call frequency weight when over quota (1–10); higher = more frequent'
             }
         };
         let currentLang = localStorage.getItem('kiro_lang') || 'zh';
@@ -1810,6 +1846,7 @@
                 const isSelected = selectedAccounts.has(a.id);
                 const weightVal = a.weight || 0;
                 const weightBadge = weightVal >= 2 ? '<span class="badge" style="background:#f59e0b;color:#fff">W:' + weightVal + '</span>' : '';
+                const overageBadge = a.allowOverage ? '<span class="badge badge-warning">' + t('accounts.overage') + ':' + (a.overageWeight || 1) + '</span>' : '';
                 return '<div class="account-card" style="' + (isSelected ? 'border-color:#7c3aed;background:#faf5ff' : '') + '">' +
                     '<div class="account-header">' +
                     '<div class="account-info" style="display:flex;align-items:center;gap:8px">' +
@@ -1820,6 +1857,7 @@
                     getSubBadge(a.subscriptionType) +
                     getTrialBadge(a) +
                     weightBadge +
+                    overageBadge +
                     '<span class="badge badge-info">' + formatAuthMethod(a.provider || a.authMethod) + '</span>' +
                     getStatusBadge(a) +
                     '</div>' +
@@ -1956,6 +1994,12 @@
                 '<span style="color:#64748b;font-size:12px;flex:1">' + t('detail.weightHint') + '</span>' +
                 '<button class="btn btn-sm btn-primary" onclick="saveWeight(\'' + id + '\')">' + t('common.saved').split(' ')[0] + '</button>' +
                 '</div></div>' +
+                '<div class="detail-section"><h4>' + t('detail.overage') + '</h4><div class="machine-id-row">' +
+                '<label style="display:flex;align-items:center;gap:8px;white-space:nowrap"><label class="switch" style="margin:0"><input type="checkbox" id="allowOverageInput" ' + (a.allowOverage ? 'checked' : '') + '><span class="slider"></span></label><span style="font-size:13px">' + t('detail.allowOverage') + '</span></label>' +
+                '<input type="number" id="overageWeightInput" value="' + (a.overageWeight || 1) + '" min="1" max="10" style="width:80px">' +
+                '<span style="color:#64748b;font-size:12px;flex:1">' + t('detail.overageHint') + '</span>' +
+                '<button class="btn btn-sm btn-primary" onclick="saveOverageSettings(\'' + id + '\')">' + t('common.saved').split(' ')[0] + '</button>' +
+                '</div></div>' +
                 '<div class="detail-section"><h4>' + t('detail.subscription') + '</h4><div class="detail-grid">' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.subscriptionType') + '</div><div class="detail-value">' + (a.subscriptionTitle || a.subscriptionType || '-') + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.tokenExpiry') + '</div><div class="detail-value">' + (a.expiresAt ? new Date(a.expiresAt * 1000).toLocaleString() : '-') + '</div></div>' +
@@ -2029,6 +2073,20 @@
                 const res = await fetch('/admin/api/accounts/' + id, {
                     method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
                     body: JSON.stringify({ weight })
+                });
+                const d = await res.json();
+                if (d.success) { alert(t('detail.saved')); loadAccounts(); } else { alert(t('detail.saveFailed') + ': ' + d.error); }
+            } catch (e) { alert(t('detail.saveFailed')); }
+        }
+        async function saveOverageSettings(id) {
+            const allowOverage = document.getElementById('allowOverageInput').checked;
+            let overageWeight = parseInt(document.getElementById('overageWeightInput').value) || 1;
+            overageWeight = Math.max(1, Math.min(10, overageWeight));
+            document.getElementById('overageWeightInput').value = overageWeight;
+            try {
+                const res = await fetch('/admin/api/accounts/' + id, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ allowOverage, overageWeight })
                 });
                 const d = await res.json();
                 if (d.success) { alert(t('detail.saved')); loadAccounts(); } else { alert(t('detail.saveFailed') + ': ' + d.error); }
@@ -2256,6 +2314,7 @@
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'sso\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.ssoTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.ssoDesc') + '</div></div>' +
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'local\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.localTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.localDesc') + '</div></div>' +
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'credentials\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.credentialsTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.credentialsDesc') + '</div></div>' +
+                    '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'cookie\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.cookieTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.cookieDesc') + '</div></div>' +
                     '</div>' +
                     '<div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">' + t('common.cancel') + '</button></div>';
             } else if (type === 'builderid') {
@@ -2287,6 +2346,13 @@
                     '<div style="font-size:12px;color:#64748b;margin-bottom:12px;line-height:1.5">' + t('credentials.batchHint') + '</div>' +
                     '<div class="form-group"><label>' + t('credentials.label') + '</label><textarea id="credJson" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderId"},{"refreshToken":"yyy","clientId":"...","clientSecret":"...","provider":"Enterprise"}]\' style="min-height:120px"></textarea></div>' +
                     '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importCredentials()">' + t('common.add') + '</button></div>';
+            } else if (type === 'cookie') {
+                title.textContent = t('modal.cookieTitle');
+                body.innerHTML =
+                    '<div style="font-size:13px;color:#64748b;margin-bottom:16px;line-height:1.8"><p style="margin-bottom:8px;font-weight:600;color:#374151">' + t('cookie.howToGet') + '</p><ol style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px"><li>' + t('cookie.step1') + ' <a href="' + t('cookie.link') + '" target="_blank" style="color:#7c3aed;word-break:break-all">' + t('cookie.link') + '</a></li><li>' + t('cookie.step2') + '</li><li>' + t('cookie.step3') + '</li></ol></div>' +
+                    '<div class="form-group"><label>' + t('cookie.provider') + '</label><select id="cookieProvider"><option value="Google">' + t('cookie.google') + '</option><option value="Github">' + t('cookie.github') + '</option></select></div>' +
+                    '<div class="form-group"><label>' + t('cookie.refreshToken') + '</label><textarea id="cookieRefreshToken" placeholder="' + t('cookie.refreshTokenPlaceholder') + '" style="min-height:80px;font-family:monospace;font-size:12px"></textarea></div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importFromCookie()">' + t('common.add') + '</button></div>';
             } else if (type === 'sso') {
                 title.textContent = t('modal.ssoTitle');
                 body.innerHTML =
@@ -2396,6 +2462,16 @@
                 alert(msg);
                 newIds.forEach(id => autoRefreshNewAccount(id));
             } catch (e) { alert(t('credentials.jsonError')); }
+        }
+        async function importFromCookie() {
+            const refreshToken = document.getElementById('cookieRefreshToken').value.trim();
+            if (!refreshToken) { alert(t('cookie.refreshTokenMissing')); return; }
+            const provider = document.getElementById('cookieProvider').value;
+            const payload = { refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider };
+            const res = await fetch('/admin/api/auth/credentials', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify(payload) });
+            const d = await res.json();
+            if (d.success) { closeModal(); loadAccounts(); loadStats(); alert(t('cookie.importSuccess') + ': ' + (d.account?.email || d.account?.id)); autoRefreshNewAccount(d.account?.id); }
+            else alert(t('common.failed') + ': ' + d.error);
         }
         async function importSsoToken() {
             const res = await fetch('/admin/api/auth/sso-token', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify({ bearerToken: document.getElementById('ssoToken').value, region: document.getElementById('ssoRegion').value }) });

@@ -9,10 +9,13 @@ import (
 	"time"
 )
 
+const overageFrequencyScale = 10
+
 // AccountPool 账号池
 type AccountPool struct {
 	mu           sync.RWMutex
 	accounts     []config.Account
+	totalAccounts int
 	currentIndex uint64
 	cooldowns    map[string]time.Time // 账号冷却时间
 	errorCounts  map[string]int       // 连续错误计数
@@ -43,15 +46,19 @@ func (p *AccountPool) Reload() {
 	enabled := config.GetEnabledAccounts()
 	var weighted []config.Account
 	for _, a := range enabled {
-		w := a.Weight
-		if w < 1 {
-			w = 1
+		w := effectiveWeight(a.Weight) * overageFrequencyScale
+		if isOverUsageLimit(a) {
+			if !a.AllowOverage {
+				continue
+			}
+			w = effectiveOverageWeight(a.OverageWeight)
 		}
 		for j := 0; j < w; j++ {
 			weighted = append(weighted, a)
 		}
 	}
 	p.accounts = weighted
+	p.totalAccounts = len(enabled)
 }
 
 // GetNext 获取下一个可用账号（加权轮询）
@@ -89,7 +96,7 @@ func (p *AccountPool) GetNext() *config.Account {
 		}
 
 		// 跳过额度已用尽的账号（适用于所有订阅类型）
-		if false /* usage limit check disabled */ {
+		if isOverUsageLimit(*acc) && !acc.AllowOverage {
 			seen[acc.ID] = true
 			continue
 		}
@@ -103,7 +110,7 @@ func (p *AccountPool) GetNext() *config.Account {
 	for i := range p.accounts {
 		acc := &p.accounts[i]
 		// 额度用尽的账号不作为 fallback
-		if false /* usage limit check disabled */ {
+		if isOverUsageLimit(*acc) && !acc.AllowOverage {
 			continue
 		}
 		if cooldown, ok := p.cooldowns[acc.ID]; ok {
@@ -165,7 +172,6 @@ func (p *AccountPool) UpdateToken(id, accessToken, refreshToken string, expiresA
 				p.accounts[i].RefreshToken = refreshToken
 			}
 			p.accounts[i].ExpiresAt = expiresAt
-			break
 		}
 	}
 }
@@ -174,7 +180,15 @@ func (p *AccountPool) UpdateToken(id, accessToken, refreshToken string, expiresA
 func (p *AccountPool) Count() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return len(p.accounts)
+	if p.totalAccounts > 0 {
+		return p.totalAccounts
+	}
+
+	seen := make(map[string]bool)
+	for _, acc := range p.accounts {
+		seen[acc.ID] = true
+	}
+	return len(seen)
 }
 
 // AvailableCount 返回可用账号数
@@ -183,7 +197,12 @@ func (p *AccountPool) AvailableCount() int {
 	defer p.mu.RUnlock()
 	now := time.Now()
 	count := 0
+	seen := make(map[string]bool)
 	for _, acc := range p.accounts {
+		if seen[acc.ID] {
+			continue
+		}
+		seen[acc.ID] = true
 		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
 			continue
 		}
@@ -196,15 +215,35 @@ func (p *AccountPool) AvailableCount() int {
 func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	var updated bool
+	var requestCount, errorCount, totalTokens int
+	var totalCredits float64
+	var lastUsed int64
 	for i := range p.accounts {
 		if p.accounts[i].ID == id {
-			p.accounts[i].RequestCount++
-			p.accounts[i].TotalTokens += tokens
-			p.accounts[i].TotalCredits += credits
-			p.accounts[i].LastUsed = time.Now().Unix()
-			go config.UpdateAccountStats(id, p.accounts[i].RequestCount, p.accounts[i].ErrorCount, p.accounts[i].TotalTokens, p.accounts[i].TotalCredits, p.accounts[i].LastUsed)
-			break
+			if !updated {
+				p.accounts[i].RequestCount++
+				p.accounts[i].TotalTokens += tokens
+				p.accounts[i].TotalCredits += credits
+				p.accounts[i].LastUsed = time.Now().Unix()
+
+				requestCount = p.accounts[i].RequestCount
+				errorCount = p.accounts[i].ErrorCount
+				totalTokens = p.accounts[i].TotalTokens
+				totalCredits = p.accounts[i].TotalCredits
+				lastUsed = p.accounts[i].LastUsed
+				updated = true
+				continue
+			}
+			p.accounts[i].RequestCount = requestCount
+			p.accounts[i].ErrorCount = errorCount
+			p.accounts[i].TotalTokens = totalTokens
+			p.accounts[i].TotalCredits = totalCredits
+			p.accounts[i].LastUsed = lastUsed
 		}
+	}
+	if updated {
+		go config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
 	}
 }
 
@@ -215,4 +254,25 @@ func (p *AccountPool) GetAllAccounts() []config.Account {
 	result := make([]config.Account, len(p.accounts))
 	copy(result, p.accounts)
 	return result
+}
+
+func isOverUsageLimit(acc config.Account) bool {
+	return acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit
+}
+
+func effectiveWeight(weight int) int {
+	if weight < 1 {
+		return 1
+	}
+	return weight
+}
+
+func effectiveOverageWeight(weight int) int {
+	if weight < 1 {
+		return 1
+	}
+	if weight > overageFrequencyScale {
+		return overageFrequencyScale
+	}
+	return weight
 }

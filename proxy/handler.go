@@ -1976,6 +1976,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"hasToken":          a.AccessToken != "",
 			"machineId":         a.MachineId,
 			"weight":            a.Weight,
+			"allowOverage":      a.AllowOverage,
+			"overageWeight":     a.OverageWeight,
 			"subscriptionType":  a.SubscriptionType,
 			"subscriptionTitle": a.SubscriptionTitle,
 			"daysRemaining":     a.DaysRemaining,
@@ -2069,6 +2071,12 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["weight"].(float64); ok {
 		existing.Weight = int(v)
+	}
+	if v, ok := updates["allowOverage"].(bool); ok {
+		existing.AllowOverage = v
+	}
+	if v, ok := updates["overageWeight"].(float64); ok {
+		existing.OverageWeight = clampInt(int(v), 1, 10)
 	}
 
 	if err := config.UpdateAccount(id, *existing); err != nil {
@@ -2760,6 +2768,9 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"region":            account.Region,
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
+		"weight":            account.Weight,
+		"allowOverage":      account.AllowOverage,
+		"overageWeight":     account.OverageWeight,
 		"enabled":           account.Enabled,
 		"banStatus":         account.BanStatus,
 		"banReason":         account.BanReason,
@@ -3117,4 +3128,14 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(data)
+}
+
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }

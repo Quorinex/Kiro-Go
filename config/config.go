@@ -55,6 +55,10 @@ type Account struct {
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 
+	// Overage behavior after the main usage limit is reached.
+	AllowOverage  bool `json:"allowOverage,omitempty"`  // Whether to keep using the account after UsageLimit is reached
+	OverageWeight int  `json:"overageWeight,omitempty"` // 1-10, lower values reduce overage request frequency
+
 	// Account status
 	Enabled   bool   `json:"enabled"`             // Whether account is active in the pool
 	BanStatus string `json:"banStatus,omitempty"` // Ban status: "ACTIVE", "BANNED", "SUSPENDED"
