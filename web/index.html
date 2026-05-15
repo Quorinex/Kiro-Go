@@ -1925,7 +1925,7 @@
                     '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.id + '\')">' + t('accounts.delete') + '</button>' +
                     '</div>' +
                     '</div>' +
-                    (a.usageLimit > 0 ? '<div class="account-usage"><div class="usage-label">' + t('accounts.mainQuota') + '</div><div class="usage-bar"><div class="usage-fill ' + usageClass + '" style="width:' + usagePercent + '%"></div></div><div class="usage-text"><span>' + (a.usageCurrent?.toFixed(1) || 0) + ' / ' + (a.usageLimit?.toFixed(0) || 0) + '</span><span>' + usagePercent.toFixed(1) + '%</span></div></div>' : '') +
+                    (a.usageLimit > 0 ? '<div class="account-usage"><div class="usage-label">' + t('accounts.mainQuota') + '</div><div class="usage-bar"><div class="usage-fill ' + usageClass + '" style="width:' + usagePercent + '%"></div></div><div class="usage-text"><span>' + (a.usageCurrent?.toFixed(2) || 0) + ' / ' + (a.usageLimit?.toFixed(0) || 0) + '</span><span>' + usagePercent.toFixed(1) + '%</span></div></div>' : '') +
                     (a.trialUsageLimit > 0 ? '<div class="account-usage"><div class="usage-label">' + t('accounts.trialQuota') + ' ' + formatTrialExpiry(a.trialExpiresAt) + '</div><div class="usage-bar"><div class="usage-fill ' + trialUsageClass + '" style="width:' + trialUsagePercent + '%"></div></div><div class="usage-text"><span>' + (a.trialUsageCurrent?.toFixed(1) || 0) + ' / ' + (a.trialUsageLimit?.toFixed(0) || 0) + '</span><span>' + trialUsagePercent.toFixed(1) + '%</span></div></div>' : '') +
                     '<div class="account-stats">' +
                     '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + t('accounts.requests') + '</div></div>' +
@@ -2060,7 +2060,7 @@
                 '<div class="detail-section"><h4>' + t('detail.subscription') + '</h4><div class="detail-grid">' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.subscriptionType') + '</div><div class="detail-value">' + (a.subscriptionTitle || a.subscriptionType || '-') + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.tokenExpiry') + '</div><div class="detail-value">' + (a.expiresAt ? new Date(a.expiresAt * 1000).toLocaleString() : '-') + '</div></div>' +
-                '<div class="detail-item"><div class="detail-label">' + t('detail.mainQuota') + '</div><div class="detail-value">' + (a.usageCurrent?.toFixed(1) || 0) + ' / ' + (a.usageLimit?.toFixed(0) || 0) + '</div></div>' +
+                '<div class="detail-item"><div class="detail-label">' + t('detail.mainQuota') + '</div><div class="detail-value">' + (a.usageCurrent?.toFixed(2) || 0) + ' / ' + (a.usageLimit?.toFixed(0) || 0) + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.resetDate') + '</div><div class="detail-value">' + (a.nextResetDate || '-') + '</div></div>' +
                 (a.trialUsageLimit > 0 ? '<div class="detail-item"><div class="detail-label">' + t('detail.trialQuota') + '</div><div class="detail-value">' + (a.trialUsageCurrent?.toFixed(1) || 0) + ' / ' + (a.trialUsageLimit?.toFixed(0) || 0) + '</div></div>' +
                     '<div class="detail-item"><div class="detail-label">' + t('detail.trialStatus') + '</div><div class="detail-value">' + (a.trialStatus || '-') + '</div></div>' +

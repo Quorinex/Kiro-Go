@@ -298,8 +298,8 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	// 解析使用量
 	if len(usage.UsageBreakdownList) > 0 {
 		breakdown := usage.UsageBreakdownList[0]
-		info.UsageCurrent = breakdown.CurrentUsage
-		info.UsageLimit = breakdown.UsageLimit
+		info.UsageCurrent = resolveUsageAmount(breakdown.CurrentUsage, breakdown.CurrentUsageWithPrecision)
+		info.UsageLimit = resolveUsageAmount(breakdown.UsageLimit, breakdown.UsageLimitWithPrecision)
 		if info.UsageLimit > 0 {
 			info.UsagePercent = info.UsageCurrent / info.UsageLimit
 		}
@@ -318,8 +318,8 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	if len(usage.UsageBreakdownList) > 0 {
 		breakdown := usage.UsageBreakdownList[0]
 		if breakdown.FreeTrialInfo != nil {
-			info.TrialUsageCurrent = breakdown.FreeTrialInfo.CurrentUsage
-			info.TrialUsageLimit = breakdown.FreeTrialInfo.UsageLimit
+			info.UsageCurrent = resolveUsageAmount(breakdown.FreeTrialInfo.CurrentUsage, breakdown.FreeTrialInfo.CurrentUsageWithPrecision)
+			info.UsageLimit = resolveUsageAmount(breakdown.FreeTrialInfo.UsageLimit, breakdown.FreeTrialInfo.UsageLimitWithPrecision)
 			if info.TrialUsageLimit > 0 {
 				info.TrialUsagePercent = info.TrialUsageCurrent / info.TrialUsageLimit
 			}
@@ -337,6 +337,13 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	}
 
 	return info, nil
+}
+
+func resolveUsageAmount(raw float64, precise *float64) float64 {
+	if precise != nil {
+		return *precise
+	}
+	return raw
 }
 
 func parseSubscriptionType(raw string) string {
@@ -362,21 +369,25 @@ type UsageLimitsResponse struct {
 }
 
 type UsageBreakdown struct {
-	ResourceType  string         `json:"resourceType"`
-	CurrentUsage  float64        `json:"currentUsage"`
-	UsageLimit    float64        `json:"usageLimit"`
-	Currency      string         `json:"currency"`
-	Unit          string         `json:"unit"`
-	OverageRate   float64        `json:"overageRate"`
-	FreeTrialInfo *FreeTrialInfo `json:"freeTrialInfo"`
-	Bonuses       []BonusInfo    `json:"bonuses"`
+	ResourceType              string         `json:"resourceType"`
+	CurrentUsage              float64        `json:"currentUsage"`
+	CurrentUsageWithPrecision *float64       `json:"currentUsageWithPrecision"`
+	UsageLimit                float64        `json:"usageLimit"`
+	UsageLimitWithPrecision   *float64       `json:"usageLimitWithPrecision"`
+	Currency                  string         `json:"currency"`
+	Unit                      string         `json:"unit"`
+	OverageRate               float64        `json:"overageRate"`
+	FreeTrialInfo             *FreeTrialInfo `json:"freeTrialInfo"`
+	Bonuses                   []BonusInfo    `json:"bonuses"`
 }
 
 type FreeTrialInfo struct {
-	CurrentUsage    float64     `json:"currentUsage"`
-	UsageLimit      float64     `json:"usageLimit"`
-	FreeTrialStatus string      `json:"freeTrialStatus"`
-	FreeTrialExpiry json.Number `json:"freeTrialExpiry"`
+	CurrentUsage              float64     `json:"currentUsage"`
+	CurrentUsageWithPrecision *float64    `json:"currentUsageWithPrecision"`
+	UsageLimit                float64     `json:"usageLimit"`
+	UsageLimitWithPrecision   *float64    `json:"usageLimitWithPrecision"`
+	FreeTrialStatus           string      `json:"freeTrialStatus"`
+	FreeTrialExpiry           json.Number `json:"freeTrialExpiry"`
 }
 
 type BonusInfo struct {
