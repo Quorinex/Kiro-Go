@@ -268,6 +268,81 @@ func (p *AccountPool) RecordError(id string, isQuotaError bool) {
 	}
 }
 
+// IsAuthFailure reports whether an error indicates the refresh token / credentials
+// have been revoked or invalidated upstream (401, 403 with auth markers, etc.).
+// These accounts cannot be recovered automatically and must be re-authenticated.
+func IsAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+
+	// Match HTTP status codes only when they appear as standalone tokens to avoid
+	// false positives from arbitrary digits in the error body (e.g. request IDs).
+	if hasStatusToken(msg, "401") || hasStatusToken(msg, "403") {
+		return true
+	}
+	if strings.Contains(lower, "bad credentials") ||
+		strings.Contains(lower, "invalid_grant") ||
+		strings.Contains(lower, "invalid grant") ||
+		strings.Contains(lower, "invalid_token") ||
+		strings.Contains(lower, "invalid token") ||
+		strings.Contains(lower, "token expired") ||
+		strings.Contains(lower, "token has expired") ||
+		strings.Contains(lower, "unauthorized") {
+		return true
+	}
+	return false
+}
+
+// hasStatusToken returns true when status appears in s with non-digit boundaries
+// on both sides, so "401" matches "HTTP 401 from ..." but not "request_401abc".
+func hasStatusToken(s, status string) bool {
+	for {
+		idx := strings.Index(s, status)
+		if idx < 0 {
+			return false
+		}
+		leftOK := idx == 0 || !isDigit(s[idx-1])
+		rightIdx := idx + len(status)
+		rightOK := rightIdx >= len(s) || !isDigit(s[rightIdx])
+		if leftOK && rightOK {
+			return true
+		}
+		s = s[idx+len(status):]
+	}
+}
+
+func isDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+// DisableAccount marks an account as disabled (auth revoked / unrecoverable),
+// removes it from the in-memory pool so subsequent requests skip it, and
+// persists the change via config.SetAccountBanStatus.
+func (p *AccountPool) DisableAccount(id, reason string) {
+	if err := config.SetAccountBanStatus(id, "DISABLED", reason); err != nil {
+		// best effort — even if persistence fails, drop it from memory
+		_ = err
+	}
+	p.mu.Lock()
+	// Long cooldown as a safety net in case Reload races
+	p.cooldowns[id] = time.Now().Add(24 * time.Hour)
+	p.mu.Unlock()
+	p.Reload()
+}
+
+// MarkOverLimit marks an account as over usage limit (after a 402 / OVERAGE response),
+// turns off AllowOverage, and reloads the pool so the account is skipped.
+func (p *AccountPool) MarkOverLimit(id string) {
+	_ = config.DisableAccountOverage(id)
+	p.mu.Lock()
+	p.cooldowns[id] = time.Now().Add(time.Hour)
+	p.mu.Unlock()
+	p.Reload()
+}
+
 // UpdateToken 更新账号 Token
 func (p *AccountPool) UpdateToken(id, accessToken, refreshToken string, expiresAt int64) {
 	p.mu.Lock()

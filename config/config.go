@@ -17,6 +17,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // GenerateMachineId generates a UUID v4 format machine identifier.
@@ -333,6 +334,44 @@ func DisableAccountOverage(id string) error {
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
 			cfg.Accounts[i].AllowOverage = false
+			return Save()
+		}
+	}
+	return nil
+}
+
+// SetAccountEnabled toggles the enabled state of an account and persists the change.
+// Used to disable accounts whose refresh token has been revoked (401 Bad credentials)
+// so subsequent requests skip them automatically.
+func SetAccountEnabled(id string, enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].Enabled = enabled
+			if !enabled {
+				cfg.Accounts[i].BanStatus = "DISABLED"
+				cfg.Accounts[i].BanTime = time.Now().Unix()
+			}
+			return Save()
+		}
+	}
+	return nil
+}
+
+// SetAccountBanStatus marks an account as banned/disabled with a reason.
+// Reason is recorded so operators can see why the account was auto-disabled.
+func SetAccountBanStatus(id, status, reason string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].BanStatus = status
+			cfg.Accounts[i].BanReason = reason
+			cfg.Accounts[i].BanTime = time.Now().Unix()
+			if status == "BANNED" || status == "DISABLED" {
+				cfg.Accounts[i].Enabled = false
+			}
 			return Save()
 		}
 	}
