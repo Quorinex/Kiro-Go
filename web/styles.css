@@ -3211,30 +3211,16 @@ img.brand-icon {
     background: transparent;
   }
   .tab-icon {
-    display: none;
-  }
-  .tab::before {
     display: inline-flex;
-    font-family: "Font Awesome 6 Free";
     font-size: 0.875rem;
-    font-weight: 900;
     line-height: 1;
     opacity: 0.72;
-  }
-  .tab[data-tab="accounts"]::before {
-    content: "\f0c0";
-  }
-  .tab[data-tab="settings"]::before {
-    content: "\f013";
-  }
-  .tab[data-tab="api"]::before {
-    content: "\f121";
   }
   .tab.active {
     color: var(--foreground);
     background: transparent;
   }
-  .tab.active::before {
+  .tab.active .tab-icon {
     opacity: 1;
   }
   .app-header-inner .topbar-actions {

@@ -6,7 +6,11 @@
 
   // State
   const baseUrl = location.origin;
-  let password = localStorage.getItem('admin_password') || '';
+  if (localStorage.getItem('kiro_remember') !== '1') {
+    localStorage.removeItem('admin_password');
+    localStorage.removeItem('admin_login_time');
+  }
+  let password = sessionStorage.getItem('admin_password') || localStorage.getItem('admin_password') || '';
   let currentLang = localStorage.getItem('kiro_lang') || 'zh';
   const dict = { en: null, zh: null };
   let accountsData = [];
@@ -145,7 +149,9 @@
     const wrap = select && select.__customSelect;
     if (!wrap) return;
     const content = wrap.querySelector('.custom-select-content');
+    const trigger = wrap.querySelector('.custom-select-trigger');
     if (!content) return;
+    if (trigger) labelCustomSelect(select, trigger, content, select.id);
     content.innerHTML = '';
     Array.from(select.options).forEach((option, index) => {
       const item = document.createElement('button');
@@ -222,6 +228,28 @@
     const next = options[(index + dir + options.length) % options.length];
     if (next) next.focus({ preventScroll: true });
   }
+  function getCustomSelectLabelElement(select) {
+    const explicit = qsa('label').find(label => label.htmlFor === select.id);
+    if (explicit) return explicit;
+    const group = select.closest('.form-group');
+    return group ? group.querySelector('label') : null;
+  }
+  function labelCustomSelect(select, trigger, content, id) {
+    trigger.id = id + '-trigger';
+    const valueId = id + '-value';
+    const value = trigger.querySelector('.custom-select-value');
+    if (value) value.id = valueId;
+    const label = getCustomSelectLabelElement(select);
+    if (label) {
+      if (!label.id) label.id = id + '-label';
+      trigger.removeAttribute('aria-label');
+      trigger.setAttribute('aria-labelledby', label.id + ' ' + valueId);
+    } else {
+      trigger.removeAttribute('aria-labelledby');
+      trigger.setAttribute('aria-label', select.getAttribute('aria-label') || getCustomSelectLabel(select));
+    }
+    content.setAttribute('aria-labelledby', trigger.id);
+  }
   function enhanceCustomSelect(select) {
     if (!select || select.__customSelect || select.dataset.nativeSelect === 'true') return;
 
@@ -248,6 +276,7 @@
     content.className = 'custom-select-content';
     content.setAttribute('role', 'listbox');
     content.hidden = true;
+    labelCustomSelect(select, trigger, content, id);
 
     wrap.appendChild(trigger);
     wrap.appendChild(content);
@@ -405,6 +434,7 @@
   // Modal helpers
   let modalScrollY = 0;
   let confirmResolve = null;
+  const modalFocusStack = [];
   function lockModalScroll() {
     if (document.body.classList.contains('modal-open')) return;
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -418,17 +448,69 @@
     document.body.style.top = '';
     window.scrollTo(0, modalScrollY);
   }
+  function getModalFocusable(modal) {
+    return qsa('a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])', modal)
+      .filter(el => !el.closest('[hidden]'));
+  }
+  function prepareDialog(modal) {
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-hidden', 'false');
+    if (!modal.hasAttribute('tabindex')) modal.tabIndex = -1;
+    const title = modal.querySelector('.modal-title');
+    if (title) {
+      if (!title.id) title.id = modal.id + 'Title';
+      modal.setAttribute('aria-labelledby', title.id);
+    }
+  }
+  function focusDialog(modal) {
+    if (modal.contains(document.activeElement) && document.activeElement !== modal) return;
+    const focusable = getModalFocusable(modal);
+    const target = focusable[0] || modal;
+    if (target && target.focus) target.focus({ preventScroll: true });
+  }
+  function trapDialogFocus(e) {
+    const modal = e.currentTarget;
+    if (e.key !== 'Tab' || !modal.classList.contains('active')) return;
+    const focusable = getModalFocusable(modal);
+    if (!focusable.length) {
+      e.preventDefault();
+      modal.focus({ preventScroll: true });
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus({ preventScroll: true });
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus({ preventScroll: true });
+    }
+  }
   function openDialog(id) {
     const modal = $(id);
     if (!modal) return;
+    prepareDialog(modal);
+    modalFocusStack.push({ id, el: document.activeElement });
+    modal.removeEventListener('keydown', trapDialogFocus);
+    modal.addEventListener('keydown', trapDialogFocus);
     modal.classList.add('active');
     lockModalScroll();
+    focusDialog(modal);
+    setTimeout(() => focusDialog(modal), 0);
   }
   function closeDialog(id) {
     const modal = $(id);
     if (!modal) return;
     modal.classList.remove('active');
+    modal.setAttribute('aria-hidden', 'true');
+    const stackIndex = modalFocusStack.map(item => item.id).lastIndexOf(id);
+    const previous = stackIndex >= 0 ? modalFocusStack.splice(stackIndex, 1)[0].el : null;
     unlockModalScrollIfIdle();
+    if (previous && previous.isConnected && previous.focus) {
+      requestAnimationFrame(() => previous.focus({ preventScroll: true }));
+    }
   }
   function bindDialogBackdropClose(id, closeFn) {
     const modal = $(id);
@@ -485,12 +567,39 @@
   }
 
   // Login
-  async function tryAutoLogin() {
-    const loginTime = parseInt(localStorage.getItem('admin_login_time') || '0', 10);
-    if (loginTime && Date.now() - loginTime > 72 * 3600 * 1000) {
+  function clearActivePassword() {
+    sessionStorage.removeItem('admin_password');
+    sessionStorage.removeItem('admin_login_time');
+    localStorage.removeItem('admin_password');
+    localStorage.removeItem('admin_login_time');
+    password = '';
+  }
+  function getActiveLoginTime() {
+    const storage = sessionStorage.getItem('admin_password') ? sessionStorage : localStorage;
+    return parseInt(storage.getItem('admin_login_time') || '0', 10);
+  }
+  function setActivePassword(nextPassword, remember) {
+    const now = Date.now().toString();
+    password = nextPassword;
+    sessionStorage.setItem('admin_password', nextPassword);
+    sessionStorage.setItem('admin_login_time', now);
+    if (remember) {
+      localStorage.setItem('admin_password', nextPassword);
+      localStorage.setItem('admin_login_time', now);
+      localStorage.setItem('kiro_remember', '1');
+      localStorage.setItem('kiro_remembered_pwd', nextPassword);
+    } else {
       localStorage.removeItem('admin_password');
       localStorage.removeItem('admin_login_time');
-      password = '';
+      localStorage.removeItem('kiro_remember');
+      localStorage.removeItem('kiro_remembered_pwd');
+    }
+  }
+  async function tryAutoLogin() {
+    if (!password) return;
+    const loginTime = getActiveLoginTime();
+    if (loginTime && Date.now() - loginTime > 72 * 3600 * 1000) {
+      clearActivePassword();
       return;
     }
     try {
@@ -503,16 +612,8 @@
     try {
       const res = await api('/status');
       if (res.ok) {
-        localStorage.setItem('admin_password', password);
-        localStorage.setItem('admin_login_time', Date.now().toString());
         const remember = $('rememberPwd');
-        if (remember && remember.checked) {
-          localStorage.setItem('kiro_remember', '1');
-          localStorage.setItem('kiro_remembered_pwd', password);
-        } else {
-          localStorage.removeItem('kiro_remember');
-          localStorage.removeItem('kiro_remembered_pwd');
-        }
+        setActivePassword(password, !!(remember && remember.checked));
         showMain(); loadData();
       } else {
         toast(t('login.error'), 'error');
@@ -532,8 +633,7 @@
     }
   }
   function logout() {
-    localStorage.removeItem('admin_password');
-    localStorage.removeItem('admin_login_time');
+    clearActivePassword();
     location.reload();
   }
   function showMain() {
@@ -713,6 +813,8 @@
       const overageBadge = a.allowOverage ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.overage')) + ':' + (a.overageWeight || 1) + '</span>' : '';
       const banned = a.banStatus && a.banStatus !== 'ACTIVE';
       const idAttr = escapeAttr(a.id);
+      const displayEmail = getDisplayEmail(a.email, a.id);
+      const selectLabel = t('accounts.selectAccount', displayEmail);
 
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
@@ -722,9 +824,9 @@
         '<div class="account-card' + (isSelected ? ' selected' : '') + '" data-id="' + idAttr + '">' +
         '<div class="account-header">' +
         '<div class="account-info">' +
-        '<input type="checkbox" class="account-checkbox" ' + (isSelected ? 'checked' : '') + ' data-id="' + idAttr + '" />' +
+        '<input type="checkbox" class="account-checkbox" ' + (isSelected ? 'checked' : '') + ' data-id="' + idAttr + '" aria-label="' + escapeAttr(selectLabel) + '" />' +
         '<div class="account-info-text">' +
-        '<div class="account-email">' + escapeHtml(getDisplayEmail(a.email, a.id)) + '</div>' +
+        '<div class="account-email">' + escapeHtml(displayEmail) + '</div>' +
         '<div class="account-meta">' +
         getSubBadge(a.subscriptionType) +
         getTrialBadge(a) +
@@ -789,6 +891,12 @@
     loadAccounts();
   }
   async function deleteAccount(id) {
+    const ok = await confirmAction(t('accounts.confirmDelete'), {
+      title: t('accounts.delete'),
+      confirmText: t('accounts.delete'),
+      variant: 'danger'
+    });
+    if (!ok) return;
     try {
       const res = await api('/accounts/' + id, { method: 'DELETE' });
       const d = await res.json().catch(() => ({}));
@@ -826,6 +934,13 @@
   async function batchAction(action) {
     const ids = Array.from(selectedAccounts);
     if (!ids.length) return;
+    const confirmKey = 'batch.confirm' + action.charAt(0).toUpperCase() + action.slice(1);
+    const ok = await confirmAction(t(confirmKey, ids.length), {
+      title: t('common.confirm'),
+      confirmText: t('common.confirm'),
+      variant: action === 'disable' ? 'danger' : 'primary'
+    });
+    if (!ok) return;
     const dismiss = toast(t('batch.processing'), 'info', { duration: 0 });
     try {
       const res = await api('/accounts/batch', { method: 'POST', body: JSON.stringify({ ids, action }) });
@@ -852,6 +967,11 @@
   async function batchRefreshModels() {
     const ids = Array.from(selectedAccounts);
     if (!ids.length) return;
+    const confirmed = await confirmAction(t('batch.confirmRefreshModels', ids.length), {
+      title: t('models.refreshAll'),
+      confirmText: t('common.confirm')
+    });
+    if (!confirmed) return;
     const dismiss = toast(t('detail.refreshModelCache') + '…', 'info', { duration: 0 });
     let ok = 0, fail = 0;
     for (const id of ids) {
@@ -868,6 +988,11 @@
     loadAccounts();
   }
   async function refreshAllModels() {
+    const ok = await confirmAction(t('models.confirmRefreshAll'), {
+      title: t('models.refreshAll'),
+      confirmText: t('models.refreshAll')
+    });
+    if (!ok) return;
     const dismiss = toast(t('detail.refreshModelCache') + '…', 'info', { duration: 0 });
     try {
       const res = await api('/accounts/models/refresh', { method: 'POST' });
@@ -1163,7 +1288,7 @@
     const modalBtn = $('testRunBtn');
     if (modalBtn) modalBtn.setAttribute('aria-busy', 'true');
     const acc = accountsData.find(a => a.id === id);
-    const email = acc ? acc.email : id;
+    const email = acc ? getDisplayEmail(acc.email, acc.id) : id;
     const proxy = acc ? (acc.proxyURL || t('accounts.testLog.globalProxy')) : '?';
     addTestLog(t('accounts.testLog.start', email, model, proxy), 'info');
     try {
@@ -1274,11 +1399,18 @@
     else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
   }
   async function saveApiSettings() {
-    const requireApiKey = $('requireApiKey').checked;
-    const apiKeyInput = $('apiKeyInput');
-    if (requireApiKey && !apiKeyInput.value.trim()) generateApiKey();
-    await api('/settings', { method: 'POST', body: JSON.stringify({ requireApiKey, apiKey: apiKeyInput.value }) });
-    toast(t('detail.saved'), 'success');
+    try {
+      const requireApiKey = $('requireApiKey').checked;
+      const apiKeyInput = $('apiKeyInput');
+      if (requireApiKey && !apiKeyInput.value.trim()) generateApiKey();
+      if (requireApiKey && !apiKeyInput.value.trim()) return;
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ requireApiKey, apiKey: apiKeyInput.value }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      toast(t('detail.saved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
   }
   async function saveOverUsageConfig() {
     const allowOverUsage = $('allowOverUsage').checked;
@@ -1288,11 +1420,16 @@
   async function changePassword() {
     const np = $('newPassword').value;
     if (!np) return toast(t('settings.passwordRequired'), 'warning');
-    await api('/settings', { method: 'POST', body: JSON.stringify({ password: np }) });
-    password = np;
-    localStorage.setItem('admin_password', password);
-    toast(t('settings.passwordChanged'), 'success');
-    $('newPassword').value = '';
+    try {
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ password: np }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      setActivePassword(np, localStorage.getItem('kiro_remember') === '1');
+      toast(t('settings.passwordChanged'), 'success');
+      $('newPassword').value = '';
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
   }
   async function resetStats() {
     const ok = await confirmAction(t('settings.confirmReset'), {
@@ -1313,7 +1450,21 @@
   function generateApiKey() {
     const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let k = 'sk-';
-    for (let i = 0; i < 32; i++) k += chars.charAt(Math.floor(Math.random() * chars.length));
+    const cryptoApi = window.crypto || window.msCrypto;
+    if (!cryptoApi || !cryptoApi.getRandomValues) {
+      toast(t('common.failed'), 'error');
+      return;
+    }
+    const bytes = new Uint8Array(32);
+    const limit = Math.floor(256 / chars.length) * chars.length;
+    while (k.length < 35) {
+      cryptoApi.getRandomValues(bytes);
+      for (const b of bytes) {
+        if (b >= limit) continue;
+        k += chars.charAt(b % chars.length);
+        if (k.length >= 35) break;
+      }
+    }
     $('apiKeyInput').value = k;
   }
 
