@@ -67,6 +67,11 @@ func (p *AccountPool) Reload() {
 
 // GetNext 获取下一个可用账号（加权轮询）
 func (p *AccountPool) GetNext() *config.Account {
+	return p.GetNextExcluding(nil)
+}
+
+// GetNextExcluding 获取下一个可用账号（加权轮询），并跳过指定账号。
+func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -84,6 +89,10 @@ func (p *AccountPool) GetNext() *config.Account {
 		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
 		acc := &p.accounts[idx]
 
+		if excluded != nil && excluded[acc.ID] {
+			seen[acc.ID] = true
+			continue
+		}
 		if seen[acc.ID] {
 			continue
 		}
@@ -114,6 +123,9 @@ func (p *AccountPool) GetNext() *config.Account {
 	var earliest time.Time
 	for i := range p.accounts {
 		acc := &p.accounts[i]
+		if excluded != nil && excluded[acc.ID] {
+			continue
+		}
 		// 额度用尽的账号不作为 fallback（除非账号级或全局允许超额）
 		if isOverUsageLimit(*acc) && !acc.AllowOverage && !allowOverUsage {
 			continue
@@ -171,6 +183,11 @@ func (p *AccountPool) accountHasModel(accountID, model string) bool {
 // model 应为去掉 thinking 后缀的实际模型名。
 // 若无账号有该模型列表数据，行为与 GetNext 相同（乐观路由）。
 func (p *AccountPool) GetNextForModel(model string) *config.Account {
+	return p.GetNextForModelExcluding(model, nil)
+}
+
+// GetNextForModelExcluding 获取下一个支持指定模型的可用账号，并跳过指定账号。
+func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -187,6 +204,10 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
 		acc := &p.accounts[idx]
 
+		if excluded != nil && excluded[acc.ID] {
+			seen[acc.ID] = true
+			continue
+		}
 		if seen[acc.ID] {
 			continue
 		}
@@ -214,6 +235,9 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 	var earliest time.Time
 	for i := range p.accounts {
 		acc := &p.accounts[i]
+		if excluded != nil && excluded[acc.ID] {
+			continue
+		}
 		if !p.accountHasModel(acc.ID, model) {
 			continue
 		}
