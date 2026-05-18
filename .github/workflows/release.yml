@@ -1,0 +1,50 @@
+name: Release Binary
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build FreeBSD amd64 package
+        env:
+          CGO_ENABLED: "0"
+          GOOS: freebsd
+          GOARCH: amd64
+        run: |
+          mkdir -p dist/bin
+          go build -o dist/bin/kiro-go-freebsd-amd64 .
+
+          pkg_root="dist/package/kiro-go-freebsd-amd64"
+          mkdir -p "$pkg_root"
+          cp dist/bin/kiro-go-freebsd-amd64 "$pkg_root/kiro-go"
+          cp README.md README_CN.md LICENSE version.json "$pkg_root/"
+          cp -R web "$pkg_root/web"
+
+          tar -C dist/package -czf dist/kiro-go-freebsd-amd64.tar.gz kiro-go-freebsd-amd64
+          sha256sum dist/kiro-go-freebsd-amd64.tar.gz > dist/kiro-go-freebsd-amd64.tar.gz.sha256
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/kiro-go-freebsd-amd64.tar.gz
+            dist/kiro-go-freebsd-amd64.tar.gz.sha256
+          generate_release_notes: true
