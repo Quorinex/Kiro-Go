@@ -37,6 +37,9 @@ jobs:
           cp dist/bin/kiro-go-freebsd-amd64 "$pkg_root/kiro-go"
           cp README.md README_CN.md LICENSE version.json "$pkg_root/"
           cp -R web "$pkg_root/web"
+          cp deploy/freebsd/start.sh "$pkg_root/start.sh"
+          cp deploy/freebsd/SERV00_DEPLOY.md "$pkg_root/SERV00_DEPLOY.md"
+          chmod +x "$pkg_root/start.sh"
 
           tar -C dist/package -czf dist/kiro-go-freebsd-amd64.tar.gz kiro-go-freebsd-amd64
           sha256sum dist/kiro-go-freebsd-amd64.tar.gz > dist/kiro-go-freebsd-amd64.tar.gz.sha256
