@@ -51,7 +51,7 @@ go build -o kiro-go .
 ./kiro-go
 ```
 
-Config is auto-created at `data/config.json`. Mount `/app/data` for persistence. The default admin password is `changeme` — override it via the `ADMIN_PASSWORD` env var or change it in the admin panel before going to production.
+Config is auto-created at `data/config.json` when no database is configured. Docker Compose runs with PostgreSQL by default and imports an existing JSON config on first startup if the database is empty. The default admin password is `changeme` — override it via the `ADMIN_PASSWORD` env var or change it in the admin panel before going to production.
 
 ## Usage
 
@@ -87,6 +87,12 @@ The setting takes effect immediately without restarting.
 |----------|-------------|---------|
 | `CONFIG_PATH` | Config file path | `data/config.json` |
 | `ADMIN_PASSWORD` | Admin panel password (overrides config) | - |
+| `STORE_BACKEND` | Storage backend: `auto`, `json`, or `postgres` | `auto` |
+| `DATABASE_URL` | PostgreSQL connection URL. Enables PostgreSQL in `auto` mode when using `postgres://` or `postgresql://` | - |
+
+## Storage
+
+Kiro-Go uses a storage abstraction inside the `config` package. Without `DATABASE_URL`, it keeps the original JSON file behavior. With PostgreSQL enabled, settings, accounts, tokens, usage stats, and prompt filter rules are stored in database tables. If the database is empty and `CONFIG_PATH` points to an existing JSON config, data is migrated automatically once. A configured but unreachable PostgreSQL database fails startup instead of silently falling back to JSON.
 
 ## Contributing
 

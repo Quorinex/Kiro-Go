@@ -51,7 +51,7 @@ go build -o kiro-go .
 ./kiro-go
 ```
 
-首次运行会在 `data/config.json` 自动生成配置，挂载 `/app/data` 以持久化。默认管理密码为 `changeme`，生产环境请务必通过 `ADMIN_PASSWORD` 环境变量或在管理面板中修改。
+未配置数据库时，首次运行会在 `data/config.json` 自动生成配置。Docker Compose 默认使用 PostgreSQL；如果数据库为空且存在 JSON 配置，会在首次启动时自动导入。默认管理密码为 `changeme`，生产环境请务必通过 `ADMIN_PASSWORD` 环境变量或在管理面板中修改。
 
 ## 使用方法
 
@@ -87,6 +87,12 @@ curl http://localhost:8080/v1/chat/completions \
 |-----|------|-------|
 | `CONFIG_PATH` | 配置文件路径 | `data/config.json` |
 | `ADMIN_PASSWORD` | 管理面板密码（覆盖配置文件） | - |
+| `STORE_BACKEND` | 存储后端：`auto`、`json` 或 `postgres` | `auto` |
+| `DATABASE_URL` | PostgreSQL 连接地址；`auto` 模式下使用 `postgres://` 或 `postgresql://` 时启用数据库 | - |
+
+## 存储方式
+
+Kiro-Go 在 `config` 包内提供存储抽象。未配置 `DATABASE_URL` 时保持原有 JSON 文件行为；启用 PostgreSQL 后，设置、账号、Token、用量统计和提示词过滤规则都会写入数据库。如果数据库为空且 `CONFIG_PATH` 指向已有 JSON 配置，会自动迁移一次。若显式配置 PostgreSQL 但连接失败，服务会启动失败，避免生产环境误回退到 JSON。
 
 ## 参与贡献
 

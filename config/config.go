@@ -11,10 +11,9 @@
 package config
 
 import (
+	"context"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
-	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -199,15 +198,39 @@ type AccountInfo struct {
 const Version = "1.0.8"
 
 var (
-	cfg     *Config
-	cfgLock sync.RWMutex
-	cfgPath string
+	cfg      *Config
+	cfgLock  sync.RWMutex
+	cfgPath  string
+	cfgStore Store
 )
 
 // Init initializes the configuration system with the specified file path.
 // If the file doesn't exist, a default configuration is created.
 func Init(path string) error {
 	cfgPath = path
+	store, err := OpenStoreFromEnv(context.Background(), path)
+	if err != nil {
+		return err
+	}
+	return InitWithStore(store)
+}
+
+// InitWithStore initializes configuration with an explicit storage backend.
+// It is mainly used by tests and future storage implementations.
+func InitWithStore(store Store) error {
+	if store == nil {
+		return fmt.Errorf("config store is nil")
+	}
+
+	cfgLock.Lock()
+	oldStore := cfgStore
+	cfgStore = store
+	cfgLock.Unlock()
+
+	if oldStore != nil && oldStore != store {
+		_ = oldStore.Close()
+	}
+
 	return Load()
 }
 
@@ -215,39 +238,57 @@ func Load() error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Create default configuration.
-			// Binds to 0.0.0.0 by default for Docker/container compatibility.
-			cfg = &Config{
-				Password:      "changeme",
-				Port:          8080,
-				Host:          "0.0.0.0",
-				RequireApiKey: false,
-				Accounts:      []Account{},
-			}
-			return Save()
-		}
-		return err
+	if cfgStore == nil {
+		cfgStore = NewJSONStore(cfgPath)
 	}
 
-	var c Config
-	if err := json.Unmarshal(data, &c); err != nil {
+	loaded, err := cfgStore.Load(context.Background())
+	if err != nil {
 		return err
 	}
-	cfg = &c
+	cfg = normalizeConfig(loaded)
 	return nil
 }
 
-// Save persists the current configuration to the JSON file.
-// Uses indented formatting for human readability.
-func Save() error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
+func defaultConfig() *Config {
+	// 默认绑定 0.0.0.0，兼容 Docker/容器环境。
+	return &Config{
+		Password:      "changeme",
+		Port:          8080,
+		Host:          "0.0.0.0",
+		RequireApiKey: false,
+		Accounts:      []Account{},
 	}
-	return os.WriteFile(cfgPath, data, 0600)
+}
+
+func normalizeConfig(c *Config) *Config {
+	if c == nil {
+		return defaultConfig()
+	}
+	if c.Accounts == nil {
+		c.Accounts = []Account{}
+	}
+	return c
+}
+
+// Save persists the current configuration through the active store.
+func Save() error {
+	if cfgStore == nil {
+		cfgStore = NewJSONStore(cfgPath)
+	}
+	return cfgStore.Save(context.Background(), normalizeConfig(cfg))
+}
+
+// Close releases resources held by the active configuration store.
+func Close() error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfgStore == nil {
+		return nil
+	}
+	err := cfgStore.Close()
+	cfgStore = nil
+	return err
 }
 
 // SetPassword updates the admin password.

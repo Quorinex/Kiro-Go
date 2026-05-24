@@ -41,6 +41,7 @@ func main() {
 	if err := config.Init(configPath); err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+	defer config.Close()
 
 	// Initialize log level: LOG_LEVEL env var takes priority over config, defaulting to "info".
 	logger.Init(config.GetLogLevel())
