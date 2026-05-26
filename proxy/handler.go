@@ -3635,7 +3635,8 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	// Parse test model from request body (optional)
+	// Parse test model from request body (optional). Manual account tests always
+	// use a fresh built-in random prompt so cached/older UIs cannot pin one.
 	var req struct {
 		Model  string `json:"model"`
 		Prompt string `json:"prompt"`
@@ -3644,9 +3645,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	if req.Model == "" {
 		req.Model = "claude-sonnet-4"
 	}
-	if req.Prompt == "" {
-		req.Prompt = randomProbePrompt(nil)
-	}
+	req.Prompt = randomProbePrompt(nil)
 
 	success, content, errMsg, latencyMs := h.probeAccount(account, req.Model, req.Prompt)
 	if err := config.UpdateAccountProbeResult(account.ID, success, "manual", req.Model, req.Prompt, content, errMsg, latencyMs); err != nil {
