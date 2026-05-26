@@ -619,8 +619,8 @@ func probeProxyURL(proxyURL, targetURL string, timeoutSeconds int) config.ProxyP
 		timeoutSeconds = 10
 	}
 	if u, err := url.Parse(proxyURL); err == nil && (u.Scheme == "socks5" || u.Scheme == "socks5h") {
-		success, status, errMsg := probeSocks5Connect(u, targetURL, time.Duration(timeoutSeconds)*time.Second)
-		log.LatencyMs = time.Since(startTime).Milliseconds()
+		success, status, errMsg, latencyMs := probeSocks5Connect(u, targetURL, time.Duration(timeoutSeconds)*time.Second)
+		log.LatencyMs = latencyMs
 		log.Success = success
 		log.Status = status
 		log.Error = errMsg
@@ -653,10 +653,10 @@ func probeProxyURL(proxyURL, targetURL string, timeoutSeconds int) config.ProxyP
 	return log
 }
 
-func probeSocks5Connect(proxyURL *url.URL, targetURL string, timeout time.Duration) (bool, int, string) {
+func probeSocks5Connect(proxyURL *url.URL, targetURL string, timeout time.Duration) (bool, int, string, int64) {
 	target, err := url.Parse(targetURL)
 	if err != nil || target.Hostname() == "" {
-		return false, 0, "invalid target URL"
+		return false, 0, "invalid target URL", 0
 	}
 	port := target.Port()
 	if port == "" {
@@ -668,7 +668,7 @@ func probeSocks5Connect(proxyURL *url.URL, targetURL string, timeout time.Durati
 	}
 	conn, err := net.DialTimeout("tcp", proxyURL.Host, timeout)
 	if err != nil {
-		return false, 0, normalizeProbeError(err)
+		return false, 0, normalizeProbeError(err), 0
 	}
 	defer conn.Close()
 	deadline := time.Now().Add(timeout)
@@ -681,41 +681,41 @@ func probeSocks5Connect(proxyURL *url.URL, targetURL string, timeout time.Durati
 		methods = append(methods, 0x02)
 	}
 	if _, err := conn.Write(append([]byte{0x05, byte(len(methods))}, methods...)); err != nil {
-		return false, 0, normalizeProbeError(err)
+		return false, 0, normalizeProbeError(err), 0
 	}
 	methodReply := make([]byte, 2)
 	if _, err := io.ReadFull(conn, methodReply); err != nil {
-		return false, 0, normalizeProbeError(err)
+		return false, 0, normalizeProbeError(err), 0
 	}
 	if methodReply[0] != 0x05 {
-		return false, 0, "invalid socks5 response"
+		return false, 0, "invalid socks5 response", 0
 	}
 	if methodReply[1] == 0xff {
-		return false, 0, "socks5 auth method rejected"
+		return false, 0, "socks5 auth method rejected", 0
 	}
 	if methodReply[1] == 0x02 {
 		if len(username) > 255 || len(password) > 255 {
-			return false, 0, "socks5 username/password too long"
+			return false, 0, "socks5 username/password too long", 0
 		}
 		authReq := []byte{0x01, byte(len(username))}
 		authReq = append(authReq, []byte(username)...)
 		authReq = append(authReq, byte(len(password)))
 		authReq = append(authReq, []byte(password)...)
 		if _, err := conn.Write(authReq); err != nil {
-			return false, 0, normalizeProbeError(err)
+			return false, 0, normalizeProbeError(err), 0
 		}
 		authReply := make([]byte, 2)
 		if _, err := io.ReadFull(conn, authReply); err != nil {
-			return false, 0, normalizeProbeError(err)
+			return false, 0, normalizeProbeError(err), 0
 		}
 		if authReply[1] != 0x00 {
-			return false, 0, "socks5 auth failed"
+			return false, 0, "socks5 auth failed", 0
 		}
 	}
 
 	portNum, err := strconv.Atoi(port)
 	if err != nil || portNum < 1 || portNum > 65535 {
-		return false, 0, "invalid target port"
+		return false, 0, "invalid target port", 0
 	}
 	host := target.Hostname()
 	connectReq := []byte{0x05, 0x01, 0x00}
@@ -729,7 +729,7 @@ func probeSocks5Connect(proxyURL *url.URL, targetURL string, timeout time.Durati
 		}
 	} else {
 		if len(host) > 255 {
-			return false, 0, "target host too long"
+			return false, 0, "target host too long", 0
 		}
 		connectReq = append(connectReq, 0x03, byte(len(host)))
 		connectReq = append(connectReq, []byte(host)...)
@@ -737,23 +737,25 @@ func probeSocks5Connect(proxyURL *url.URL, targetURL string, timeout time.Durati
 	portBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(portBytes, uint16(portNum))
 	connectReq = append(connectReq, portBytes...)
+	connectStart := time.Now()
 	if _, err := conn.Write(connectReq); err != nil {
-		return false, 0, normalizeProbeError(err)
+		return false, 0, normalizeProbeError(err), time.Since(connectStart).Milliseconds()
 	}
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(conn, header); err != nil {
-		return false, 0, normalizeProbeError(err)
+		return false, 0, normalizeProbeError(err), time.Since(connectStart).Milliseconds()
 	}
+	connectLatencyMs := time.Since(connectStart).Milliseconds()
 	if header[0] != 0x05 {
-		return false, 0, "invalid socks5 response"
+		return false, 0, "invalid socks5 response", connectLatencyMs
 	}
 	if header[1] != 0x00 {
-		return false, int(header[1]), socks5ReplyError(header[1])
+		return false, int(header[1]), socks5ReplyError(header[1]), connectLatencyMs
 	}
 	if err := drainSocks5BindAddress(conn, header[3]); err != nil {
-		return false, 0, normalizeProbeError(err)
+		return false, 0, normalizeProbeError(err), connectLatencyMs
 	}
-	return true, 0, ""
+	return true, 0, "", connectLatencyMs
 }
 
 func drainSocks5BindAddress(conn net.Conn, atyp byte) error {
