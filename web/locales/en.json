@@ -74,6 +74,7 @@
   "accounts.testLog.empty": "No test run yet",
   "accounts.testLog.globalProxy": "Global Proxy",
   "accounts.testLog.start": "Testing {0} | Model: {1} | Proxy: {2}",
+  "accounts.testLog.prompt": "Prompt: {0}",
   "accounts.testLog.success": "✓ {0} OK ({1}s) Reply: {2}",
   "accounts.testLog.failed": "✗ {0} Failed ({1}s): {2}",
   "accounts.testLog.error": "✗ {0} Error: {1}",

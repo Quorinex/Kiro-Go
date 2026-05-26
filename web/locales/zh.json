@@ -74,6 +74,7 @@
   "accounts.testLog.empty": "尚未运行测试",
   "accounts.testLog.globalProxy": "全局代理",
   "accounts.testLog.start": "开始测试 {0} | 模型: {1} | 代理: {2}",
+  "accounts.testLog.prompt": "本次提示词: {0}",
   "accounts.testLog.success": "✓ {0} 成功 ({1}s) 回复: {2}",
   "accounts.testLog.failed": "✗ {0} 失败 ({1}s): {2}",
   "accounts.testLog.error": "✗ {0} 异常: {1}",

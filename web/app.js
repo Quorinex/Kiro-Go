@@ -1412,6 +1412,7 @@
       const res = await api('/accounts/' + id + '/test', { method: 'POST', body: JSON.stringify({ model }) });
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const d = await res.json();
+      if (d.prompt) addTestLog(t('accounts.testLog.prompt', d.prompt), 'info');
       if (d.success) {
         addTestLog(t('accounts.testLog.success', email, elapsed, d.reply), 'ok');
       } else {

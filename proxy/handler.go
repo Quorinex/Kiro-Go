@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	cryptoRand "crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"kiro-go/config"
 	"kiro-go/logger"
 	"kiro-go/pool"
+	"math/big"
 	"math/rand"
 	"net"
 	"net/http"
@@ -440,7 +442,11 @@ func randomProbePrompt(randSource *rand.Rand) string {
 		return "Give one simple sentence about weather."
 	}
 	if randSource == nil {
-		return randomProbePrompts[rand.Intn(len(randomProbePrompts))]
+		n, err := cryptoRand.Int(cryptoRand.Reader, big.NewInt(int64(len(randomProbePrompts))))
+		if err == nil {
+			return randomProbePrompts[n.Int64()]
+		}
+		return randomProbePrompts[time.Now().Nanosecond()%len(randomProbePrompts)]
 	}
 	return randomProbePrompts[randSource.Intn(len(randomProbePrompts))]
 }
@@ -3646,7 +3652,13 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	}
 	if !success {
 		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": errMsg})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   false,
+			"error":     errMsg,
+			"model":     req.Model,
+			"prompt":    req.Prompt,
+			"latencyMs": latencyMs,
+		})
 		return
 	}
 
