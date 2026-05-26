@@ -52,3 +52,39 @@ func TestUpdateSettingsPatchCanExplicitlyDisableAPIKey(t *testing.T) {
 		t.Fatalf("expected password to be preserved, got %q", got)
 	}
 }
+
+func TestUpdateProxySettingsSupportsMultipleURLs(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	proxies := []string{
+		" socks5://user:pass@127.0.0.1:1080 ",
+		"",
+		"http://proxy.local:8080",
+		"socks5://user:pass@127.0.0.1:1080",
+	}
+	if err := UpdateProxySettings(proxies); err != nil {
+		t.Fatalf("update proxy settings: %v", err)
+	}
+
+	want := []string{
+		"socks5://user:pass@127.0.0.1:1080",
+		"http://proxy.local:8080",
+	}
+	got := GetProxyURLs()
+	if len(got) != len(want) {
+		t.Fatalf("expected %d proxies, got %d: %#v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("proxy %d: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+	if got := GetProxyURL(); got != want[0] {
+		t.Fatalf("expected legacy proxy URL %q, got %q", want[0], got)
+	}
+	if got := []string{GetNextProxyURL(), GetNextProxyURL(), GetNextProxyURL()}; got[0] != want[0] || got[1] != want[1] || got[2] != want[0] {
+		t.Fatalf("unexpected round-robin order: %#v", got)
+	}
+}

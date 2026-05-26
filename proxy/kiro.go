@@ -96,12 +96,12 @@ func GetRestClientForProxy(proxyURL string) *http.Client {
 }
 
 // ResolveAccountProxyURL returns the effective proxy URL for an account.
-// Falls back to global config.GetProxyURL() if the account has no per-account proxy.
+// Falls back to a round-robin global proxy if the account has no per-account proxy.
 func ResolveAccountProxyURL(account *config.Account) string {
 	if account != nil && account.ProxyURL != "" {
 		return account.ProxyURL
 	}
-	return config.GetProxyURL()
+	return config.GetNextProxyURL()
 }
 
 // buildKiroTransport constructs an HTTP Transport with optional outbound proxy support.

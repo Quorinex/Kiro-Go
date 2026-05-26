@@ -182,6 +182,14 @@
         </div>
       </div>
 
+      <div class="card proxy-probe-home">
+        <div class="card-header">
+          <span class="card-title" data-i18n="proxyProbe.homeTitle"></span>
+          <button class="btn btn-sm btn-outline" id="runProxyProbeBtn" type="button" data-i18n="proxyProbe.runNow"></button>
+        </div>
+        <div id="proxyProbeLogs" class="proxy-probe-log-list"></div>
+      </div>
+
       <!-- Accounts tab -->
       <div id="tabAccounts" class="tab-content">
         <div class="card">
@@ -265,6 +273,23 @@
           <button class="btn btn-primary" id="saveOverUsageBtn" data-i18n="settings.saveUsage"></button>
         </div>
 
+        <!-- Model probe settings -->
+        <div class="card">
+          <div class="card-header"><span class="card-title" data-i18n="settings.modelProbeSettings"></span></div>
+          <div class="form-group">
+            <label data-i18n="settings.randomProbePerHour"></label>
+            <input type="number" id="randomProbePerHour" min="0" max="1000" step="1" placeholder="0" />
+            <small data-i18n="settings.randomProbeHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.randomProbeModel"></label>
+            <input type="text" id="randomProbeModel" list="probeModelOptions" placeholder="claude-sonnet-4" />
+            <datalist id="probeModelOptions"></datalist>
+            <small data-i18n="settings.randomProbeModelHint"></small>
+          </div>
+          <button class="btn btn-primary" id="saveProbeSettingsBtn" data-i18n="settings.saveProbeSettings"></button>
+        </div>
+
         <!-- Thinking settings -->
         <div class="card">
           <div class="card-header"><span class="card-title" data-i18n="settings.thinkingSettings"></span></div>
@@ -329,30 +354,30 @@
         <div class="card">
           <div class="card-header"><span class="card-title" data-i18n="settings.proxySettings"></span></div>
           <div class="form-group">
-            <label data-i18n="settings.proxyType"></label>
-            <select id="proxyType">
-              <option value="none" data-i18n="settings.proxyNone"></option>
-              <option value="socks5" data-i18n="settings.proxySocks5"></option>
-              <option value="http" data-i18n="settings.proxyHttp"></option>
-            </select>
+            <label data-i18n="settings.proxyURLs"></label>
+            <textarea id="proxyURLs" rows="6" data-i18n-placeholder="settings.proxyURLsPlaceholder"
+              autocomplete="off"></textarea>
+            <p class="help-block" data-i18n="settings.proxyURLsHint"></p>
           </div>
-          <div id="proxyFields" class="hidden">
-            <div class="form-group">
-              <label data-i18n="settings.proxyHost"></label>
-              <div class="input-row">
-                <input type="text" id="proxyHost" placeholder="127.0.0.1" />
-                <input type="number" id="proxyPort" class="w-24!" placeholder="1080" min="1" max="65535" />
-              </div>
-            </div>
-            <div class="form-group">
-              <label data-i18n="settings.proxyAuth"></label>
-              <div class="input-row">
-                <input type="text" id="proxyUsername" data-i18n-placeholder="settings.proxyUsername"
-                  autocomplete="off" />
-                <input type="password" id="proxyPassword" data-i18n-placeholder="settings.proxyPassword"
-                  autocomplete="new-password" />
-              </div>
-            </div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="proxyProbeEnabled" /><span class="slider"></span></span>
+              <span data-i18n="settings.proxyProbeEnabled"></span>
+            </label>
+            <small data-i18n="settings.proxyProbeEnabledHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.proxyProbeCron"></label>
+            <input type="text" id="proxyProbeCron" placeholder="*/10 * * * *" />
+            <small data-i18n="settings.proxyProbeCronHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.proxyProbeTargetURL"></label>
+            <input type="url" id="proxyProbeTargetURL" placeholder="https://www.google.com/generate_204" />
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.proxyProbeTimeoutSeconds"></label>
+            <input type="number" id="proxyProbeTimeoutSeconds" min="1" max="120" step="1" placeholder="10" />
           </div>
           <button class="btn btn-primary" id="saveProxyBtn" data-i18n="settings.saveProxy"></button>
         </div>

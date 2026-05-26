@@ -21,7 +21,7 @@ WORKDIR /app
 COPY --from=builder /app/kiro-go .
 COPY --from=builder /app/web ./web
 
-EXPOSE 8080
+EXPOSE 8088
 VOLUME /app/data
 
 CMD ["./kiro-go"]

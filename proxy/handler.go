@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,7 +9,13 @@ import (
 	"kiro-go/config"
 	"kiro-go/logger"
 	"kiro-go/pool"
+	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -211,7 +218,7 @@ func validateOpenAIRequestShape(req *OpenAIRequest) string {
 
 func NewHandler() *Handler {
 	// 启动时应用代理配置
-	applyProxyConfig(config.GetProxyURL())
+	applyProxyConfig()
 
 	totalReq, successReq, failedReq, totalTokens, totalCredits := config.GetStats()
 	h := &Handler{
@@ -228,9 +235,705 @@ func NewHandler() *Handler {
 	}
 	// 启动后台刷新
 	go h.backgroundRefresh()
+	// 启动后台随机探测
+	go h.backgroundRandomProbe()
+	// 启动后台代理可用性探测
+	go h.backgroundProxyProbe()
 	// 启动后台统计保存 (每30秒保存一次)
 	go h.backgroundStatsSaver()
 	return h
+}
+
+var randomProbePrompts = []string{
+	"Give one simple sentence about weather.",
+	"Give one simple sentence about time.",
+	"Give one simple sentence about math.",
+	"Give one simple sentence about color.",
+	"Give one simple sentence about music.",
+	"Give one simple sentence about book.",
+	"Give one simple sentence about tea.",
+	"Give one simple sentence about coffee.",
+	"Give one simple sentence about garden.",
+	"Give one simple sentence about river.",
+	"Give one simple sentence about mountain.",
+	"Give one simple sentence about city.",
+	"Give one simple sentence about ocean.",
+	"Give one simple sentence about moon.",
+	"Give one simple sentence about sun.",
+	"Give one simple sentence about tree.",
+	"Give one simple sentence about flower.",
+	"Give one simple sentence about road.",
+	"Give one simple sentence about train.",
+	"Give one simple sentence about plane.",
+	"Give one simple sentence about camera.",
+	"Give one simple sentence about window.",
+	"Give one simple sentence about desk.",
+	"Give one simple sentence about lamp.",
+	"Give one simple sentence about phone.",
+	"Give one simple sentence about paper.",
+	"Give one simple sentence about pencil.",
+	"Give one simple sentence about clock.",
+	"Give one simple sentence about bread.",
+	"Give one simple sentence about fruit.",
+	"Give one simple sentence about cloud.",
+	"Give one simple sentence about rain.",
+	"Give one simple sentence about snow.",
+	"Give one simple sentence about wind.",
+	"Give one simple sentence about map.",
+	"Give one simple sentence about code.",
+	"Give one simple sentence about robot.",
+	"Give one simple sentence about story.",
+	"Give one simple sentence about poem.",
+	"Give one simple sentence about game.",
+	"Give one simple sentence about movie.",
+	"Give one simple sentence about bird.",
+	"Give one simple sentence about cat.",
+	"Give one simple sentence about dog.",
+	"Give one simple sentence about fish.",
+	"Give one simple sentence about star.",
+	"Give one simple sentence about forest.",
+	"Give one simple sentence about beach.",
+	"Give one simple sentence about bridge.",
+	"Give one simple sentence about market.",
+	"Give one simple sentence about school.",
+	"Give one simple sentence about library.",
+	"Give one simple sentence about kitchen.",
+	"Give one simple sentence about breakfast.",
+	"Give one simple sentence about lunch.",
+	"Give one simple sentence about dinner.",
+	"Give one simple sentence about travel.",
+	"Give one simple sentence about language.",
+	"Give one simple sentence about history.",
+	"Give one simple sentence about science.",
+	"Give one simple sentence about art.",
+	"Give one simple sentence about dance.",
+	"Give one simple sentence about song.",
+	"Give one simple sentence about picture.",
+	"Give one simple sentence about idea.",
+	"Give one simple sentence about habit.",
+	"Give one simple sentence about health.",
+	"Give one simple sentence about sleep.",
+	"Give one simple sentence about dream.",
+	"Give one simple sentence about smile.",
+	"Give one simple sentence about friend.",
+	"Give one simple sentence about family.",
+	"Give one simple sentence about work.",
+	"Give one simple sentence about plan.",
+	"Give one simple sentence about goal.",
+	"Give one simple sentence about question.",
+	"Give one simple sentence about answer.",
+	"Give one simple sentence about memory.",
+	"Give one simple sentence about future.",
+	"Give one simple sentence about season.",
+	"Give one simple sentence about spring.",
+	"Give one simple sentence about summer.",
+	"Give one simple sentence about autumn.",
+	"Give one simple sentence about winter.",
+	"Give one simple sentence about morning.",
+	"Give one simple sentence about evening.",
+	"Give one simple sentence about night.",
+	"Give one simple sentence about weekend.",
+	"Give one simple sentence about holiday.",
+	"Give one simple sentence about note.",
+	"Give one simple sentence about message.",
+	"Give one simple sentence about email.",
+	"Give one simple sentence about meeting.",
+	"Give one simple sentence about task.",
+	"Give one simple sentence about list.",
+	"Give one simple sentence about number.",
+	"Give one simple sentence about shape.",
+	"Give one simple sentence about pattern.",
+	"Give one simple sentence about light.",
+	"Give one simple sentence about shadow.",
+	"Give one simple sentence about sound.",
+	"Give one simple sentence about silence.",
+	"Give one simple sentence about space.",
+	"Give one simple sentence about room.",
+	"Give one simple sentence about door.",
+	"Give one simple sentence about key.",
+	"Give one simple sentence about bag.",
+	"Give one simple sentence about shoe.",
+	"Give one simple sentence about shirt.",
+	"Give one simple sentence about water.",
+	"Give one simple sentence about fire.",
+	"Give one simple sentence about earth.",
+	"Give one simple sentence about metal.",
+	"Give one simple sentence about wood.",
+	"Give one simple sentence about glass.",
+	"Give one simple sentence about stone.",
+	"Give one simple sentence about sand.",
+	"Give one simple sentence about field.",
+	"Give one simple sentence about farm.",
+	"Give one simple sentence about park.",
+	"Give one simple sentence about shop.",
+	"Give one simple sentence about street.",
+	"Give one simple sentence about bike.",
+	"Give one simple sentence about bus.",
+	"Give one simple sentence about boat.",
+	"Give one simple sentence about harbor.",
+	"Give one simple sentence about island.",
+	"Give one simple sentence about valley.",
+	"Give one simple sentence about hill.",
+	"Give one simple sentence about path.",
+	"Give one simple sentence about trail.",
+	"Give one simple sentence about camp.",
+	"Give one simple sentence about tent.",
+	"Give one simple sentence about starry sky.",
+	"Give one simple sentence about sunrise.",
+	"Give one simple sentence about sunset.",
+	"Give one simple sentence about rainbow.",
+	"Give one simple sentence about mirror.",
+	"Give one simple sentence about photo.",
+	"Give one simple sentence about recipe.",
+	"Give one simple sentence about snack.",
+	"Give one simple sentence about soup.",
+	"Give one simple sentence about salad.",
+	"Give one simple sentence about cookie.",
+	"Give one simple sentence about cake.",
+	"Give one simple sentence about music box.",
+	"Give one simple sentence about keyboard.",
+	"Give one simple sentence about screen.",
+	"Give one simple sentence about server.",
+	"Give one simple sentence about network.",
+	"Give one simple sentence about battery.",
+	"Give one simple sentence about signal.",
+	"Give one simple sentence about button.",
+	"Give one simple sentence about switch.",
+	"Give one simple sentence about folder.",
+	"Give one simple sentence about file.",
+	"Give one simple sentence about backup.",
+	"Give one simple sentence about calendar.",
+	"Give one simple sentence about timer.",
+	"Give one simple sentence about alarm.",
+	"Give one simple sentence about weather app.",
+	"Give one simple sentence about notebook.",
+	"Give one simple sentence about journal.",
+	"Give one simple sentence about wallet.",
+	"Give one simple sentence about ticket.",
+	"Give one simple sentence about station.",
+	"Give one simple sentence about airport.",
+	"Give one simple sentence about museum.",
+	"Give one simple sentence about theater.",
+	"Give one simple sentence about concert.",
+	"Give one simple sentence about festival.",
+	"Give one simple sentence about lesson.",
+	"Give one simple sentence about practice.",
+	"Give one simple sentence about exercise.",
+	"Give one simple sentence about stretch.",
+	"Give one simple sentence about walk.",
+	"Give one simple sentence about run.",
+	"Give one simple sentence about swim.",
+	"Give one simple sentence about climb.",
+	"Give one simple sentence about paint.",
+	"Give one simple sentence about draw.",
+	"Give one simple sentence about write.",
+	"Give one simple sentence about read.",
+	"Give one simple sentence about learn.",
+	"Give one simple sentence about teach.",
+	"Give one simple sentence about build.",
+	"Give one simple sentence about fix.",
+	"Give one simple sentence about clean.",
+}
+
+func randomProbePrompt(randSource *rand.Rand) string {
+	if len(randomProbePrompts) == 0 {
+		return "Give one simple sentence about weather."
+	}
+	if randSource == nil {
+		return randomProbePrompts[rand.Intn(len(randomProbePrompts))]
+	}
+	return randomProbePrompts[randSource.Intn(len(randomProbePrompts))]
+}
+
+func (h *Handler) backgroundRandomProbe() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	randSource := rand.New(rand.NewSource(time.Now().UnixNano()))
+	var hourKey int64 = -1
+	runsThisHour := 0
+
+	for {
+		select {
+		case <-ticker.C:
+			perHour := config.GetRandomProbePerHour()
+			if perHour <= 0 {
+				continue
+			}
+			now := time.Now()
+			currentHour := now.Unix() / 3600
+			if currentHour != hourKey {
+				hourKey = currentHour
+				runsThisHour = 0
+			}
+			if runsThisHour >= perHour {
+				continue
+			}
+			remainingRuns := perHour - runsThisHour
+			remainingMinutes := 60 - now.Minute()
+			if remainingMinutes < 1 {
+				remainingMinutes = 1
+			}
+			if randSource.Intn(remainingMinutes) >= remainingRuns {
+				continue
+			}
+
+			accounts := config.GetAccounts()
+			candidates := make([]config.Account, 0, len(accounts))
+			for _, account := range accounts {
+				if account.Enabled && account.AccessToken != "" {
+					candidates = append(candidates, account)
+				}
+			}
+			if len(candidates) == 0 {
+				continue
+			}
+
+			account := candidates[randSource.Intn(len(candidates))]
+			prompt := randomProbePrompt(randSource)
+			model := config.GetRandomProbeModel()
+			success, reply, errMsg, latencyMs := h.probeAccount(&account, model, prompt)
+			if err := config.UpdateAccountProbeResult(account.ID, success, "auto", model, prompt, reply, errMsg, latencyMs); err != nil {
+				logger.Warnf("[RandomProbe] Failed to save result for %s: %v", account.Email, err)
+			}
+			if success {
+				logger.Infof("[RandomProbe] %s ok in %dms", account.Email, latencyMs)
+			} else {
+				logger.Warnf("[RandomProbe] %s failed in %dms: %s", account.Email, latencyMs, errMsg)
+			}
+			runsThisHour++
+		case <-h.stopRefresh:
+			return
+		}
+	}
+}
+
+func (h *Handler) probeAccount(account *config.Account, model, prompt string) (bool, string, string, int64) {
+	startTime := time.Now()
+	if err := h.ensureValidToken(account); err != nil {
+		return false, "", "Token refresh failed: " + err.Error(), time.Since(startTime).Milliseconds()
+	}
+	if model == "" {
+		model = "claude-sonnet-4"
+	}
+	if prompt == "" {
+		prompt = randomProbePrompt(nil)
+	}
+
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := ParseModelAndThinking(model, thinkingCfg.Suffix)
+	openaiReq := &OpenAIRequest{
+		Model:     actualModel,
+		Messages:  []OpenAIMessage{{Role: "user", Content: prompt}},
+		MaxTokens: 16,
+		Stream:    false,
+	}
+	kiroPayload := OpenAIToKiro(openaiReq, thinking)
+
+	var content string
+	callback := &KiroStreamCallback{
+		OnText:         func(text string, isThinking bool) { content += text },
+		OnToolUse:      func(tu KiroToolUse) {},
+		OnComplete:     func(inTok, outTok int) {},
+		OnError:        func(err error) {},
+		OnCredits:      func(c float64) {},
+		OnContextUsage: func(pct float64) {},
+	}
+	if err := CallKiroAPI(account, kiroPayload, callback); err != nil {
+		return false, "", err.Error(), time.Since(startTime).Milliseconds()
+	}
+	content = strings.TrimSpace(content)
+	if len(content) > 240 {
+		content = content[:240]
+	}
+	return true, content, "", time.Since(startTime).Milliseconds()
+}
+
+func (h *Handler) backgroundProxyProbe() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			h.runScheduledProxyProbe(time.Now())
+		case <-h.stopRefresh:
+			return
+		}
+	}
+}
+
+func (h *Handler) runScheduledProxyProbe(now time.Time) {
+	enabled, cronExpr, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
+	if !enabled || strings.TrimSpace(cronExpr) == "" {
+		return
+	}
+	minuteKey := now.Unix() / 60
+	lastRunMinute, _ := config.GetProxyProbeState()
+	if lastRunMinute == minuteKey {
+		return
+	}
+	if !cronMatchesMinute(cronExpr, now) {
+		return
+	}
+	if err := config.SetProxyProbeLastRunMinute(minuteKey); err != nil {
+		logger.Warnf("[ProxyProbe] Failed to save last run minute: %v", err)
+	}
+	h.runProxyProbe(targetURL, timeoutSeconds)
+}
+
+func (h *Handler) runProxyProbe(targetURL string, timeoutSeconds int) []config.ProxyProbeLog {
+	proxyURLs := config.GetProxyURLs()
+	if len(proxyURLs) == 0 {
+		logs := []config.ProxyProbeLog{{
+			At:        time.Now().Unix(),
+			TargetURL: targetURL,
+			Success:   false,
+			Error:     "No proxy configured",
+		}}
+		_ = config.AppendProxyProbeLogs(logs)
+		return logs
+	}
+	logs := make([]config.ProxyProbeLog, 0, len(proxyURLs))
+	for _, proxyURL := range proxyURLs {
+		logs = append(logs, probeProxyURL(proxyURL, targetURL, timeoutSeconds))
+	}
+	if err := config.AppendProxyProbeLogs(logs); err != nil {
+		logger.Warnf("[ProxyProbe] Failed to save logs: %v", err)
+	}
+	return logs
+}
+
+func probeProxyURL(proxyURL, targetURL string, timeoutSeconds int) config.ProxyProbeLog {
+	startTime := time.Now()
+	log := config.ProxyProbeLog{
+		At:        startTime.Unix(),
+		ProxyURL:  redactProxyURL(proxyURL),
+		TargetURL: targetURL,
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 10
+	}
+	if u, err := url.Parse(proxyURL); err == nil && (u.Scheme == "socks5" || u.Scheme == "socks5h") {
+		success, status, errMsg := probeSocks5Connect(u, targetURL, time.Duration(timeoutSeconds)*time.Second)
+		log.LatencyMs = time.Since(startTime).Milliseconds()
+		log.Success = success
+		log.Status = status
+		log.Error = errMsg
+		return log
+	}
+	client := &http.Client{
+		Timeout:   time.Duration(timeoutSeconds) * time.Second,
+		Transport: buildKiroTransport(proxyURL),
+	}
+	req, err := http.NewRequest("GET", targetURL, nil)
+	if err != nil {
+		log.Error = "Invalid target URL: " + err.Error()
+		log.LatencyMs = time.Since(startTime).Milliseconds()
+		return log
+	}
+	req.Header.Set("User-Agent", "Kiro-Go ProxyProbe")
+	resp, err := client.Do(req)
+	log.LatencyMs = time.Since(startTime).Milliseconds()
+	if err != nil {
+		log.Error = normalizeProbeError(err)
+		return log
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+	log.Status = resp.StatusCode
+	log.Success = resp.StatusCode >= 200 && resp.StatusCode < 400
+	if !log.Success {
+		log.Error = resp.Status
+	}
+	return log
+}
+
+func probeSocks5Connect(proxyURL *url.URL, targetURL string, timeout time.Duration) (bool, int, string) {
+	target, err := url.Parse(targetURL)
+	if err != nil || target.Hostname() == "" {
+		return false, 0, "invalid target URL"
+	}
+	port := target.Port()
+	if port == "" {
+		if target.Scheme == "http" {
+			port = "80"
+		} else {
+			port = "443"
+		}
+	}
+	conn, err := net.DialTimeout("tcp", proxyURL.Host, timeout)
+	if err != nil {
+		return false, 0, normalizeProbeError(err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(timeout)
+	_ = conn.SetDeadline(deadline)
+
+	methods := []byte{0x00}
+	username := proxyURL.User.Username()
+	password, hasPassword := proxyURL.User.Password()
+	if username != "" || hasPassword {
+		methods = append(methods, 0x02)
+	}
+	if _, err := conn.Write(append([]byte{0x05, byte(len(methods))}, methods...)); err != nil {
+		return false, 0, normalizeProbeError(err)
+	}
+	methodReply := make([]byte, 2)
+	if _, err := io.ReadFull(conn, methodReply); err != nil {
+		return false, 0, normalizeProbeError(err)
+	}
+	if methodReply[0] != 0x05 {
+		return false, 0, "invalid socks5 response"
+	}
+	if methodReply[1] == 0xff {
+		return false, 0, "socks5 auth method rejected"
+	}
+	if methodReply[1] == 0x02 {
+		if len(username) > 255 || len(password) > 255 {
+			return false, 0, "socks5 username/password too long"
+		}
+		authReq := []byte{0x01, byte(len(username))}
+		authReq = append(authReq, []byte(username)...)
+		authReq = append(authReq, byte(len(password)))
+		authReq = append(authReq, []byte(password)...)
+		if _, err := conn.Write(authReq); err != nil {
+			return false, 0, normalizeProbeError(err)
+		}
+		authReply := make([]byte, 2)
+		if _, err := io.ReadFull(conn, authReply); err != nil {
+			return false, 0, normalizeProbeError(err)
+		}
+		if authReply[1] != 0x00 {
+			return false, 0, "socks5 auth failed"
+		}
+	}
+
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return false, 0, "invalid target port"
+	}
+	host := target.Hostname()
+	connectReq := []byte{0x05, 0x01, 0x00}
+	if ip := net.ParseIP(host); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			connectReq = append(connectReq, 0x01)
+			connectReq = append(connectReq, v4...)
+		} else {
+			connectReq = append(connectReq, 0x04)
+			connectReq = append(connectReq, ip.To16()...)
+		}
+	} else {
+		if len(host) > 255 {
+			return false, 0, "target host too long"
+		}
+		connectReq = append(connectReq, 0x03, byte(len(host)))
+		connectReq = append(connectReq, []byte(host)...)
+	}
+	portBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBytes, uint16(portNum))
+	connectReq = append(connectReq, portBytes...)
+	if _, err := conn.Write(connectReq); err != nil {
+		return false, 0, normalizeProbeError(err)
+	}
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return false, 0, normalizeProbeError(err)
+	}
+	if header[0] != 0x05 {
+		return false, 0, "invalid socks5 response"
+	}
+	if header[1] != 0x00 {
+		return false, int(header[1]), socks5ReplyError(header[1])
+	}
+	if err := drainSocks5BindAddress(conn, header[3]); err != nil {
+		return false, 0, normalizeProbeError(err)
+	}
+	return true, 0, ""
+}
+
+func drainSocks5BindAddress(conn net.Conn, atyp byte) error {
+	var n int
+	switch atyp {
+	case 0x01:
+		n = 4
+	case 0x03:
+		l := make([]byte, 1)
+		if _, err := io.ReadFull(conn, l); err != nil {
+			return err
+		}
+		n = int(l[0])
+	case 0x04:
+		n = 16
+	default:
+		return fmt.Errorf("invalid socks5 address type")
+	}
+	buf := make([]byte, n+2)
+	_, err := io.ReadFull(conn, buf)
+	return err
+}
+
+func socks5ReplyError(code byte) string {
+	switch code {
+	case 0x01:
+		return "socks5 general failure"
+	case 0x02:
+		return "socks5 connection not allowed"
+	case 0x03:
+		return "socks5 network unreachable"
+	case 0x04:
+		return "socks5 host unreachable"
+	case 0x05:
+		return "socks5 connection refused"
+	case 0x06:
+		return "socks5 ttl expired"
+	case 0x07:
+		return "socks5 command not supported"
+	case 0x08:
+		return "socks5 address type not supported"
+	default:
+		return fmt.Sprintf("socks5 error %d", code)
+	}
+}
+
+func normalizeProbeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return "timeout"
+	}
+	text := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(text, "connection refused"):
+		return "connection refused"
+	case strings.Contains(text, "no such host"):
+		return "dns failed"
+	case strings.Contains(text, "network is unreachable"):
+		return "network unreachable"
+	case strings.Contains(text, "i/o timeout"), strings.Contains(text, "deadline exceeded"), strings.Contains(text, "timeout"):
+		return "timeout"
+	case strings.Contains(text, "authentication"):
+		return "auth failed"
+	default:
+		if len(text) > 120 {
+			text = text[:120]
+		}
+		return text
+	}
+}
+
+func redactProxyURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User == nil {
+		return rawURL
+	}
+	if username := u.User.Username(); username != "" {
+		u.User = url.UserPassword(username, "***")
+	} else {
+		u.User = nil
+	}
+	return u.String()
+}
+
+func cronMatchesMinute(expr string, t time.Time) bool {
+	fields := strings.Fields(expr)
+	if len(fields) != 5 {
+		return false
+	}
+	return cronFieldMatches(fields[0], t.Minute(), 0, 59) &&
+		cronFieldMatches(fields[1], t.Hour(), 0, 23) &&
+		cronFieldMatches(fields[2], t.Day(), 1, 31) &&
+		cronFieldMatches(fields[3], int(t.Month()), 1, 12) &&
+		cronFieldMatches(fields[4], int(t.Weekday()), 0, 6)
+}
+
+func cronFieldMatches(field string, value, min, max int) bool {
+	for _, part := range strings.Split(field, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		step := 1
+		if strings.Contains(part, "/") {
+			pieces := strings.SplitN(part, "/", 2)
+			part = pieces[0]
+			parsedStep, err := strconv.Atoi(pieces[1])
+			if err != nil || parsedStep <= 0 {
+				return false
+			}
+			step = parsedStep
+		}
+		start, end := min, max
+		switch {
+		case part == "" || part == "*":
+		case strings.Contains(part, "-"):
+			pieces := strings.SplitN(part, "-", 2)
+			var err error
+			start, err = strconv.Atoi(pieces[0])
+			if err != nil {
+				return false
+			}
+			end, err = strconv.Atoi(pieces[1])
+			if err != nil {
+				return false
+			}
+		default:
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				return false
+			}
+			start, end = n, n
+		}
+		if start < min || end > max || start > end {
+			return false
+		}
+		if value >= start && value <= end && (value-start)%step == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+var cronExprPattern = regexp.MustCompile(`^[\d\s,*/-]+$`)
+
+func validateCronExpr(expr string) error {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil
+	}
+	if !cronExprPattern.MatchString(expr) || len(strings.Fields(expr)) != 5 {
+		return fmt.Errorf("cron must use 5 fields, e.g. */10 * * * *")
+	}
+	if !cronMatchesMinute(expr, time.Now()) {
+		fields := strings.Fields(expr)
+		if len(fields) != 5 {
+			return fmt.Errorf("cron must use 5 fields, e.g. */10 * * * *")
+		}
+		for i, field := range fields {
+			min, max := 0, 59
+			if i == 1 {
+				min, max = 0, 23
+			} else if i == 2 {
+				min, max = 1, 31
+			} else if i == 3 {
+				min, max = 1, 12
+			} else if i == 4 {
+				min, max = 0, 6
+			}
+			if !cronFieldValid(field, min, max) {
+				return fmt.Errorf("invalid cron field: %s", field)
+			}
+		}
+	}
+	return nil
+}
+
+func cronFieldValid(field string, min, max int) bool {
+	for value := min; value <= max; value++ {
+		if cronFieldMatches(field, value, min, max) {
+			return true
+		}
+	}
+	return false
 }
 
 // backgroundRefresh 后台定时刷新账户信息
@@ -2048,6 +2751,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models")
 		h.apiGetAccountModels(w, r, id)
+	case path == "/models/cached" && r.Method == "GET":
+		h.apiGetCachedModels(w, r)
 
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/full") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/full")
@@ -2088,6 +2793,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetEndpointConfig(w, r)
 	case path == "/endpoint" && r.Method == "POST":
 		h.apiUpdateEndpointConfig(w, r)
+	case path == "/proxy/probe" && r.Method == "GET":
+		h.apiGetProxyProbe(w, r)
+	case path == "/proxy/probe/run" && r.Method == "POST":
+		h.apiRunProxyProbe(w, r)
 	case path == "/proxy" && r.Method == "GET":
 		h.apiGetProxy(w, r)
 	case path == "/proxy" && r.Method == "POST":
@@ -2123,42 +2832,53 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 		stats := statsMap[a.ID]
 
 		result[i] = map[string]interface{}{
-			"id":                a.ID,
-			"email":             a.Email,
-			"userId":            a.UserId,
-			"nickname":          a.Nickname,
-			"authMethod":        a.AuthMethod,
-			"provider":          a.Provider,
-			"region":            a.Region,
-			"enabled":           a.Enabled,
-			"banStatus":         a.BanStatus,
-			"banReason":         a.BanReason,
-			"banTime":           a.BanTime,
-			"expiresAt":         a.ExpiresAt,
-			"hasToken":          a.AccessToken != "",
-			"machineId":         a.MachineId,
-			"weight":            a.Weight,
-			"allowOverage":      a.AllowOverage,
-			"overageWeight":     a.OverageWeight,
-			"proxyURL":          a.ProxyURL,
-			"subscriptionType":  a.SubscriptionType,
-			"subscriptionTitle": a.SubscriptionTitle,
-			"daysRemaining":     a.DaysRemaining,
-			"usageCurrent":      a.UsageCurrent,
-			"usageLimit":        a.UsageLimit,
-			"usagePercent":      a.UsagePercent,
-			"nextResetDate":     a.NextResetDate,
-			"lastRefresh":       a.LastRefresh,
-			"trialUsageCurrent": a.TrialUsageCurrent,
-			"trialUsageLimit":   a.TrialUsageLimit,
-			"trialUsagePercent": a.TrialUsagePercent,
-			"trialStatus":       a.TrialStatus,
-			"trialExpiresAt":    a.TrialExpiresAt,
-			"requestCount":      stats.RequestCount,
-			"errorCount":        stats.ErrorCount,
-			"totalTokens":       stats.TotalTokens,
-			"totalCredits":      stats.TotalCredits,
-			"lastUsed":          stats.LastUsed,
+			"id":                 a.ID,
+			"email":              a.Email,
+			"userId":             a.UserId,
+			"nickname":           a.Nickname,
+			"authMethod":         a.AuthMethod,
+			"provider":           a.Provider,
+			"region":             a.Region,
+			"enabled":            a.Enabled,
+			"banStatus":          a.BanStatus,
+			"banReason":          a.BanReason,
+			"banTime":            a.BanTime,
+			"expiresAt":          a.ExpiresAt,
+			"hasToken":           a.AccessToken != "",
+			"machineId":          a.MachineId,
+			"weight":             a.Weight,
+			"allowOverage":       a.AllowOverage,
+			"overageWeight":      a.OverageWeight,
+			"proxyURL":           a.ProxyURL,
+			"subscriptionType":   a.SubscriptionType,
+			"subscriptionTitle":  a.SubscriptionTitle,
+			"daysRemaining":      a.DaysRemaining,
+			"usageCurrent":       a.UsageCurrent,
+			"usageLimit":         a.UsageLimit,
+			"usagePercent":       a.UsagePercent,
+			"nextResetDate":      a.NextResetDate,
+			"lastRefresh":        a.LastRefresh,
+			"trialUsageCurrent":  a.TrialUsageCurrent,
+			"trialUsageLimit":    a.TrialUsageLimit,
+			"trialUsagePercent":  a.TrialUsagePercent,
+			"trialStatus":        a.TrialStatus,
+			"trialExpiresAt":     a.TrialExpiresAt,
+			"probeLastAt":        a.ProbeLastAt,
+			"probeLastSuccess":   a.ProbeLastSuccess,
+			"probeLastModel":     a.ProbeLastModel,
+			"probeLastPrompt":    a.ProbeLastPrompt,
+			"probeLastReply":     a.ProbeLastReply,
+			"probeLastError":     a.ProbeLastError,
+			"probeLastLatencyMs": a.ProbeLastLatencyMs,
+			"probeCount":         a.ProbeCount,
+			"probeSuccessCount":  a.ProbeSuccessCount,
+			"probeFailureCount":  a.ProbeFailureCount,
+			"probeLogs":          a.ProbeLogs,
+			"requestCount":       stats.RequestCount,
+			"errorCount":         stats.ErrorCount,
+			"totalTokens":        stats.TotalTokens,
+			"totalCredits":       stats.TotalCredits,
+			"lastUsed":           stats.LastUsed,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -2762,11 +3482,13 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":         config.GetApiKey(),
-		"requireApiKey":  config.IsApiKeyRequired(),
-		"port":           config.GetPort(),
-		"host":           config.GetHost(),
-		"allowOverUsage": config.GetAllowOverUsage(),
+		"apiKey":             config.GetApiKey(),
+		"requireApiKey":      config.IsApiKeyRequired(),
+		"port":               config.GetPort(),
+		"host":               config.GetHost(),
+		"allowOverUsage":     config.GetAllowOverUsage(),
+		"randomProbePerHour": config.GetRandomProbePerHour(),
+		"randomProbeModel":   config.GetRandomProbeModel(),
 	})
 }
 
@@ -2815,10 +3537,12 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey         *string `json:"apiKey,omitempty"`
-		RequireApiKey  *bool   `json:"requireApiKey,omitempty"`
-		Password       string  `json:"password,omitempty"`
-		AllowOverUsage *bool   `json:"allowOverUsage,omitempty"`
+		ApiKey             *string `json:"apiKey,omitempty"`
+		RequireApiKey      *bool   `json:"requireApiKey,omitempty"`
+		Password           string  `json:"password,omitempty"`
+		AllowOverUsage     *bool   `json:"allowOverUsage,omitempty"`
+		RandomProbePerHour *int    `json:"randomProbePerHour,omitempty"`
+		RandomProbeModel   *string `json:"randomProbeModel,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -2835,6 +3559,20 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// 更新超额使用设置
 	if req.AllowOverUsage != nil {
 		if err := config.UpdateAllowOverUsage(*req.AllowOverUsage); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if req.RandomProbePerHour != nil {
+		if err := config.UpdateRandomProbePerHour(*req.RandomProbePerHour); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if req.RandomProbeModel != nil {
+		if err := config.UpdateRandomProbeModel(*req.RandomProbeModel); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
@@ -2889,54 +3627,35 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	if err := h.ensureValidToken(account); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
-		return
-	}
-
 	// Parse test model from request body (optional)
 	var req struct {
-		Model string `json:"model"`
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.Model == "" {
 		req.Model = "claude-sonnet-4"
 	}
-
-	// Build a minimal chat payload
-	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
-
-	openaiReq := &OpenAIRequest{
-		Model:     actualModel,
-		Messages:  []OpenAIMessage{{Role: "user", Content: "say ok"}},
-		MaxTokens: 5,
-		Stream:    false,
-	}
-	kiroPayload := OpenAIToKiro(openaiReq, thinking)
-
-	var content string
-	callback := &KiroStreamCallback{
-		OnText:         func(text string, isThinking bool) { content += text },
-		OnToolUse:      func(tu KiroToolUse) {},
-		OnComplete:     func(inTok, outTok int) {},
-		OnError:        func(err error) {},
-		OnCredits:      func(c float64) {},
-		OnContextUsage: func(pct float64) {},
+	if req.Prompt == "" {
+		req.Prompt = randomProbePrompt(nil)
 	}
 
-	err := CallKiroAPI(account, kiroPayload, callback)
-	if err != nil {
+	success, content, errMsg, latencyMs := h.probeAccount(account, req.Model, req.Prompt)
+	if err := config.UpdateAccountProbeResult(account.ID, success, "manual", req.Model, req.Prompt, content, errMsg, latencyMs); err != nil {
+		logger.Warnf("[AccountTest] Failed to save result for %s: %v", account.Email, err)
+	}
+	if !success {
 		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": errMsg})
 		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"reply":   content,
-		"model":   req.Model,
+		"success":   true,
+		"reply":     content,
+		"model":     req.Model,
+		"prompt":    req.Prompt,
+		"latencyMs": latencyMs,
 	})
 }
 
@@ -3167,6 +3886,38 @@ func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// apiGetCachedModels returns the aggregated cached model IDs for probe settings.
+func (h *Handler) apiGetCachedModels(w http.ResponseWriter, r *http.Request) {
+	h.modelsCacheMu.RLock()
+	cached := make([]ModelInfo, len(h.cachedModels))
+	copy(cached, h.cachedModels)
+	h.modelsCacheMu.RUnlock()
+
+	seen := make(map[string]struct{}, len(cached)+1)
+	models := make([]string, 0, len(cached)+1)
+	for _, model := range cached {
+		id := strings.TrimSpace(model.ModelId)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		models = append(models, id)
+	}
+	if _, ok := seen["claude-sonnet-4"]; !ok {
+		models = append([]string{"claude-sonnet-4"}, models...)
+	}
+	sort.Strings(models)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"models":  models,
+	})
+}
+
 // ==================== 静态文件服务 ====================
 
 func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
@@ -3263,23 +4014,34 @@ func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
-// applyProxyConfig 将代理配置应用到所有出站 HTTP 客户端（Kiro API + auth 模块）
-func applyProxyConfig(proxyURL string) {
-	InitKiroHttpClient(proxyURL)
-	auth.InitHttpClient(proxyURL)
+// applyProxyConfig 将代理配置应用到默认出站 HTTP 客户端（Kiro API + auth 模块）。
+func applyProxyConfig() {
+	InitKiroHttpClient(config.GetNextProxyURL())
+	auth.InitHttpClient(config.GetNextProxyURL())
 }
 
 // apiGetProxy 获取当前代理配置
 func (h *Handler) apiGetProxy(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]string{
-		"proxyURL": config.GetProxyURL(),
+	probeEnabled, cronExpr, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
+	json.NewEncoder(w).Encode(map[string]any{
+		"proxyURL":                 config.GetProxyURL(),
+		"proxyURLs":                config.GetProxyURLs(),
+		"proxyProbeEnabled":        probeEnabled,
+		"proxyProbeCron":           cronExpr,
+		"proxyProbeTargetURL":      targetURL,
+		"proxyProbeTimeoutSeconds": timeoutSeconds,
 	})
 }
 
 // apiUpdateProxy 更新代理配置并立即生效
 func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProxyURL string `json:"proxyURL"`
+		ProxyURL                 string   `json:"proxyURL"`
+		ProxyURLs                []string `json:"proxyURLs"`
+		ProxyProbeEnabled        *bool    `json:"proxyProbeEnabled,omitempty"`
+		ProxyProbeCron           *string  `json:"proxyProbeCron,omitempty"`
+		ProxyProbeTargetURL      *string  `json:"proxyProbeTargetURL,omitempty"`
+		ProxyProbeTimeoutSeconds *int     `json:"proxyProbeTimeoutSeconds,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3287,28 +4049,110 @@ func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 验证代理 URL 格式（非空时）
-	if req.ProxyURL != "" {
-		if !strings.HasPrefix(req.ProxyURL, "http://") &&
-			!strings.HasPrefix(req.ProxyURL, "https://") &&
-			!strings.HasPrefix(req.ProxyURL, "socks5://") &&
-			!strings.HasPrefix(req.ProxyURL, "socks5h://") {
+	proxyURLs := req.ProxyURLs
+	if len(proxyURLs) == 0 && strings.TrimSpace(req.ProxyURL) != "" {
+		proxyURLs = []string{req.ProxyURL}
+	}
+	for _, proxyURL := range proxyURLs {
+		proxyURL = strings.TrimSpace(proxyURL)
+		if proxyURL == "" {
+			continue
+		}
+		if err := validateProxyURL(proxyURL); err != nil {
 			w.WriteHeader(400)
-			json.NewEncoder(w).Encode(map[string]string{"error": "proxyURL must start with http://, https://, socks5://, or socks5h://"})
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 	}
 
-	if err := config.UpdateProxySettings(req.ProxyURL); err != nil {
+	currentEnabled, currentCron, currentTargetURL, currentTimeout := config.GetProxyProbeConfig()
+	probeEnabled := currentEnabled
+	cronExpr := currentCron
+	targetURL := currentTargetURL
+	timeoutSeconds := currentTimeout
+	if req.ProxyProbeEnabled != nil || req.ProxyProbeCron != nil || req.ProxyProbeTargetURL != nil || req.ProxyProbeTimeoutSeconds != nil {
+		if req.ProxyProbeEnabled != nil {
+			probeEnabled = *req.ProxyProbeEnabled
+		}
+		if req.ProxyProbeCron != nil {
+			cronExpr = *req.ProxyProbeCron
+		}
+		if req.ProxyProbeTargetURL != nil {
+			targetURL = *req.ProxyProbeTargetURL
+		}
+		if req.ProxyProbeTimeoutSeconds != nil {
+			timeoutSeconds = *req.ProxyProbeTimeoutSeconds
+		}
+		if err := validateCronExpr(cronExpr); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if _, err := url.ParseRequestURI(targetURL); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid proxy probe target URL"})
+			return
+		}
+		if timeoutSeconds < 1 || timeoutSeconds > 120 {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "proxy probe timeout must be 1-120 seconds"})
+			return
+		}
+	}
+
+	if err := config.UpdateProxySettings(proxyURLs); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	if req.ProxyProbeEnabled != nil || req.ProxyProbeCron != nil || req.ProxyProbeTargetURL != nil || req.ProxyProbeTimeoutSeconds != nil {
+		if err := config.UpdateProxyProbeConfig(probeEnabled, cronExpr, targetURL, timeoutSeconds); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
 
 	// 立即应用新的代理配置
-	applyProxyConfig(req.ProxyURL)
+	applyProxyConfig()
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (h *Handler) apiGetProxyProbe(w http.ResponseWriter, r *http.Request) {
+	probeEnabled, cronExpr, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
+	lastRunMinute, logs := config.GetProxyProbeState()
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":                  true,
+		"proxyProbeEnabled":        probeEnabled,
+		"proxyProbeCron":           cronExpr,
+		"proxyProbeTargetURL":      targetURL,
+		"proxyProbeTimeoutSeconds": timeoutSeconds,
+		"lastRunMinute":            lastRunMinute,
+		"logs":                     logs,
+	})
+}
+
+func (h *Handler) apiRunProxyProbe(w http.ResponseWriter, r *http.Request) {
+	_, _, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
+	logs := h.runProxyProbe(targetURL, timeoutSeconds)
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"logs":    logs,
+	})
+}
+
+func validateProxyURL(proxyURL string) error {
+	u, err := url.Parse(proxyURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("invalid proxy URL: %s", proxyURL)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+		return nil
+	default:
+		return fmt.Errorf("proxy URL must start with http://, https://, socks5://, or socks5h://")
+	}
 }
 
 // apiGetVersion 获取版本信息

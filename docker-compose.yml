@@ -4,7 +4,7 @@ services:
   kiro-go:
     build: .
     ports:
-      - "8080:8080"
+      - "8088:8088"
     volumes:
       - ./data:/app/data
     environment:

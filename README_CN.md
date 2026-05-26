@@ -35,7 +35,7 @@ docker-compose up -d
 ```bash
 docker run -d \
   --name kiro-go \
-  -p 8080:8080 \
+  -p 8088:8088 \
   -e ADMIN_PASSWORD=your_secure_password \
   -v /path/to/data:/app/data \
   --restart unless-stopped \
@@ -55,17 +55,17 @@ go build -o kiro-go .
 
 ## 使用方法
 
-访问 `http://localhost:8080/admin` 登录、添加账号，然后调用 API：
+访问 `http://localhost:8088/admin` 登录、添加账号，然后调用 API：
 
 ```bash
 # Claude
-curl http://localhost:8080/v1/messages \
+curl http://localhost:8088/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"你好！"}]}'
 
 # OpenAI
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8088/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer any" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"你好！"}]}'

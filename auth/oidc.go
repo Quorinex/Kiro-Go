@@ -13,10 +13,10 @@ import (
 // RefreshToken 刷新 access token
 // Returns: accessToken, refreshToken, expiresAt, profileArn, error
 func RefreshToken(account *config.Account) (string, string, int64, string, error) {
-	// Resolve per-account proxy: account.ProxyURL > global config
+	// Resolve per-account proxy: account.ProxyURL > round-robin global proxy.
 	proxyURL := account.ProxyURL
 	if proxyURL == "" {
-		proxyURL = config.GetProxyURL()
+		proxyURL = config.GetNextProxyURL()
 	}
 	client := GetAuthClientForProxy(proxyURL)
 

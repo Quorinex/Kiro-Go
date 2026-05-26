@@ -35,7 +35,7 @@ docker-compose up -d
 ```bash
 docker run -d \
   --name kiro-go \
-  -p 8080:8080 \
+  -p 8088:8088 \
   -e ADMIN_PASSWORD=your_secure_password \
   -v /path/to/data:/app/data \
   --restart unless-stopped \
@@ -55,17 +55,17 @@ Config is auto-created at `data/config.json`. Mount `/app/data` for persistence.
 
 ## Usage
 
-Open `http://localhost:8080/admin`, log in, add accounts, then call the API:
+Open `http://localhost:8088/admin`, log in, add accounts, then call the API:
 
 ```bash
 # Claude
-curl http://localhost:8080/v1/messages \
+curl http://localhost:8088/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'
 
 # OpenAI
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8088/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer any" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello!"}]}'

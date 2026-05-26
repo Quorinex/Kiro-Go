@@ -644,7 +644,7 @@
 
   // Data loaders
   async function loadData() {
-    await Promise.all([loadStats(), loadAccounts(), loadSettings(), loadVersion()]);
+    await Promise.all([loadStats(), loadAccounts(), loadSettings(), loadVersion(), loadProxyProbeLogs()]);
     renderEndpointCode('claudeEndpoint', baseUrl + '/v1/messages');
     renderEndpointCode('openaiEndpoint', baseUrl + '/v1/chat/completions');
     renderEndpointCode('modelsEndpoint', baseUrl + '/v1/models');
@@ -665,6 +665,23 @@
     const res = await api('/accounts');
     accountsData = await res.json();
     renderAccounts();
+  }
+  async function loadProbeModelOptions(selectedModel) {
+    const list = $('probeModelOptions');
+    if (!list) return;
+    const models = new Set();
+    if (selectedModel) models.add(selectedModel);
+    models.add('claude-sonnet-4');
+    try {
+      const res = await api('/models/cached');
+      const d = await res.json();
+      if (Array.isArray(d.models)) d.models.forEach(model => {
+        if (model) models.add(model);
+      });
+    } catch (e) { }
+    list.innerHTML = Array.from(models).sort().map(model =>
+      '<option value="' + escapeAttr(model) + '"></option>'
+    ).join('');
   }
 
   // Account list
@@ -783,6 +800,91 @@
     if (diff < 86400) return Math.floor(diff / 3600) + t('time.hours');
     return Math.floor(diff / 86400) + t('time.days');
   }
+  function formatProbeTime(ts) {
+    if (!ts) return '-';
+    const diff = Math.max(0, Date.now() / 1000 - ts);
+    if (diff < 60) return t('time.justNow');
+    if (diff < 3600) return Math.floor(diff / 60) + t('time.minutesAgo');
+    if (diff < 86400) return Math.floor(diff / 3600) + t('time.hoursAgo');
+    return Math.floor(diff / 86400) + t('time.daysAgo');
+  }
+  function formatProbeDateTime(ts) {
+    if (!ts) return '-';
+    try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return '-'; }
+  }
+  function probeStateClass(log) {
+    if (!log || !log.at) return 'unknown';
+    if (log.success === true) return 'ok';
+    if (log.success === false) return 'err';
+    return 'warn';
+  }
+  function probeStateLabel(log) {
+    const cls = probeStateClass(log);
+    if (cls === 'ok') return t('probeTimeline.ok');
+    if (cls === 'err') return t('probeTimeline.failed');
+    return t('probeTimeline.unknown');
+  }
+  function accountProbeDetail(log) {
+    if (!log) return t('accounts.probeNoResult');
+    const parts = [
+      t('probeTimeline.time') + ': ' + formatProbeDateTime(log.at),
+      t('probeTimeline.status') + ': ' + probeStateLabel(log)
+    ];
+    if (log.source) parts.push(t('probeTimeline.source') + ': ' + (log.source === 'manual' ? t('accounts.probeSourceManual') : t('accounts.probeSourceAuto')));
+    if (log.model) parts.push(t('probeTimeline.model') + ': ' + log.model);
+    if (log.latencyMs != null) parts.push(t('probeTimeline.latency') + ': ' + log.latencyMs + 'ms');
+    if (log.prompt) parts.push(t('probeTimeline.prompt') + ': ' + log.prompt);
+    if (log.reply) parts.push(t('probeTimeline.reply') + ': ' + log.reply);
+    if (log.error) parts.push(t('probeTimeline.error') + ': ' + log.error);
+    return parts.join('\n');
+  }
+  function proxyProbeDetail(log) {
+    if (!log) return t('proxyProbe.empty');
+    const parts = [
+      t('probeTimeline.time') + ': ' + formatProbeDateTime(log.at),
+      t('probeTimeline.status') + ': ' + probeStateLabel(log)
+    ];
+    if (log.proxyURL) parts.push(t('probeTimeline.proxy') + ': ' + log.proxyURL);
+    if (log.targetURL) parts.push(t('probeTimeline.target') + ': ' + log.targetURL);
+    if (log.status) parts.push(t('probeTimeline.httpStatus') + ': ' + log.status);
+    if (log.latencyMs != null) parts.push(t('probeTimeline.latency') + ': ' + log.latencyMs + 'ms');
+    if (log.error) parts.push(t('probeTimeline.error') + ': ' + log.error);
+    return parts.join('\n');
+  }
+  function showProbeDetail(detail) {
+    toast(detail, 'info', { duration: 8000, icon: 'fa-solid fa-chart-simple' });
+  }
+  function renderProbeTimeline(logs, detailFn, emptyText) {
+    const raw = Array.isArray(logs) ? logs.slice(0, 90) : [];
+    if (!raw.length) {
+      return '<div class="probe-timeline-empty">' + escapeHtml(emptyText) + '</div>';
+    }
+    const items = raw.slice().reverse();
+    const okCount = raw.filter(log => log && log.success === true).length;
+    const uptime = raw.length ? ((okCount / raw.length) * 100).toFixed(2) : '0.00';
+    return '<div class="probe-timeline">' +
+      '<div class="probe-timeline-bars">' +
+      items.map((log, idx) => {
+        const detail = detailFn(log);
+        return '<button type="button" class="probe-timeline-bar ' + probeStateClass(log) + '" ' +
+          'data-probe-detail="' + escapeAttr(detail) + '" title="' + escapeAttr(detail) + '" aria-label="' + escapeAttr(detail) + '">' +
+          '<span class="sr-only">' + escapeHtml(probeStateLabel(log)) + ' ' + (idx + 1) + '</span>' +
+          '</button>';
+      }).join('') +
+      '</div>' +
+      '<div class="probe-timeline-footer">' +
+      '<span>' + escapeHtml(t('probeTimeline.oldest')) + '</span>' +
+      '<span class="probe-timeline-uptime">' + escapeHtml(t('probeTimeline.uptime', uptime)) + '</span>' +
+      '<span>' + escapeHtml(t('probeTimeline.today')) + '</span>' +
+      '</div>' +
+      '</div>';
+  }
+  function renderProbeLogs(logs) {
+    return '<div class="probe-logs">' +
+      '<div class="probe-logs-title">' + escapeHtml(t('accounts.probeLogs')) + '</div>' +
+      renderProbeTimeline(logs, accountProbeDetail, t('accounts.probeNoResult')) +
+      '</div>';
+  }
   function formatNum(n) {
     if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
@@ -816,6 +918,13 @@
       const idAttr = escapeAttr(a.id);
       const displayEmail = getDisplayEmail(a.email, a.id);
       const selectLabel = t('accounts.selectAccount', displayEmail);
+      const probeStatus = a.probeLastAt
+        ? (a.probeLastSuccess ? t('accounts.probeOk') : t('accounts.probeFailed'))
+        : t('accounts.probeNever');
+      const probeClass = a.probeLastAt ? (a.probeLastSuccess ? 'ok' : 'err') : 'muted';
+      const probeDetail = a.probeLastAt
+        ? (a.probeLastSuccess ? (a.probeLastReply || '-') : (a.probeLastError || '-'))
+        : t('accounts.probeNoResult');
 
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
@@ -867,6 +976,12 @@
         '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.totalCredits || 0).toFixed(1) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.credits')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + escapeHtml(formatTokenExpiry(a.expiresAt)) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.expiry')) + '</div></div>' +
+        '</div>' +
+        '<div class="probe-row probe-' + probeClass + '">' +
+        '<div class="probe-main"><span class="probe-status">' + escapeHtml(probeStatus) + '</span><span>' + escapeHtml(formatProbeTime(a.probeLastAt)) + '</span><span>' + escapeHtml((a.probeLastLatencyMs || 0) + 'ms') + '</span><span>' + escapeHtml((a.probeSuccessCount || 0) + '/' + (a.probeCount || 0)) + '</span></div>' +
+        '<div class="probe-detail" title="' + escapeAttr(probeDetail) + '">' + escapeHtml(probeDetail) + '</div>' +
+        (a.probeLastPrompt ? '<div class="probe-prompt">' + escapeHtml(a.probeLastPrompt) + '</div>' : '') +
+        renderProbeLogs(a.probeLogs) +
         '</div>' +
         '</div>';
     }).join('');
@@ -1305,6 +1420,7 @@
     } catch (e) {
       addTestLog(t('accounts.testLog.error', email, e.message), 'err');
     }
+    loadAccounts();
     testModalRunning = false;
     if (modalBtn) modalBtn.removeAttribute('aria-busy');
   }
@@ -1316,6 +1432,9 @@
     $('requireApiKey').checked = d.requireApiKey;
     $('apiKeyInput').value = d.apiKey || '';
     $('allowOverUsage').checked = d.allowOverUsage || false;
+    $('randomProbePerHour').value = d.randomProbePerHour || 0;
+    $('randomProbeModel').value = d.randomProbeModel || 'claude-sonnet-4';
+    await loadProbeModelOptions($('randomProbeModel').value);
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter()]);
     refreshCustomSelects();
   }
@@ -1358,46 +1477,69 @@
   async function loadProxyConfig() {
     const res = await api('/proxy');
     const d = await res.json();
-    const url = d.proxyURL || '';
-    if (!url) {
-      $('proxyType').value = 'none';
-      $('proxyFields').classList.add('hidden');
-      return;
-    }
-    try {
-      const u = new URL(url);
-      const scheme = u.protocol.replace(':', '');
-      $('proxyType').value = scheme.startsWith('socks5') ? 'socks5' : 'http';
-      $('proxyHost').value = u.hostname;
-      $('proxyPort').value = u.port;
-      $('proxyUsername').value = decodeURIComponent(u.username);
-      $('proxyPassword').value = decodeURIComponent(u.password);
-      $('proxyFields').classList.remove('hidden');
-    } catch (e) {
-      $('proxyType').value = 'none';
-      $('proxyFields').classList.add('hidden');
-    }
-  }
-  function onProxyTypeChange() {
-    const type = $('proxyType').value;
-    $('proxyFields').classList.toggle('hidden', type === 'none');
+    const urls = Array.isArray(d.proxyURLs) ? d.proxyURLs : (d.proxyURL ? [d.proxyURL] : []);
+    $('proxyURLs').value = urls.join('\n');
+    $('proxyProbeEnabled').checked = !!d.proxyProbeEnabled;
+    $('proxyProbeCron').value = d.proxyProbeCron || '';
+    $('proxyProbeTargetURL').value = d.proxyProbeTargetURL || 'https://www.google.com/generate_204';
+    $('proxyProbeTimeoutSeconds').value = d.proxyProbeTimeoutSeconds || 10;
   }
   async function saveProxyConfig() {
-    const type = $('proxyType').value;
-    let url = '';
-    if (type !== 'none') {
-      const host = $('proxyHost').value.trim();
-      const port = $('proxyPort').value.trim();
-      if (!host || !port) { toast(t('settings.proxyHostRequired'), 'warning'); return; }
-      const u = $('proxyUsername').value.trim();
-      const p = $('proxyPassword').value.trim();
-      const auth = u ? (p ? encodeURIComponent(u) + ':' + encodeURIComponent(p) + '@' : encodeURIComponent(u) + '@') : '';
-      url = type + '://' + auth + host + ':' + port;
+    const urls = $('proxyURLs').value
+      .split(/\r?\n/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    for (const url of urls) {
+      if (!/^(socks5|socks5h|http|https):\/\//.test(url)) {
+        toast(t('settings.proxyFormatError'), 'warning'); return;
+      }
     }
-    const res = await api('/proxy', { method: 'POST', body: JSON.stringify({ proxyURL: url }) });
+    const proxyProbeEnabled = $('proxyProbeEnabled').checked;
+    const proxyProbeCron = $('proxyProbeCron').value.trim();
+    const proxyProbeTargetURL = $('proxyProbeTargetURL').value.trim() || 'https://www.google.com/generate_204';
+    const proxyProbeTimeoutSeconds = Math.max(1, Math.min(120, parseInt($('proxyProbeTimeoutSeconds').value, 10) || 10));
+    const res = await api('/proxy', {
+      method: 'POST',
+      body: JSON.stringify({ proxyURLs: urls, proxyProbeEnabled, proxyProbeCron, proxyProbeTargetURL, proxyProbeTimeoutSeconds })
+    });
     const d = await res.json();
-    if (d.success) toast(t('settings.proxySaved'), 'success');
+    if (d.success) {
+      toast(t('settings.proxySaved'), 'success');
+      loadProxyProbeLogs();
+    }
     else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+  }
+  function renderProxyProbeLogs(logs) {
+    const c = $('proxyProbeLogs');
+    if (!c) return;
+    c.innerHTML = renderProbeTimeline(logs, proxyProbeDetail, t('proxyProbe.empty'));
+  }
+  async function loadProxyProbeLogs() {
+    try {
+      const res = await api('/proxy/probe');
+      const d = await res.json();
+      renderProxyProbeLogs(d.logs || []);
+    } catch (e) {
+      renderProxyProbeLogs([]);
+    }
+  }
+  async function runProxyProbeNow() {
+    const btn = $('runProxyProbeBtn');
+    if (btn) btn.setAttribute('aria-busy', 'true');
+    try {
+      const res = await api('/proxy/probe/run', { method: 'POST' });
+      const d = await res.json();
+      if (d.success) {
+        renderProxyProbeLogs(d.logs || []);
+        toast(t('proxyProbe.runDone'), 'success');
+        loadProxyProbeLogs();
+      } else {
+        toast(t('common.failed') + ': ' + (d.error || ''), 'error');
+      }
+    } catch (e) {
+      toast(t('common.failed'), 'error');
+    }
+    if (btn) btn.removeAttribute('aria-busy');
   }
   async function saveApiSettings() {
     try {
@@ -1417,6 +1559,15 @@
     const allowOverUsage = $('allowOverUsage').checked;
     await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage }) });
     toast(t('settings.overUsageSaved'), 'success');
+  }
+  async function saveProbeSettings() {
+    const randomProbePerHour = Math.max(0, parseInt($('randomProbePerHour').value, 10) || 0);
+    const randomProbeModel = ($('randomProbeModel').value || 'claude-sonnet-4').trim();
+    const res = await api('/settings', { method: 'POST', body: JSON.stringify({ randomProbePerHour, randomProbeModel }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+    await loadProbeModelOptions(randomProbeModel);
+    toast(t('settings.probeSettingsSaved'), 'success');
   }
   async function changePassword() {
     const np = $('newPassword').value;
@@ -2232,6 +2383,11 @@
     $('filterStatusSelect').addEventListener('change', onFilterChange);
 
     $('accountsList').addEventListener('click', e => {
+      const probeBar = e.target.closest('.probe-timeline-bar');
+      if (probeBar) {
+        showProbeDetail(probeBar.dataset.probeDetail || probeBar.title || '');
+        return;
+      }
       const cb = e.target.closest('.account-checkbox');
       if (cb) {
         toggleSelectAccount(cb.dataset.id);
@@ -2256,12 +2412,18 @@
     $('generateApiKeyBtn').addEventListener('click', generateApiKey);
     $('saveApiSettingsBtn').addEventListener('click', saveApiSettings);
     $('saveOverUsageBtn').addEventListener('click', saveOverUsageConfig);
+    $('saveProbeSettingsBtn').addEventListener('click', saveProbeSettings);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
     $('saveEndpointBtn').addEventListener('click', saveEndpointConfig);
     $('changePasswordBtn').addEventListener('click', changePassword);
-    $('proxyType').addEventListener('change', onProxyTypeChange);
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
+    $('runProxyProbeBtn').addEventListener('click', runProxyProbeNow);
     $('resetStatsBtn').addEventListener('click', resetStats);
+    $('proxyProbeLogs').addEventListener('click', e => {
+      const probeBar = e.target.closest('.probe-timeline-bar');
+      if (!probeBar) return;
+      showProbeDetail(probeBar.dataset.probeDetail || probeBar.title || '');
+    });
   }
 
   function bindPromptFilterEvents() {
@@ -2368,7 +2530,10 @@
     wireEvents();
     if (password) tryAutoLogin();
     setInterval(() => {
-      if (!$('mainPage').classList.contains('hidden')) loadStats();
+      if (!$('mainPage').classList.contains('hidden')) {
+        loadStats();
+        loadProxyProbeLogs();
+      }
     }, 10000);
   }
 

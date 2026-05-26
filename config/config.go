@@ -16,7 +16,9 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -94,6 +96,42 @@ type Account struct {
 	LastUsed     int64   `json:"lastUsed,omitempty"`     // Last request timestamp
 	TotalTokens  int     `json:"totalTokens,omitempty"`  // Cumulative tokens processed
 	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
+
+	// Random probe status
+	ProbeLastAt        int64      `json:"probeLastAt,omitempty"`
+	ProbeLastSuccess   bool       `json:"probeLastSuccess,omitempty"`
+	ProbeLastModel     string     `json:"probeLastModel,omitempty"`
+	ProbeLastPrompt    string     `json:"probeLastPrompt,omitempty"`
+	ProbeLastReply     string     `json:"probeLastReply,omitempty"`
+	ProbeLastError     string     `json:"probeLastError,omitempty"`
+	ProbeLastLatencyMs int64      `json:"probeLastLatencyMs,omitempty"`
+	ProbeCount         int        `json:"probeCount,omitempty"`
+	ProbeSuccessCount  int        `json:"probeSuccessCount,omitempty"`
+	ProbeFailureCount  int        `json:"probeFailureCount,omitempty"`
+	ProbeLogs          []ProbeLog `json:"probeLogs,omitempty"`
+}
+
+// ProbeLog records recent background probes and manual account tests.
+type ProbeLog struct {
+	At        int64  `json:"at"`
+	Source    string `json:"source,omitempty"`
+	Success   bool   `json:"success"`
+	Model     string `json:"model,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
+	Reply     string `json:"reply,omitempty"`
+	Error     string `json:"error,omitempty"`
+	LatencyMs int64  `json:"latencyMs,omitempty"`
+}
+
+// ProxyProbeLog records recent scheduled outbound proxy availability checks.
+type ProxyProbeLog struct {
+	At        int64  `json:"at"`
+	ProxyURL  string `json:"proxyURL,omitempty"`
+	TargetURL string `json:"targetURL,omitempty"`
+	Success   bool   `json:"success"`
+	Status    int    `json:"status,omitempty"`
+	Error     string `json:"error,omitempty"`
+	LatencyMs int64  `json:"latencyMs,omitempty"`
 }
 
 // PromptFilterRule defines a single custom prompt sanitization rule.
@@ -112,7 +150,7 @@ type PromptFilterRule struct {
 type Config struct {
 	// Server settings
 	Password      string    `json:"password"`         // Admin panel password
-	Port          int       `json:"port"`             // HTTP server port (default: 8080)
+	Port          int       `json:"port"`             // HTTP server port (default: 8088)
 	Host          string    `json:"host"`             // HTTP server bind address (default: 0.0.0.0)
 	ApiKey        string    `json:"apiKey,omitempty"` // API key for client authentication
 	RequireApiKey bool      `json:"requireApiKey"`    // Whether to enforce API key validation
@@ -138,11 +176,26 @@ type Config struct {
 	// solely because usageCurrent >= usageLimit.
 	AllowOverUsage bool `json:"allowOverUsage,omitempty"`
 
+	// RandomProbePerHour controls background lightweight random account probes.
+	RandomProbePerHour int `json:"randomProbePerHour,omitempty"`
+
+	// RandomProbeModel controls which model is used by background random probes.
+	RandomProbeModel string `json:"randomProbeModel,omitempty"`
+
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
 	//         "http://host:port",  "http://user:pass@host:port"
 	// Leave empty to connect directly.
-	ProxyURL string `json:"proxyURL,omitempty"`
+	ProxyURL  string   `json:"proxyURL,omitempty"`
+	ProxyURLs []string `json:"proxyURLs,omitempty"`
+
+	// Proxy probe configuration and recent logs.
+	ProxyProbeEnabled        bool            `json:"proxyProbeEnabled,omitempty"`
+	ProxyProbeCron           string          `json:"proxyProbeCron,omitempty"`
+	ProxyProbeTargetURL      string          `json:"proxyProbeTargetURL,omitempty"`
+	ProxyProbeTimeoutSeconds int             `json:"proxyProbeTimeoutSeconds,omitempty"`
+	ProxyProbeLastRunMinute  int64           `json:"proxyProbeLastRunMinute,omitempty"`
+	ProxyProbeLogs           []ProxyProbeLog `json:"proxyProbeLogs,omitempty"`
 
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
 	// Migrated to FilterClaudeCode on first load. Do not use directly.
@@ -199,9 +252,10 @@ type AccountInfo struct {
 const Version = "1.0.9"
 
 var (
-	cfg     *Config
-	cfgLock sync.RWMutex
-	cfgPath string
+	cfg               *Config
+	cfgLock           sync.RWMutex
+	cfgPath           string
+	proxyRoundRobinID uint64
 )
 
 // Init initializes the configuration system with the specified file path.
@@ -222,7 +276,7 @@ func Load() error {
 			// Binds to 0.0.0.0 by default for Docker/container compatibility.
 			cfg = &Config{
 				Password:      "changeme",
-				Port:          8080,
+				Port:          8088,
 				Host:          "0.0.0.0",
 				RequireApiKey: false,
 				Accounts:      []Account{},
@@ -274,7 +328,7 @@ func GetPort() int {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	if cfg.Port == 0 {
-		return 8080
+		return 8088
 	}
 	return cfg.Port
 }
@@ -489,6 +543,46 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, to
 	return nil
 }
 
+// UpdateAccountProbeResult persists recent background probe and manual test results for an account.
+func UpdateAccountProbeResult(id string, success bool, source, model, prompt, reply, errMsg string, latencyMs int64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			now := time.Now().Unix()
+			cfg.Accounts[i].ProbeLastAt = now
+			cfg.Accounts[i].ProbeLastSuccess = success
+			cfg.Accounts[i].ProbeLastModel = model
+			cfg.Accounts[i].ProbeLastPrompt = prompt
+			cfg.Accounts[i].ProbeLastReply = reply
+			cfg.Accounts[i].ProbeLastError = errMsg
+			cfg.Accounts[i].ProbeLastLatencyMs = latencyMs
+			cfg.Accounts[i].ProbeCount++
+			if success {
+				cfg.Accounts[i].ProbeSuccessCount++
+			} else {
+				cfg.Accounts[i].ProbeFailureCount++
+			}
+			log := ProbeLog{
+				At:        now,
+				Source:    source,
+				Success:   success,
+				Model:     model,
+				Prompt:    prompt,
+				Reply:     reply,
+				Error:     errMsg,
+				LatencyMs: latencyMs,
+			}
+			cfg.Accounts[i].ProbeLogs = append([]ProbeLog{log}, cfg.Accounts[i].ProbeLogs...)
+			if len(cfg.Accounts[i].ProbeLogs) > 90 {
+				cfg.Accounts[i].ProbeLogs = cfg.Accounts[i].ProbeLogs[:90]
+			}
+			return Save()
+		}
+	}
+	return nil
+}
+
 // UpdateAccountInfo updates an account's subscription and usage information.
 // Called after refreshing account data from Kiro API.
 func UpdateAccountInfo(id string, info AccountInfo) error {
@@ -683,18 +777,133 @@ func UpdateEndpointFallback(enabled bool) error {
 	return Save()
 }
 
-// GetProxyURL 获取出站代理地址
+func normalizeProxyURLs(proxyURLs []string) []string {
+	seen := make(map[string]struct{}, len(proxyURLs))
+	out := make([]string, 0, len(proxyURLs))
+	for _, proxyURL := range proxyURLs {
+		proxyURL = strings.TrimSpace(proxyURL)
+		if proxyURL == "" {
+			continue
+		}
+		if _, ok := seen[proxyURL]; ok {
+			continue
+		}
+		seen[proxyURL] = struct{}{}
+		out = append(out, proxyURL)
+	}
+	return out
+}
+
+// GetProxyURL 获取首个出站代理地址，兼容旧版单代理配置。
 func GetProxyURL() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
+	if len(cfg.ProxyURLs) > 0 {
+		return cfg.ProxyURLs[0]
+	}
 	return cfg.ProxyURL
 }
 
-// UpdateProxySettings 更新出站代理配置
-func UpdateProxySettings(proxyURL string) error {
+// GetProxyURLs 获取全部全局出站代理地址。
+func GetProxyURLs() []string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	proxyURLs := normalizeProxyURLs(cfg.ProxyURLs)
+	if len(proxyURLs) == 0 && strings.TrimSpace(cfg.ProxyURL) != "" {
+		proxyURLs = []string{strings.TrimSpace(cfg.ProxyURL)}
+	}
+	out := make([]string, len(proxyURLs))
+	copy(out, proxyURLs)
+	return out
+}
+
+// GetNextProxyURL 轮询获取一个全局出站代理地址。
+func GetNextProxyURL() string {
+	proxyURLs := GetProxyURLs()
+	if len(proxyURLs) == 0 {
+		return ""
+	}
+	idx := atomic.AddUint64(&proxyRoundRobinID, 1) - 1
+	return proxyURLs[int(idx%uint64(len(proxyURLs)))]
+}
+
+// UpdateProxySettings 更新出站代理配置。
+func UpdateProxySettings(proxyURLs []string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
-	cfg.ProxyURL = proxyURL
+	cfg.ProxyURLs = normalizeProxyURLs(proxyURLs)
+	if len(cfg.ProxyURLs) > 0 {
+		cfg.ProxyURL = cfg.ProxyURLs[0]
+	} else {
+		cfg.ProxyURL = ""
+	}
+	return Save()
+}
+
+// GetProxyProbeConfig returns scheduled proxy probe settings.
+func GetProxyProbeConfig() (bool, string, string, int) {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	enabled := cfg.ProxyProbeEnabled
+	cron := strings.TrimSpace(cfg.ProxyProbeCron)
+	targetURL := strings.TrimSpace(cfg.ProxyProbeTargetURL)
+	timeoutSeconds := cfg.ProxyProbeTimeoutSeconds
+	if targetURL == "" {
+		targetURL = "https://www.google.com/generate_204"
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 10
+	}
+	return enabled, cron, targetURL, timeoutSeconds
+}
+
+// UpdateProxyProbeConfig updates scheduled proxy probe settings.
+func UpdateProxyProbeConfig(enabled bool, cron, targetURL string, timeoutSeconds int) error {
+	cron = strings.TrimSpace(cron)
+	targetURL = strings.TrimSpace(targetURL)
+	if targetURL == "" {
+		targetURL = "https://www.google.com/generate_204"
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 10
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ProxyProbeEnabled = enabled
+	cfg.ProxyProbeCron = cron
+	cfg.ProxyProbeTargetURL = targetURL
+	cfg.ProxyProbeTimeoutSeconds = timeoutSeconds
+	return Save()
+}
+
+// GetProxyProbeState returns the last scheduled run minute and recent logs.
+func GetProxyProbeState() (int64, []ProxyProbeLog) {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	logs := make([]ProxyProbeLog, len(cfg.ProxyProbeLogs))
+	copy(logs, cfg.ProxyProbeLogs)
+	return cfg.ProxyProbeLastRunMinute, logs
+}
+
+// SetProxyProbeLastRunMinute stores the last scheduled run minute.
+func SetProxyProbeLastRunMinute(minute int64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ProxyProbeLastRunMinute = minute
+	return Save()
+}
+
+// AppendProxyProbeLogs stores recent scheduled proxy probe results.
+func AppendProxyProbeLogs(logs []ProxyProbeLog) error {
+	if len(logs) == 0 {
+		return nil
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ProxyProbeLogs = append(logs, cfg.ProxyProbeLogs...)
+	if len(cfg.ProxyProbeLogs) > 90 {
+		cfg.ProxyProbeLogs = cfg.ProxyProbeLogs[:90]
+	}
 	return Save()
 }
 
@@ -713,6 +922,50 @@ func UpdateAllowOverUsage(allow bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.AllowOverUsage = allow
+	return Save()
+}
+
+// GetRandomProbePerHour returns the configured global random probe count per hour.
+func GetRandomProbePerHour() int {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.RandomProbePerHour < 0 {
+		return 0
+	}
+	return cfg.RandomProbePerHour
+}
+
+// UpdateRandomProbePerHour sets the global random probe count per hour.
+func UpdateRandomProbePerHour(count int) error {
+	if count < 0 {
+		count = 0
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.RandomProbePerHour = count
+	return Save()
+}
+
+// GetRandomProbeModel returns the configured global random probe model.
+func GetRandomProbeModel() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	model := strings.TrimSpace(cfg.RandomProbeModel)
+	if model == "" {
+		return "claude-sonnet-4"
+	}
+	return model
+}
+
+// UpdateRandomProbeModel sets the global random probe model.
+func UpdateRandomProbeModel(model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "claude-sonnet-4"
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.RandomProbeModel = model
 	return Save()
 }
 

@@ -1045,28 +1045,9 @@
             <div class="card">
                 <div class="card-header"><span class="card-title" data-i18n="settings.proxySettings"></span></div>
                 <div class="form-group">
-                    <label data-i18n="settings.proxyType"></label>
-                    <select id="proxyType" onchange="onProxyTypeChange()">
-                        <option value="none" data-i18n="settings.proxyNone"></option>
-                        <option value="socks5">SOCKS5</option>
-                        <option value="http">HTTP</option>
-                    </select>
-                </div>
-                <div id="proxyFields" style="display:none">
-                    <div class="form-group">
-                        <label data-i18n="settings.proxyHost"></label>
-                        <div style="display:flex;gap:8px;align-items:stretch">
-                            <input type="text" id="proxyHost" style="flex:1" placeholder="127.0.0.1">
-                            <input type="number" id="proxyPort" style="width:90px" placeholder="1080" min="1" max="65535">
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label data-i18n="settings.proxyAuth"></label>
-                        <div style="display:flex;gap:8px">
-                            <input type="text" id="proxyUsername" style="flex:1" data-i18n-placeholder="settings.proxyUsername" autocomplete="off">
-                            <input type="password" id="proxyPassword" style="flex:1" data-i18n-placeholder="settings.proxyPassword" autocomplete="new-password">
-                        </div>
-                    </div>
+                    <label data-i18n="settings.proxyURLs"></label>
+                    <textarea id="proxyURLs" rows="6" style="width:100%" data-i18n-placeholder="settings.proxyURLsPlaceholder" autocomplete="off"></textarea>
+                    <p style="color:#64748b;font-size:12px;margin-top:4px" data-i18n="settings.proxyURLsHint"></p>
                 </div>
                 <button class="btn btn-primary" onclick="saveProxyConfig()" data-i18n="settings.saveProxy"></button>
             </div>
@@ -1254,6 +1235,10 @@
                 'settings.proxyHostRequired': '请填写代理地址和端口',
                 'settings.saveProxy': '保存代理设置',
                 'settings.proxySaved': '代理设置已保存',
+                'settings.proxyURLs': '代理列表',
+                'settings.proxyURLsPlaceholder': 'socks5://用户名:密码@主机:端口\nsocks5://用户名:密码@主机:端口',
+                'settings.proxyURLsHint': '每行一个代理。留空表示直连；支持 http://、https://、socks5://、socks5h://。',
+                'settings.proxyFormatError': '代理格式必须以 http://、https://、socks5:// 或 socks5h:// 开头',
                 'settings.promptFilter': 'System Prompt 过滤',
                 'settings.builtinFilters': '内置过滤器',
                 'settings.filterClaudeCode': '替换 Claude Code CLI 系统提示',
@@ -1539,6 +1524,10 @@
                 'settings.proxyHostRequired': 'Please enter proxy host and port',
                 'settings.saveProxy': 'Save Proxy Settings',
                 'settings.proxySaved': 'Proxy settings saved',
+                'settings.proxyURLs': 'Proxy List',
+                'settings.proxyURLsPlaceholder': 'socks5://username:password@host:port\nsocks5://username:password@host:port',
+                'settings.proxyURLsHint': 'One proxy per line. Leave empty for direct connection. Supports http://, https://, socks5://, and socks5h://.',
+                'settings.proxyFormatError': 'Proxy URL must start with http://, https://, socks5://, or socks5h://',
                 'settings.promptFilter': 'System Prompt Filter',
                 'settings.builtinFilters': 'Built-in Filters',
                 'settings.filterClaudeCode': 'Replace Claude Code CLI system prompts',
@@ -2511,45 +2500,19 @@
         async function loadProxyConfig() {
             const res = await fetch('/admin/api/proxy', { headers: { 'X-Admin-Password': password } });
             const d = await res.json();
-            const proxyURL = d.proxyURL || '';
-            if (!proxyURL) {
-                document.getElementById('proxyType').value = 'none';
-                document.getElementById('proxyFields').style.display = 'none';
-                return;
-            }
-            try {
-                const u = new URL(proxyURL);
-                const scheme = u.protocol.replace(':', '');
-                document.getElementById('proxyType').value = scheme.startsWith('socks5') ? 'socks5' : 'http';
-                document.getElementById('proxyHost').value = u.hostname;
-                document.getElementById('proxyPort').value = u.port;
-                document.getElementById('proxyUsername').value = decodeURIComponent(u.username);
-                document.getElementById('proxyPassword').value = decodeURIComponent(u.password);
-                document.getElementById('proxyFields').style.display = '';
-            } catch(e) {
-                document.getElementById('proxyType').value = 'none';
-                document.getElementById('proxyFields').style.display = 'none';
-            }
-        }
-        function onProxyTypeChange() {
-            const type = document.getElementById('proxyType').value;
-            document.getElementById('proxyFields').style.display = type === 'none' ? 'none' : '';
+            const proxyURLs = Array.isArray(d.proxyURLs) ? d.proxyURLs : (d.proxyURL ? [d.proxyURL] : []);
+            document.getElementById('proxyURLs').value = proxyURLs.join('\n');
         }
         async function saveProxyConfig() {
-            const type = document.getElementById('proxyType').value;
-            let proxyURL = '';
-            if (type !== 'none') {
-                const host = document.getElementById('proxyHost').value.trim();
-                const port = document.getElementById('proxyPort').value.trim();
-                if (!host || !port) { alert(t('settings.proxyHostRequired')); return; }
-                const user = document.getElementById('proxyUsername').value.trim();
-                const pass = document.getElementById('proxyPassword').value.trim();
-                const auth = user ? (pass ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : `${encodeURIComponent(user)}@`) : '';
-                proxyURL = `${type}://${auth}${host}:${port}`;
+            const proxyURLs = document.getElementById('proxyURLs').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+            for (const proxyURL of proxyURLs) {
+                if (proxyURL && !proxyURL.startsWith('socks5://') && !proxyURL.startsWith('socks5h://') && !proxyURL.startsWith('http://') && !proxyURL.startsWith('https://')) {
+                    alert(t('settings.proxyFormatError')); return;
+                }
             }
             const res = await fetch('/admin/api/proxy', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify({ proxyURL })
+                body: JSON.stringify({ proxyURLs })
             });
             const d = await res.json();
             if (d.success) { alert(t('settings.proxySaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
