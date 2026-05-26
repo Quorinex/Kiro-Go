@@ -53,23 +53,45 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 
 	payload := OpenAIToKiro(req, false)
 
-	if len(payload.ConversationState.History) != 2 {
-		t.Fatalf("expected 2 history items, got %d", len(payload.ConversationState.History))
+	// History starts with a priming pair.
+	if len(payload.ConversationState.History) != 4 {
+		t.Fatalf("expected 4 history items (2 priming + 2 conversation), got %d", len(payload.ConversationState.History))
 	}
 
-	firstHistoryUser := payload.ConversationState.History[0].UserInputMessage
-	if firstHistoryUser == nil {
-		t.Fatalf("expected first history item to be user message")
+	// history[0]: priming user
+	primingUser := payload.ConversationState.History[0].UserInputMessage
+	if primingUser == nil {
+		t.Fatalf("expected history[0] to be priming user message")
 	}
-	if !strings.Contains(firstHistoryUser.Content, "system-a") ||
-		!strings.Contains(firstHistoryUser.Content, "system-b") ||
-		!strings.Contains(firstHistoryUser.Content, "first-question") {
-		t.Fatalf("expected merged system+user content, got %q", firstHistoryUser.Content)
+	if !strings.Contains(primingUser.Content, "system-a") || !strings.Contains(primingUser.Content, "system-b") {
+		t.Fatalf("expected priming user message to contain system prompt, got %q", primingUser.Content)
+	}
+	if strings.Contains(primingUser.Content, "first-question") {
+		t.Fatalf("expected system prompt priming not to contain user question, got %q", primingUser.Content)
 	}
 
-	historyAssistant := payload.ConversationState.History[1].AssistantResponseMessage
+	// history[1]: priming assistant
+	primingAssistant := payload.ConversationState.History[1].AssistantResponseMessage
+	if primingAssistant == nil {
+		t.Fatalf("expected history[1] to be priming assistant message")
+	}
+	if primingAssistant.Content != "I will follow these instructions." {
+		t.Fatalf("expected priming assistant ack, got %q", primingAssistant.Content)
+	}
+
+	// history[2]: first user turn
+	firstConvUser := payload.ConversationState.History[2].UserInputMessage
+	if firstConvUser == nil {
+		t.Fatalf("expected history[2] to be first conversation user message")
+	}
+	if !strings.Contains(firstConvUser.Content, "first-question") {
+		t.Fatalf("expected history[2] to contain first-question, got %q", firstConvUser.Content)
+	}
+
+	// history[3]: assistant reply
+	historyAssistant := payload.ConversationState.History[3].AssistantResponseMessage
 	if historyAssistant == nil {
-		t.Fatalf("expected second history item to be assistant message")
+		t.Fatalf("expected history[3] to be assistant message")
 	}
 	if historyAssistant.Content != "assistant-structured" {
 		t.Fatalf("expected assistant structured content to be preserved, got %q", historyAssistant.Content)
@@ -276,4 +298,91 @@ func TestToolResultsContinuationIncludesInstructionPrefix(t *testing.T) {
 	if !strings.Contains(content, "result-1") {
 		t.Fatalf("expected tool result text in continuation content, got %q", content)
 	}
+}
+
+func TestEnsureObjectSchemaRemovesKiroRejectedFieldsRecursively(t *testing.T) {
+	input := map[string]interface{}{
+		"type":                 "object",
+		"required":             []interface{}{},
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":                 "string",
+				"required":             nil,
+				"additionalProperties": map[string]interface{}{"type": "string"},
+			},
+			"options": map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"force": map[string]interface{}{"type": "boolean"},
+				},
+			},
+		},
+		"anyOf": []interface{}{
+			map[string]interface{}{
+				"type":                 "object",
+				"required":             []interface{}{},
+				"additionalProperties": false,
+			},
+		},
+	}
+
+	got := ensureObjectSchema(input).(map[string]interface{})
+	if schemaContainsKey(got, "additionalProperties") {
+		t.Fatalf("expected additionalProperties to be removed recursively, got %#v", got)
+	}
+	if schemaContainsKey(got, "required") {
+		t.Fatalf("expected empty/nil required fields to be removed recursively, got %#v", got)
+	}
+	if _, stillPresent := input["additionalProperties"]; !stillPresent {
+		t.Fatalf("expected sanitizer not to mutate caller schema")
+	}
+}
+
+func TestConvertOpenAIToolsSanitizesSchemaAndDescription(t *testing.T) {
+	var tool OpenAITool
+	tool.Type = "function"
+	tool.Function.Name = "read_file"
+	tool.Function.Parameters = map[string]interface{}{
+		"type":                 "object",
+		"required":             []string{},
+		"additionalProperties": false,
+	}
+
+	tools := convertOpenAITools([]OpenAITool{tool})
+	if len(tools) != 1 {
+		t.Fatalf("expected one converted tool, got %d", len(tools))
+	}
+	if strings.TrimSpace(tools[0].ToolSpecification.Description) == "" {
+		t.Fatalf("expected fallback tool description")
+	}
+	schema := tools[0].ToolSpecification.InputSchema.JSON.(map[string]interface{})
+	if schemaContainsKey(schema, "additionalProperties") {
+		t.Fatalf("expected OpenAI tool schema to be sanitized, got %#v", schema)
+	}
+	if schemaContainsKey(schema, "required") {
+		t.Fatalf("expected empty required field to be removed, got %#v", schema)
+	}
+}
+
+func schemaContainsKey(value interface{}, key string) bool {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		if _, ok := v[key]; ok {
+			return true
+		}
+		for _, child := range v {
+			if schemaContainsKey(child, key) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, child := range v {
+			if schemaContainsKey(child, key) {
+				return true
+			}
+		}
+	}
+	return false
 }

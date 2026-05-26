@@ -17,6 +17,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // GenerateMachineId generates a UUID v4 format machine identifier.
@@ -195,7 +196,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.0.8"
+const Version = "1.0.9"
 
 var (
 	cfg     *Config
@@ -339,6 +340,44 @@ func DisableAccountOverage(id string) error {
 	return nil
 }
 
+// SetAccountEnabled toggles the enabled state of an account and persists the change.
+// Used to disable accounts whose refresh token has been revoked (401 Bad credentials)
+// so subsequent requests skip them automatically.
+func SetAccountEnabled(id string, enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].Enabled = enabled
+			if !enabled {
+				cfg.Accounts[i].BanStatus = "DISABLED"
+				cfg.Accounts[i].BanTime = time.Now().Unix()
+			}
+			return Save()
+		}
+	}
+	return nil
+}
+
+// SetAccountBanStatus marks an account as banned/disabled with a reason.
+// Reason is recorded so operators can see why the account was auto-disabled.
+func SetAccountBanStatus(id, status, reason string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].BanStatus = status
+			cfg.Accounts[i].BanReason = reason
+			cfg.Accounts[i].BanTime = time.Now().Unix()
+			if status == "BANNED" || status == "DISABLED" {
+				cfg.Accounts[i].Enabled = false
+			}
+			return Save()
+		}
+	}
+	return nil
+}
+
 func UpdateAccountProfileArn(id, profileArn string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -396,6 +435,21 @@ func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
 	defer cfgLock.Unlock()
 	cfg.ApiKey = apiKey
 	cfg.RequireApiKey = requireApiKey
+	if password != "" {
+		cfg.Password = password
+	}
+	return Save()
+}
+
+func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if apiKey != nil {
+		cfg.ApiKey = *apiKey
+	}
+	if requireApiKey != nil {
+		cfg.RequireApiKey = *requireApiKey
+	}
 	if password != "" {
 		cfg.Password = password
 	}

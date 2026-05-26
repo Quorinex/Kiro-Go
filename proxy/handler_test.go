@@ -1,6 +1,15 @@
 package proxy
 
-import "testing"
+import (
+	"encoding/json"
+	"kiro-go/config"
+	accountpool "kiro-go/pool"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestThinkingSourceReasoningFirst(t *testing.T) {
 	var source thinkingStreamSource
@@ -13,6 +22,98 @@ func TestThinkingSourceReasoningFirst(t *testing.T) {
 	}
 	if allowTagSource(&source) {
 		t.Fatalf("expected tag source to be rejected after reasoning source selected")
+	}
+}
+
+func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	if err := config.AddAccount(config.Account{
+		ID:          "first",
+		Enabled:     true,
+		AccessToken: "token-first",
+		ProfileArn:  "arn:aws:codewhisperer:profile/first",
+	}); err != nil {
+		t.Fatalf("add first account: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID:          "second",
+		Enabled:     true,
+		AccessToken: "token-second",
+		ProfileArn:  "arn:aws:codewhisperer:profile/second",
+	}); err != nil {
+		t.Fatalf("add second account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	requestTokens := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		requestTokens = append(requestTokens, token)
+		if token == "token-first" {
+			http.Error(w, "temporary upstream failure", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "retried successfully",
+		}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{
+		URL:    server.URL,
+		Origin: "AI_EDITOR",
+		Name:   "test",
+	}}
+	defer func() { kiroEndpoints = oldEndpoints }()
+
+	oldClient := kiroHttpStore.Load()
+	kiroHttpStore.Store(&http.Client{Timeout: time.Second, Transport: &http.Transport{}})
+	defer kiroHttpStore.Store(oldClient)
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{
+		pool:        p,
+		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+	}
+
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "hello",
+		ModelID: "claude-sonnet-4.5",
+		Origin:  "AI_EDITOR",
+	}
+
+	rec := httptest.NewRecorder()
+	h.handleClaudeNonStream(rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected retry to succeed, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(requestTokens) != 2 {
+		t.Fatalf("expected two account attempts, got %v", requestTokens)
+	}
+	if requestTokens[0] != "token-first" || requestTokens[1] != "token-second" {
+		t.Fatalf("expected first account to be excluded before retry, got %v", requestTokens)
+	}
+
+	var resp ClaudeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Content) == 0 || resp.Content[0].Text != "retried successfully" {
+		t.Fatalf("expected retried response content, got %#v", resp.Content)
 	}
 }
 

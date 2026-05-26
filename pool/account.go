@@ -67,6 +67,11 @@ func (p *AccountPool) Reload() {
 
 // GetNext 获取下一个可用账号（加权轮询）
 func (p *AccountPool) GetNext() *config.Account {
+	return p.GetNextExcluding(nil)
+}
+
+// GetNextExcluding 获取下一个可用账号（加权轮询），并跳过指定账号。
+func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -84,6 +89,10 @@ func (p *AccountPool) GetNext() *config.Account {
 		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
 		acc := &p.accounts[idx]
 
+		if excluded != nil && excluded[acc.ID] {
+			seen[acc.ID] = true
+			continue
+		}
 		if seen[acc.ID] {
 			continue
 		}
@@ -114,6 +123,9 @@ func (p *AccountPool) GetNext() *config.Account {
 	var earliest time.Time
 	for i := range p.accounts {
 		acc := &p.accounts[i]
+		if excluded != nil && excluded[acc.ID] {
+			continue
+		}
 		// 额度用尽的账号不作为 fallback（除非账号级或全局允许超额）
 		if isOverUsageLimit(*acc) && !acc.AllowOverage && !allowOverUsage {
 			continue
@@ -171,6 +183,11 @@ func (p *AccountPool) accountHasModel(accountID, model string) bool {
 // model 应为去掉 thinking 后缀的实际模型名。
 // 若无账号有该模型列表数据，行为与 GetNext 相同（乐观路由）。
 func (p *AccountPool) GetNextForModel(model string) *config.Account {
+	return p.GetNextForModelExcluding(model, nil)
+}
+
+// GetNextForModelExcluding 获取下一个支持指定模型的可用账号，并跳过指定账号。
+func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -187,6 +204,10 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
 		acc := &p.accounts[idx]
 
+		if excluded != nil && excluded[acc.ID] {
+			seen[acc.ID] = true
+			continue
+		}
 		if seen[acc.ID] {
 			continue
 		}
@@ -214,6 +235,9 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 	var earliest time.Time
 	for i := range p.accounts {
 		acc := &p.accounts[i]
+		if excluded != nil && excluded[acc.ID] {
+			continue
+		}
 		if !p.accountHasModel(acc.ID, model) {
 			continue
 		}
@@ -266,6 +290,95 @@ func (p *AccountPool) RecordError(id string, isQuotaError bool) {
 		// 连续 3 次错误，冷却 1 分钟
 		p.cooldowns[id] = time.Now().Add(time.Minute)
 	}
+}
+
+// IsAuthFailure reports whether an error indicates the refresh token / credentials
+// have been revoked or invalidated upstream (401, 403 with auth markers, etc.).
+// These accounts cannot be recovered automatically and must be re-authenticated.
+func IsAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+
+	// Match HTTP status codes only when they appear as standalone tokens to avoid
+	// false positives from arbitrary digits in the error body (e.g. request IDs).
+	if hasStatusToken(msg, "401") || hasStatusToken(msg, "403") {
+		return true
+	}
+	if strings.Contains(lower, "bad credentials") ||
+		strings.Contains(lower, "invalid_grant") ||
+		strings.Contains(lower, "invalid grant") ||
+		strings.Contains(lower, "invalid_token") ||
+		strings.Contains(lower, "invalid token") ||
+		strings.Contains(lower, "token expired") ||
+		strings.Contains(lower, "token has expired") ||
+		strings.Contains(lower, "unauthorized") {
+		return true
+	}
+	return false
+}
+
+// hasStatusToken returns true when status appears in s with non-digit boundaries
+// on both sides, so "401" matches "HTTP 401 from ..." but not "request_401abc".
+func hasStatusToken(s, status string) bool {
+	for {
+		idx := strings.Index(s, status)
+		if idx < 0 {
+			return false
+		}
+		leftOK := idx == 0 || !isDigit(s[idx-1])
+		rightIdx := idx + len(status)
+		rightOK := rightIdx >= len(s) || !isDigit(s[rightIdx])
+		if leftOK && rightOK {
+			return true
+		}
+		s = s[idx+len(status):]
+	}
+}
+
+func isDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+// IsSuspensionError reports whether the error indicates the account has been
+// temporarily suspended by upstream or has no available Kiro profile.
+// Unlike auth failures (revoked credentials), these may be transient, but
+// the account should be disabled until an operator re-enables it.
+func IsSuspensionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "temporarily_suspended") ||
+		strings.Contains(lower, "temporarily suspended") ||
+		strings.Contains(lower, "no available kiro profile")
+}
+
+// DisableAccount marks an account as disabled (auth revoked / unrecoverable),
+// removes it from the in-memory pool so subsequent requests skip it, and
+// persists the change via config.SetAccountBanStatus.
+func (p *AccountPool) DisableAccount(id, reason string) {
+	if err := config.SetAccountBanStatus(id, "DISABLED", reason); err != nil {
+		// best effort — even if persistence fails, drop it from memory
+		_ = err
+	}
+	p.mu.Lock()
+	// Long cooldown as a safety net in case Reload races
+	p.cooldowns[id] = time.Now().Add(24 * time.Hour)
+	p.mu.Unlock()
+	p.Reload()
+}
+
+// MarkOverLimit marks an account as over usage limit (after a 402 / OVERAGE response),
+// turns off AllowOverage, and reloads the pool so the account is skipped.
+func (p *AccountPool) MarkOverLimit(id string) {
+	_ = config.DisableAccountOverage(id)
+	p.mu.Lock()
+	p.cooldowns[id] = time.Now().Add(time.Hour)
+	p.mu.Unlock()
+	p.Reload()
 }
 
 // UpdateToken 更新账号 Token
