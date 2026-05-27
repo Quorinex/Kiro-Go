@@ -128,11 +128,22 @@ type ProbeLog struct {
 type ProxyProbeLog struct {
 	At        int64  `json:"at"`
 	ProxyURL  string `json:"proxyURL,omitempty"`
+	ProxyKey  string `json:"proxyKey,omitempty"`
 	TargetURL string `json:"targetURL,omitempty"`
 	Success   bool   `json:"success"`
 	Status    int    `json:"status,omitempty"`
 	Error     string `json:"error,omitempty"`
 	LatencyMs int64  `json:"latencyMs,omitempty"`
+}
+
+// ProxyConfig stores a single outbound proxy and its independent probe settings.
+type ProxyConfig struct {
+	URL                 string `json:"url"`
+	ProbeEnabled        bool   `json:"probeEnabled,omitempty"`
+	ProbeCron           string `json:"probeCron,omitempty"`
+	ProbeTargetURL      string `json:"probeTargetURL,omitempty"`
+	ProbeTimeoutSeconds int    `json:"probeTimeoutSeconds,omitempty"`
+	ProbeLastRunMinute  int64  `json:"probeLastRunMinute,omitempty"`
 }
 
 // PromptFilterRule defines a single custom prompt sanitization rule.
@@ -191,16 +202,19 @@ type Config struct {
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
 	//         "http://host:port",  "http://user:pass@host:port"
 	// Leave empty to connect directly.
-	ProxyURL  string   `json:"proxyURL,omitempty"`
-	ProxyURLs []string `json:"proxyURLs,omitempty"`
+	ProxyURL     string        `json:"proxyURL,omitempty"`
+	ProxyURLs    []string      `json:"proxyURLs,omitempty"`
+	ProxyConfigs []ProxyConfig `json:"proxyConfigs,omitempty"`
 
-	// Proxy probe configuration and recent logs.
-	ProxyProbeEnabled        bool            `json:"proxyProbeEnabled,omitempty"`
-	ProxyProbeCron           string          `json:"proxyProbeCron,omitempty"`
-	ProxyProbeTargetURL      string          `json:"proxyProbeTargetURL,omitempty"`
-	ProxyProbeTimeoutSeconds int             `json:"proxyProbeTimeoutSeconds,omitempty"`
-	ProxyProbeLastRunMinute  int64           `json:"proxyProbeLastRunMinute,omitempty"`
-	ProxyProbeLogs           []ProxyProbeLog `json:"proxyProbeLogs,omitempty"`
+	// Legacy global proxy probe fields are kept for backward-compatible JSON loading.
+	ProxyProbeEnabled        bool   `json:"proxyProbeEnabled,omitempty"`
+	ProxyProbeCron           string `json:"proxyProbeCron,omitempty"`
+	ProxyProbeTargetURL      string `json:"proxyProbeTargetURL,omitempty"`
+	ProxyProbeTimeoutSeconds int    `json:"proxyProbeTimeoutSeconds,omitempty"`
+	ProxyProbeLastRunMinute  int64  `json:"proxyProbeLastRunMinute,omitempty"`
+
+	// Proxy probe logs keep the most recent results across all proxies.
+	ProxyProbeLogs []ProxyProbeLog `json:"proxyProbeLogs,omitempty"`
 
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
 	// Migrated to FilterClaudeCode on first load. Do not use directly.
@@ -254,7 +268,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.14"
+const Version = "1.15"
 
 var (
 	cfg               *Config
@@ -296,6 +310,7 @@ func Load() error {
 		return err
 	}
 	cfg = &c
+	syncLegacyProxyFieldsLocked()
 	return nil
 }
 
@@ -799,26 +814,114 @@ func normalizeProxyURLs(proxyURLs []string) []string {
 	return out
 }
 
+func normalizeProxyConfigs(proxyConfigs []ProxyConfig) []ProxyConfig {
+	seen := make(map[string]struct{}, len(proxyConfigs))
+	out := make([]ProxyConfig, 0, len(proxyConfigs))
+	for _, item := range proxyConfigs {
+		item.URL = strings.TrimSpace(item.URL)
+		if item.URL == "" {
+			continue
+		}
+		if _, ok := seen[item.URL]; ok {
+			continue
+		}
+		seen[item.URL] = struct{}{}
+		item.ProbeCron = strings.TrimSpace(item.ProbeCron)
+		item.ProbeTargetURL = strings.TrimSpace(item.ProbeTargetURL)
+		if item.ProbeTargetURL == "" {
+			item.ProbeTargetURL = "https://www.google.com/generate_204"
+		}
+		if item.ProbeTimeoutSeconds <= 0 {
+			item.ProbeTimeoutSeconds = 10
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func normalizedProxyConfigsFromConfig(c *Config) []ProxyConfig {
+	if c == nil {
+		return nil
+	}
+	if len(c.ProxyConfigs) > 0 {
+		return normalizeProxyConfigs(c.ProxyConfigs)
+	}
+	legacy := normalizeProxyURLs(c.ProxyURLs)
+	if len(legacy) == 0 && strings.TrimSpace(c.ProxyURL) != "" {
+		legacy = []string{strings.TrimSpace(c.ProxyURL)}
+	}
+	proxyConfigs := make([]ProxyConfig, 0, len(legacy))
+	for _, proxyURL := range legacy {
+		proxyConfigs = append(proxyConfigs, ProxyConfig{
+			URL:                 proxyURL,
+			ProbeEnabled:        c.ProxyProbeEnabled,
+			ProbeCron:           strings.TrimSpace(c.ProxyProbeCron),
+			ProbeTargetURL:      strings.TrimSpace(c.ProxyProbeTargetURL),
+			ProbeTimeoutSeconds: c.ProxyProbeTimeoutSeconds,
+			ProbeLastRunMinute:  c.ProxyProbeLastRunMinute,
+		})
+	}
+	return normalizeProxyConfigs(proxyConfigs)
+}
+
+func syncLegacyProxyFieldsLocked() {
+	if cfg == nil {
+		return
+	}
+	cfg.ProxyConfigs = normalizedProxyConfigsFromConfig(cfg)
+	cfg.ProxyURLs = make([]string, 0, len(cfg.ProxyConfigs))
+	for _, item := range cfg.ProxyConfigs {
+		cfg.ProxyURLs = append(cfg.ProxyURLs, item.URL)
+	}
+	if len(cfg.ProxyURLs) > 0 {
+		cfg.ProxyURL = cfg.ProxyURLs[0]
+		cfg.ProxyProbeEnabled = cfg.ProxyConfigs[0].ProbeEnabled
+		cfg.ProxyProbeCron = cfg.ProxyConfigs[0].ProbeCron
+		cfg.ProxyProbeTargetURL = cfg.ProxyConfigs[0].ProbeTargetURL
+		cfg.ProxyProbeTimeoutSeconds = cfg.ProxyConfigs[0].ProbeTimeoutSeconds
+		cfg.ProxyProbeLastRunMinute = cfg.ProxyConfigs[0].ProbeLastRunMinute
+	} else {
+		cfg.ProxyURL = ""
+		cfg.ProxyProbeEnabled = false
+		cfg.ProxyProbeCron = ""
+		cfg.ProxyProbeTargetURL = ""
+		cfg.ProxyProbeTimeoutSeconds = 0
+		cfg.ProxyProbeLastRunMinute = 0
+	}
+}
+
 // GetProxyURL 获取首个出站代理地址，兼容旧版单代理配置。
 func GetProxyURL() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	if len(cfg.ProxyURLs) > 0 {
-		return cfg.ProxyURLs[0]
+	proxyConfigs := normalizedProxyConfigsFromConfig(cfg)
+	if len(proxyConfigs) > 0 {
+		return proxyConfigs[0].URL
 	}
-	return cfg.ProxyURL
+	return strings.TrimSpace(cfg.ProxyURL)
 }
 
 // GetProxyURLs 获取全部全局出站代理地址。
 func GetProxyURLs() []string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	proxyURLs := normalizeProxyURLs(cfg.ProxyURLs)
-	if len(proxyURLs) == 0 && strings.TrimSpace(cfg.ProxyURL) != "" {
-		proxyURLs = []string{strings.TrimSpace(cfg.ProxyURL)}
+	proxyConfigs := normalizedProxyConfigsFromConfig(cfg)
+	proxyURLs := make([]string, 0, len(proxyConfigs))
+	for _, item := range proxyConfigs {
+		proxyURLs = append(proxyURLs, item.URL)
 	}
 	out := make([]string, len(proxyURLs))
 	copy(out, proxyURLs)
+	return out
+}
+
+// GetProxyConfigs returns all configured outbound proxies with their probe settings.
+func GetProxyConfigs() []ProxyConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	proxyConfigs := normalizedProxyConfigsFromConfig(cfg)
+	out := make([]ProxyConfig, len(proxyConfigs))
+	copy(out, proxyConfigs)
 	return out
 }
 
@@ -834,68 +937,49 @@ func GetNextProxyURL() string {
 
 // UpdateProxySettings 更新出站代理配置。
 func UpdateProxySettings(proxyURLs []string) error {
+	proxyConfigs := make([]ProxyConfig, 0, len(proxyURLs))
+	for _, proxyURL := range normalizeProxyURLs(proxyURLs) {
+		proxyConfigs = append(proxyConfigs, ProxyConfig{URL: proxyURL})
+	}
+	return UpdateProxyConfigs(proxyConfigs)
+}
+
+// UpdateProxyConfigs updates outbound proxy definitions and their independent probe settings.
+func UpdateProxyConfigs(proxyConfigs []ProxyConfig) error {
+	proxyConfigs = normalizeProxyConfigs(proxyConfigs)
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
-	cfg.ProxyURLs = normalizeProxyURLs(proxyURLs)
-	if len(cfg.ProxyURLs) > 0 {
-		cfg.ProxyURL = cfg.ProxyURLs[0]
-	} else {
-		cfg.ProxyURL = ""
-	}
+	cfg.ProxyConfigs = proxyConfigs
+	syncLegacyProxyFieldsLocked()
 	return Save()
 }
 
-// GetProxyProbeConfig returns scheduled proxy probe settings.
-func GetProxyProbeConfig() (bool, string, string, int) {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	enabled := cfg.ProxyProbeEnabled
-	cron := strings.TrimSpace(cfg.ProxyProbeCron)
-	targetURL := strings.TrimSpace(cfg.ProxyProbeTargetURL)
-	timeoutSeconds := cfg.ProxyProbeTimeoutSeconds
-	if targetURL == "" {
-		targetURL = "https://www.google.com/generate_204"
-	}
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = 10
-	}
-	return enabled, cron, targetURL, timeoutSeconds
-}
-
-// UpdateProxyProbeConfig updates scheduled proxy probe settings.
-func UpdateProxyProbeConfig(enabled bool, cron, targetURL string, timeoutSeconds int) error {
-	cron = strings.TrimSpace(cron)
-	targetURL = strings.TrimSpace(targetURL)
-	if targetURL == "" {
-		targetURL = "https://www.google.com/generate_204"
-	}
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = 10
+// UpdateSingleProxyLastRunMinute stores the last scheduled run minute for a proxy.
+func UpdateSingleProxyLastRunMinute(proxyURL string, minute int64) error {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return nil
 	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
-	cfg.ProxyProbeEnabled = enabled
-	cfg.ProxyProbeCron = cron
-	cfg.ProxyProbeTargetURL = targetURL
-	cfg.ProxyProbeTimeoutSeconds = timeoutSeconds
-	return Save()
+	syncLegacyProxyFieldsLocked()
+	for i := range cfg.ProxyConfigs {
+		if cfg.ProxyConfigs[i].URL == proxyURL {
+			cfg.ProxyConfigs[i].ProbeLastRunMinute = minute
+			syncLegacyProxyFieldsLocked()
+			return Save()
+		}
+	}
+	return nil
 }
 
-// GetProxyProbeState returns the last scheduled run minute and recent logs.
-func GetProxyProbeState() (int64, []ProxyProbeLog) {
+// GetProxyProbeState returns recent logs.
+func GetProxyProbeState() []ProxyProbeLog {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	logs := make([]ProxyProbeLog, len(cfg.ProxyProbeLogs))
 	copy(logs, cfg.ProxyProbeLogs)
-	return cfg.ProxyProbeLastRunMinute, logs
-}
-
-// SetProxyProbeLastRunMinute stores the last scheduled run minute.
-func SetProxyProbeLastRunMinute(minute int64) error {
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	cfg.ProxyProbeLastRunMinute = minute
-	return Save()
+	return logs
 }
 
 // AppendProxyProbeLogs stores recent scheduled proxy probe results.

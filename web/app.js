@@ -1505,33 +1505,34 @@
   async function loadProxyConfig() {
     const res = await api('/proxy');
     const d = await res.json();
-    const urls = Array.isArray(d.proxyURLs) ? d.proxyURLs : (d.proxyURL ? [d.proxyURL] : []);
-    proxyOptions = urls;
+    const configs = Array.isArray(d.proxyConfigs) ? d.proxyConfigs.map(normalizeProxyConfig).filter(Boolean) : [];
+    if (configs.length) proxyOptions = configs;
+    else {
+      const urls = Array.isArray(d.proxyURLs) ? d.proxyURLs : (d.proxyURL ? [d.proxyURL] : []);
+      proxyOptions = urls.map(url => normalizeProxyConfig({ url })).filter(Boolean);
+    }
     if ($('proxyURLInputNew')) $('proxyURLInputNew').value = '';
-    $('proxyProbeEnabled').checked = !!d.proxyProbeEnabled;
-    $('proxyProbeCron').value = d.proxyProbeCron || '';
-    $('proxyProbeTargetURL').value = d.proxyProbeTargetURL || 'https://www.google.com/generate_204';
-    $('proxyProbeTimeoutSeconds').value = d.proxyProbeTimeoutSeconds || 10;
     renderProxySettingsList();
   }
-  async function saveProxyConfig(urlsOverride) {
-    const urls = Array.isArray(urlsOverride) ? urlsOverride.slice() : proxyOptions.slice();
-    for (const url of urls) {
-      if (!/^(socks5|socks5h|http|https):\/\//.test(url)) {
+  async function saveProxyConfig(configsOverride) {
+    const configs = Array.isArray(configsOverride)
+      ? configsOverride.map(normalizeProxyConfig).filter(Boolean)
+      : proxyOptions.map(normalizeProxyConfig).filter(Boolean);
+    for (const item of configs) {
+      if (!/^(socks5|socks5h|http|https):\/\//.test(item.url)) {
         toast(t('settings.proxyFormatError'), 'warning'); return;
       }
+      if (item.probeCron && !/^[^\s]+\s+[^\s]+\s+[^\s]+\s+[^\s]+\s+[^\s]+$/.test(item.probeCron)) {
+        toast(t('settings.proxyCronFormatError'), 'warning'); return;
+      }
     }
-    const proxyProbeEnabled = $('proxyProbeEnabled').checked;
-    const proxyProbeCron = $('proxyProbeCron').value.trim();
-    const proxyProbeTargetURL = $('proxyProbeTargetURL').value.trim() || 'https://www.google.com/generate_204';
-    const proxyProbeTimeoutSeconds = Math.max(1, Math.min(120, parseInt($('proxyProbeTimeoutSeconds').value, 10) || 10));
     const res = await api('/proxy', {
       method: 'POST',
-      body: JSON.stringify({ proxyURLs: urls, proxyProbeEnabled, proxyProbeCron, proxyProbeTargetURL, proxyProbeTimeoutSeconds })
+      body: JSON.stringify({ proxyConfigs: configs })
     });
     const d = await res.json();
     if (d.success) {
-      proxyOptions = urls;
+      proxyOptions = configs;
       if ($('proxyURLInputNew')) $('proxyURLInputNew').value = '';
       renderProxySettingsList();
       const modalBody = $('modalBody');
@@ -1554,7 +1555,7 @@
   function latestProxyProbeMap() {
     const latest = new Map();
     proxyProbeLogsData.forEach(log => {
-      const key = (log.proxyURL || '').trim();
+      const key = ((log.proxyKey || log.proxyURL) || '').trim();
       if (!key || latest.has(key)) return;
       latest.set(key, log);
     });
@@ -1574,7 +1575,8 @@
     }
     const usage = proxyUsageMap();
     const latest = latestProxyProbeMap();
-    container.innerHTML = proxyOptions.map((url, idx) => {
+    container.innerHTML = proxyOptions.map((item, idx) => {
+      const url = item.url;
       const users = usage.get(url) || [];
       const log = latest.get(url);
       const statusClass = proxyStatusClass(log);
@@ -1591,6 +1593,12 @@
         '<span>' + escapeHtml(t('settings.proxyLatency')) + ': ' + escapeHtml(latency) + '</span>' +
         '<span>' + escapeHtml(t('settings.proxyUsedBy')) + ': ' + escapeHtml(usedBy) + '</span>' +
         '</div>' +
+        '<div class="proxy-settings-meta">' +
+        '<span>' + escapeHtml(t('settings.proxyProbeEnabledInline')) + ': ' + escapeHtml(item.probeEnabled ? t('common.enabled') : t('common.disabled')) + '</span>' +
+        '<span>' + escapeHtml(t('settings.proxyProbeCronInline')) + ': ' + escapeHtml(item.probeCron || t('common.none')) + '</span>' +
+        '<span>' + escapeHtml(t('settings.proxyProbeTargetInline')) + ': ' + escapeHtml(item.probeTargetURL || t('common.none')) + '</span>' +
+        '<span>' + escapeHtml(t('settings.proxyProbeTimeoutInline')) + ': ' + escapeHtml(String(item.probeTimeoutSeconds || 10)) + 's</span>' +
+        '</div>' +
         '</div>' +
         '<div class="proxy-settings-actions">' +
         '<button class="btn btn-outline btn-sm" data-proxy-action="probe" data-proxy-idx="' + idx + '" type="button">' + escapeHtml(t('settings.proxyProbeNow')) + '</button>' +
@@ -1602,27 +1610,42 @@
   }
   async function addProxyURL() {
     const input = $('proxyURLInputNew');
-    const value = (input && input.value || '').trim();
-    if (!value) {
+    const raw = (input && input.value || '').trim();
+    if (!raw) {
       toast(t('settings.proxyHostRequired'), 'warning');
       return;
     }
-    if (!/^(socks5|socks5h|http|https):\/\//.test(value)) {
-      toast(t('settings.proxyFormatError'), 'warning');
-      return;
+    const values = raw.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
+    const duplicates = new Set(proxyOptionUrls());
+    const next = proxyOptions.slice();
+    const probeSettings = promptProxyProbeSettings();
+    for (const value of values) {
+      if (!/^(socks5|socks5h|http|https):\/\//.test(value)) {
+        toast(t('settings.proxyFormatError'), 'warning');
+        return;
+      }
+      if (duplicates.has(value)) continue;
+      duplicates.add(value);
+      next.push(normalizeProxyConfig({
+        url: value,
+        probeEnabled: probeSettings.probeEnabled,
+        probeCron: probeSettings.probeCron,
+        probeTargetURL: probeSettings.probeTargetURL,
+        probeTimeoutSeconds: probeSettings.probeTimeoutSeconds
+      }));
     }
-    if (proxyOptions.includes(value)) {
+    if (next.length === proxyOptions.length) {
       toast(t('settings.proxyDuplicate'), 'warning');
       return;
     }
-    await saveProxyConfig(proxyOptions.concat(value));
+    await saveProxyConfig(next);
   }
   async function editProxyURL(index) {
     const current = proxyOptions[index];
     if (!current) return;
-    const next = window.prompt(t('settings.proxyEditPrompt'), current);
-    if (next == null) return;
-    const value = next.trim();
+    const nextUrl = window.prompt(t('settings.proxyEditPrompt'), current.url);
+    if (nextUrl == null) return;
+    const value = nextUrl.trim();
     if (!value) {
       toast(t('settings.proxyHostRequired'), 'warning');
       return;
@@ -1631,13 +1654,21 @@
       toast(t('settings.proxyFormatError'), 'warning');
       return;
     }
-    if (proxyOptions.some((item, idx) => idx !== index && item === value)) {
+    if (proxyOptions.some((item, idx) => idx !== index && item.url === value)) {
       toast(t('settings.proxyDuplicate'), 'warning');
       return;
     }
-    const urls = proxyOptions.slice();
-    urls[index] = value;
-    await saveProxyConfig(urls);
+    const probeSettings = promptProxyProbeSettings(current);
+    const configs = proxyOptions.slice();
+    configs[index] = normalizeProxyConfig({
+      url: value,
+      probeEnabled: probeSettings.probeEnabled,
+      probeCron: probeSettings.probeCron,
+      probeTargetURL: probeSettings.probeTargetURL,
+      probeTimeoutSeconds: probeSettings.probeTimeoutSeconds,
+      probeLastRunMinute: current.probeLastRunMinute || 0
+    });
+    await saveProxyConfig(configs);
   }
   async function deleteProxyURL(index) {
     const current = proxyOptions[index];
@@ -1646,8 +1677,8 @@
       title: t('settings.proxyDelete')
     });
     if (!ok) return;
-    const urls = proxyOptions.filter((_, idx) => idx !== index);
-    await saveProxyConfig(urls);
+    const configs = proxyOptions.filter((_, idx) => idx !== index);
+    await saveProxyConfig(configs);
   }
   async function probeSingleProxy(index) {
     const current = proxyOptions[index];
@@ -1655,7 +1686,7 @@
     try {
       const res = await api('/proxy/probe/one', {
         method: 'POST',
-        body: JSON.stringify({ proxyURL: current })
+        body: JSON.stringify({ proxyURL: current.url })
       });
       const d = await res.json();
       if (d.success) {
@@ -1882,10 +1913,35 @@
       return proxyURL;
     }
   }
+  function normalizeProxyConfig(item) {
+    if (!item) return null;
+    const url = ((item.url != null ? item.url : item.proxyURL) || '').trim();
+    if (!url) return null;
+    return {
+      url,
+      probeEnabled: !!item.probeEnabled,
+      probeCron: (item.probeCron || '').trim(),
+      probeTargetURL: (item.probeTargetURL || 'https://www.google.com/generate_204').trim(),
+      probeTimeoutSeconds: Math.max(1, Math.min(120, parseInt(item.probeTimeoutSeconds, 10) || 10)),
+      probeLastRunMinute: item.probeLastRunMinute || 0
+    };
+  }
+  function proxyOptionUrls() {
+    return proxyOptions.map(item => item.url);
+  }
+  function promptProxyProbeSettings(current) {
+    const base = normalizeProxyConfig(current || { url: 'placeholder' });
+    const probeEnabled = window.confirm(t('settings.proxyProbeEnabledConfirm'));
+    const probeCron = window.prompt(t('settings.proxyProbeCronPrompt'), base ? (base.probeCron || '') : '') || '';
+    const probeTargetURL = (window.prompt(t('settings.proxyProbeTargetPrompt'), base ? (base.probeTargetURL || 'https://www.google.com/generate_204') : 'https://www.google.com/generate_204') || '').trim() || 'https://www.google.com/generate_204';
+    const timeoutInput = window.prompt(t('settings.proxyProbeTimeoutPrompt'), String(base ? (base.probeTimeoutSeconds || 10) : 10));
+    const probeTimeoutSeconds = Math.max(1, Math.min(120, parseInt(timeoutInput, 10) || 10));
+    return { probeEnabled, probeCron, probeTargetURL, probeTimeoutSeconds };
+  }
   function accountProxyOptionsHtml(selectedURL) {
     const current = (selectedURL || '').trim();
-    const options = proxyOptions.map(url =>
-      '<option value="' + escapeAttr(url) + '"' + (url === current ? ' selected' : '') + '>' + escapeHtml(proxyLabel(url)) + '</option>'
+    const options = proxyOptions.map(item =>
+      '<option value="' + escapeAttr(item.url) + '"' + (item.url === current ? ' selected' : '') + '>' + escapeHtml(proxyLabel(item.url)) + '</option>'
     ).join('');
     return '<select id="proxyURLSelect">' +
       '<option value="">' + escapeHtml(t('detail.proxyUseGlobal')) + '</option>' +
@@ -1893,8 +1949,8 @@
       '</select>';
   }
   function addProxySelectHtml() {
-    const options = proxyOptions.map(url =>
-      '<option value="' + escapeAttr(url) + '">' + escapeHtml(proxyLabel(url)) + '</option>'
+    const options = proxyOptions.map(item =>
+      '<option value="' + escapeAttr(item.url) + '">' + escapeHtml(proxyLabel(item.url)) + '</option>'
     ).join('');
     return '<div class="form-group">' +
       '<label>' + escapeHtml(t('modal.proxySelect')) + '</label>' +

@@ -87,6 +87,21 @@ func TestUpdateProxySettingsSupportsMultipleURLs(t *testing.T) {
 	if got := []string{GetNextProxyURL(), GetNextProxyURL(), GetNextProxyURL()}; got[0] != want[0] || got[1] != want[1] || got[2] != want[0] {
 		t.Fatalf("unexpected round-robin order: %#v", got)
 	}
+	configs := GetProxyConfigs()
+	if len(configs) != len(want) {
+		t.Fatalf("expected %d proxy configs, got %d", len(want), len(configs))
+	}
+	for i := range want {
+		if configs[i].URL != want[i] {
+			t.Fatalf("proxy config %d: expected %q, got %q", i, want[i], configs[i].URL)
+		}
+		if configs[i].ProbeTargetURL != "https://www.google.com/generate_204" {
+			t.Fatalf("proxy config %d: unexpected default target %q", i, configs[i].ProbeTargetURL)
+		}
+		if configs[i].ProbeTimeoutSeconds != 10 {
+			t.Fatalf("proxy config %d: unexpected default timeout %d", i, configs[i].ProbeTimeoutSeconds)
+		}
+	}
 }
 
 func TestCreditUsageThresholdDefaultsAndClamps(t *testing.T) {

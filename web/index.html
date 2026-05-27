@@ -361,7 +361,7 @@
           <div class="form-group">
             <label data-i18n="settings.proxyAdd"></label>
             <div class="input-row proxy-editor-row">
-              <input type="text" id="proxyURLInputNew" data-i18n-placeholder="settings.proxyURLsPlaceholderSingle" autocomplete="off" />
+              <textarea id="proxyURLInputNew" data-i18n-placeholder="settings.proxyURLsPlaceholder" autocomplete="off"></textarea>
               <button class="btn btn-primary btn-sm" id="addProxyBtn" type="button" data-i18n="settings.addProxy"></button>
             </div>
             <p class="help-block" data-i18n="settings.proxyURLsHint"></p>
@@ -369,26 +369,6 @@
           <div class="form-group">
             <label data-i18n="settings.proxyList"></label>
             <div id="proxyList" class="proxy-settings-list"></div>
-          </div>
-          <div class="form-group">
-            <label class="flex items-center gap-2">
-              <span class="switch"><input type="checkbox" id="proxyProbeEnabled" /><span class="slider"></span></span>
-              <span data-i18n="settings.proxyProbeEnabled"></span>
-            </label>
-            <small data-i18n="settings.proxyProbeEnabledHint"></small>
-          </div>
-          <div class="form-group">
-            <label data-i18n="settings.proxyProbeCron"></label>
-            <input type="text" id="proxyProbeCron" placeholder="*/10 * * * *" />
-            <small data-i18n="settings.proxyProbeCronHint"></small>
-          </div>
-          <div class="form-group">
-            <label data-i18n="settings.proxyProbeTargetURL"></label>
-            <input type="url" id="proxyProbeTargetURL" placeholder="https://www.google.com/generate_204" />
-          </div>
-          <div class="form-group">
-            <label data-i18n="settings.proxyProbeTimeoutSeconds"></label>
-            <input type="number" id="proxyProbeTimeoutSeconds" min="1" max="120" step="1" placeholder="10" />
           </div>
           <button class="btn btn-primary" id="saveProxyBtn" data-i18n="settings.saveProxy"></button>
         </div>

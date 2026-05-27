@@ -612,39 +612,50 @@ func (h *Handler) backgroundProxyProbe() {
 }
 
 func (h *Handler) runScheduledProxyProbe(now time.Time) {
-	enabled, cronExpr, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
-	if !enabled || strings.TrimSpace(cronExpr) == "" {
-		return
-	}
 	minuteKey := now.Unix() / 60
-	lastRunMinute, _ := config.GetProxyProbeState()
-	if lastRunMinute == minuteKey {
+	proxyConfigs := config.GetProxyConfigs()
+	if len(proxyConfigs) == 0 {
+		logs := []config.ProxyProbeLog{{
+			At:      time.Now().Unix(),
+			Success: false,
+			Error:   "No proxy configured",
+		}}
+		_ = config.AppendProxyProbeLogs(logs)
 		return
 	}
-	if !cronMatchesMinute(cronExpr, now) {
-		return
+	for _, proxyCfg := range proxyConfigs {
+		if !proxyCfg.ProbeEnabled || strings.TrimSpace(proxyCfg.ProbeCron) == "" {
+			continue
+		}
+		if proxyCfg.ProbeLastRunMinute == minuteKey {
+			continue
+		}
+		if !cronMatchesMinute(proxyCfg.ProbeCron, now) {
+			continue
+		}
+		log := probeProxyURL(proxyCfg.URL, proxyCfg.ProbeTargetURL, proxyCfg.ProbeTimeoutSeconds)
+		if err := config.AppendProxyProbeLogs([]config.ProxyProbeLog{log}); err != nil {
+			logger.Warnf("[ProxyProbe] Failed to save logs: %v", err)
+		}
+		if err := config.UpdateSingleProxyLastRunMinute(proxyCfg.URL, minuteKey); err != nil {
+			logger.Warnf("[ProxyProbe] Failed to save last run minute: %v", err)
+		}
 	}
-	if err := config.SetProxyProbeLastRunMinute(minuteKey); err != nil {
-		logger.Warnf("[ProxyProbe] Failed to save last run minute: %v", err)
-	}
-	h.runProxyProbe(targetURL, timeoutSeconds)
 }
 
-func (h *Handler) runProxyProbe(targetURL string, timeoutSeconds int) []config.ProxyProbeLog {
-	proxyURLs := config.GetProxyURLs()
-	if len(proxyURLs) == 0 {
+func (h *Handler) runProxyProbe(proxyConfigs []config.ProxyConfig) []config.ProxyProbeLog {
+	if len(proxyConfigs) == 0 {
 		logs := []config.ProxyProbeLog{{
-			At:        time.Now().Unix(),
-			TargetURL: targetURL,
-			Success:   false,
-			Error:     "No proxy configured",
+			At:      time.Now().Unix(),
+			Success: false,
+			Error:   "No proxy configured",
 		}}
 		_ = config.AppendProxyProbeLogs(logs)
 		return logs
 	}
-	logs := make([]config.ProxyProbeLog, 0, len(proxyURLs))
-	for _, proxyURL := range proxyURLs {
-		logs = append(logs, probeProxyURL(proxyURL, targetURL, timeoutSeconds))
+	logs := make([]config.ProxyProbeLog, 0, len(proxyConfigs))
+	for _, proxyCfg := range proxyConfigs {
+		logs = append(logs, probeProxyURL(proxyCfg.URL, proxyCfg.ProbeTargetURL, proxyCfg.ProbeTimeoutSeconds))
 	}
 	if err := config.AppendProxyProbeLogs(logs); err != nil {
 		logger.Warnf("[ProxyProbe] Failed to save logs: %v", err)
@@ -657,6 +668,7 @@ func probeProxyURL(proxyURL, targetURL string, timeoutSeconds int) config.ProxyP
 	log := config.ProxyProbeLog{
 		At:        startTime.Unix(),
 		ProxyURL:  redactProxyURL(proxyURL),
+		ProxyKey:  proxyURL,
 		TargetURL: targetURL,
 	}
 	if timeoutSeconds <= 0 {
@@ -4214,26 +4226,19 @@ func applyProxyConfig() {
 
 // apiGetProxy 获取当前代理配置
 func (h *Handler) apiGetProxy(w http.ResponseWriter, r *http.Request) {
-	probeEnabled, cronExpr, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
 	json.NewEncoder(w).Encode(map[string]any{
-		"proxyURL":                 config.GetProxyURL(),
-		"proxyURLs":                config.GetProxyURLs(),
-		"proxyProbeEnabled":        probeEnabled,
-		"proxyProbeCron":           cronExpr,
-		"proxyProbeTargetURL":      targetURL,
-		"proxyProbeTimeoutSeconds": timeoutSeconds,
+		"proxyURL":     config.GetProxyURL(),
+		"proxyURLs":    config.GetProxyURLs(),
+		"proxyConfigs": config.GetProxyConfigs(),
 	})
 }
 
 // apiUpdateProxy 更新代理配置并立即生效
 func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProxyURL                 string   `json:"proxyURL"`
-		ProxyURLs                []string `json:"proxyURLs"`
-		ProxyProbeEnabled        *bool    `json:"proxyProbeEnabled,omitempty"`
-		ProxyProbeCron           *string  `json:"proxyProbeCron,omitempty"`
-		ProxyProbeTargetURL      *string  `json:"proxyProbeTargetURL,omitempty"`
-		ProxyProbeTimeoutSeconds *int     `json:"proxyProbeTimeoutSeconds,omitempty"`
+		ProxyURL     string               `json:"proxyURL"`
+		ProxyURLs    []string             `json:"proxyURLs"`
+		ProxyConfigs []config.ProxyConfig `json:"proxyConfigs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -4241,12 +4246,19 @@ func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyURLs := req.ProxyURLs
-	if len(proxyURLs) == 0 && strings.TrimSpace(req.ProxyURL) != "" {
-		proxyURLs = []string{req.ProxyURL}
+	proxyConfigs := req.ProxyConfigs
+	if len(proxyConfigs) == 0 {
+		proxyURLs := req.ProxyURLs
+		if len(proxyURLs) == 0 && strings.TrimSpace(req.ProxyURL) != "" {
+			proxyURLs = []string{req.ProxyURL}
+		}
+		proxyConfigs = make([]config.ProxyConfig, 0, len(proxyURLs))
+		for _, proxyURL := range proxyURLs {
+			proxyConfigs = append(proxyConfigs, config.ProxyConfig{URL: proxyURL})
+		}
 	}
-	for _, proxyURL := range proxyURLs {
-		proxyURL = strings.TrimSpace(proxyURL)
+	for _, proxyCfg := range proxyConfigs {
+		proxyURL := strings.TrimSpace(proxyCfg.URL)
 		if proxyURL == "" {
 			continue
 		}
@@ -4255,54 +4267,31 @@ func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-	}
-
-	currentEnabled, currentCron, currentTargetURL, currentTimeout := config.GetProxyProbeConfig()
-	probeEnabled := currentEnabled
-	cronExpr := currentCron
-	targetURL := currentTargetURL
-	timeoutSeconds := currentTimeout
-	if req.ProxyProbeEnabled != nil || req.ProxyProbeCron != nil || req.ProxyProbeTargetURL != nil || req.ProxyProbeTimeoutSeconds != nil {
-		if req.ProxyProbeEnabled != nil {
-			probeEnabled = *req.ProxyProbeEnabled
-		}
-		if req.ProxyProbeCron != nil {
-			cronExpr = *req.ProxyProbeCron
-		}
-		if req.ProxyProbeTargetURL != nil {
-			targetURL = *req.ProxyProbeTargetURL
-		}
-		if req.ProxyProbeTimeoutSeconds != nil {
-			timeoutSeconds = *req.ProxyProbeTimeoutSeconds
-		}
-		if err := validateCronExpr(cronExpr); err != nil {
+		if err := validateCronExpr(strings.TrimSpace(proxyCfg.ProbeCron)); err != nil {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
+		}
+		targetURL := strings.TrimSpace(proxyCfg.ProbeTargetURL)
+		if targetURL == "" {
+			targetURL = "https://www.google.com/generate_204"
 		}
 		if _, err := url.ParseRequestURI(targetURL); err != nil {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(map[string]string{"error": "invalid proxy probe target URL"})
 			return
 		}
-		if timeoutSeconds < 1 || timeoutSeconds > 120 {
+		if proxyCfg.ProbeTimeoutSeconds < 1 || proxyCfg.ProbeTimeoutSeconds > 120 {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(map[string]string{"error": "proxy probe timeout must be 1-120 seconds"})
 			return
 		}
 	}
 
-	if err := config.UpdateProxySettings(proxyURLs); err != nil {
+	if err := config.UpdateProxyConfigs(proxyConfigs); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
-	}
-	if req.ProxyProbeEnabled != nil || req.ProxyProbeCron != nil || req.ProxyProbeTargetURL != nil || req.ProxyProbeTimeoutSeconds != nil {
-		if err := config.UpdateProxyProbeConfig(probeEnabled, cronExpr, targetURL, timeoutSeconds); err != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
 	}
 
 	// 立即应用新的代理配置
@@ -4312,22 +4301,15 @@ func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetProxyProbe(w http.ResponseWriter, r *http.Request) {
-	probeEnabled, cronExpr, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
-	lastRunMinute, logs := config.GetProxyProbeState()
+	logs := config.GetProxyProbeState()
 	json.NewEncoder(w).Encode(map[string]any{
-		"success":                  true,
-		"proxyProbeEnabled":        probeEnabled,
-		"proxyProbeCron":           cronExpr,
-		"proxyProbeTargetURL":      targetURL,
-		"proxyProbeTimeoutSeconds": timeoutSeconds,
-		"lastRunMinute":            lastRunMinute,
-		"logs":                     logs,
+		"success": true,
+		"logs":    logs,
 	})
 }
 
 func (h *Handler) apiRunProxyProbe(w http.ResponseWriter, r *http.Request) {
-	_, _, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
-	logs := h.runProxyProbe(targetURL, timeoutSeconds)
+	logs := h.runProxyProbe(config.GetProxyConfigs())
 	json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
 		"logs":    logs,
@@ -4354,12 +4336,24 @@ func (h *Handler) apiRunSingleProxyProbe(w http.ResponseWriter, r *http.Request)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	_, _, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
+	targetURL := "https://www.google.com/generate_204"
+	timeoutSeconds := 10
+	for _, proxyCfg := range config.GetProxyConfigs() {
+		if strings.TrimSpace(proxyCfg.URL) == req.ProxyURL {
+			if strings.TrimSpace(proxyCfg.ProbeTargetURL) != "" {
+				targetURL = strings.TrimSpace(proxyCfg.ProbeTargetURL)
+			}
+			if proxyCfg.ProbeTimeoutSeconds > 0 {
+				timeoutSeconds = proxyCfg.ProbeTimeoutSeconds
+			}
+			break
+		}
+	}
 	log := probeProxyURL(req.ProxyURL, targetURL, timeoutSeconds)
 	if err := config.AppendProxyProbeLogs([]config.ProxyProbeLog{log}); err != nil {
 		logger.Warnf("[ProxyProbe] Failed to save single proxy log: %v", err)
 	}
-	_, allLogs := config.GetProxyProbeState()
+	allLogs := config.GetProxyProbeState()
 	json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
 		"log":     log,
