@@ -1189,7 +1189,7 @@
       '</div>' +
       '<div class="form-group">' +
       '<label>' + escapeHtml(t('detail.mainQuotaThreshold')) + '</label>' +
-      '<input type="number" id="mainQuotaThresholdInput" value="' + (a.mainQuotaThreshold || 0) + '" min="0" step="0.1" />' +
+      '<input type="number" id="mainQuotaThresholdInput" value="' + (a.mainQuotaThreshold || 0) + '" min="0" max="100" step="0.1" />' +
       '<small>' + escapeHtml(t('detail.mainQuotaThresholdHint')) + '</small>' +
       '</div>' +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveOverage" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
@@ -1300,7 +1300,7 @@
     overageWeight = Math.max(1, Math.min(10, overageWeight));
     $('overageWeightInput').value = overageWeight;
     const thresholdInput = $('mainQuotaThresholdInput');
-    const mainQuotaThreshold = Math.max(0, parseFloat(thresholdInput.value) || 0);
+    const mainQuotaThreshold = Math.max(0, Math.min(100, parseFloat(thresholdInput.value) || 0));
     thresholdInput.value = mainQuotaThreshold;
     await putAccount(id, { allowOverage, mainQuotaThreshold, overageWeight }, t('detail.saved'));
   }

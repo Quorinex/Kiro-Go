@@ -63,7 +63,7 @@ type Account struct {
 
 	// Overage behavior after the main usage limit is reached.
 	AllowOverage       bool    `json:"allowOverage,omitempty"`       // Whether to keep using the account after UsageLimit is reached
-	MainQuotaThreshold float64 `json:"mainQuotaThreshold,omitempty"` // Absolute account-level main quota threshold; 0 disables the override
+	MainQuotaThreshold float64 `json:"mainQuotaThreshold,omitempty"` // Account-level main quota percentage threshold (0-100); 0 disables the override
 	OverageWeight      int     `json:"overageWeight,omitempty"`      // 1-10, lower values reduce overage request frequency
 
 	// Account status
@@ -254,7 +254,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.13"
+const Version = "1.14"
 
 var (
 	cfg               *Config

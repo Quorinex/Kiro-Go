@@ -252,7 +252,7 @@
   "detail.overage": "Overage Settings",
   "detail.allowOverage": "Continue calling after quota is exhausted",
   "detail.mainQuotaThreshold": "Main Quota Threshold",
-  "detail.mainQuotaThresholdHint": "Set an account-specific main quota pause threshold. Once reached, this account stops serving traffic. 0 disables the override.",
+  "detail.mainQuotaThresholdHint": "Set an account-specific main quota percentage pause threshold (0-100). Once reached, this account stops serving traffic and resumes automatically after usage falls back below it. 0 disables the override.",
   "detail.overageHint": "Call frequency weight when over quota (1–10); higher = more frequent",
   "detail.overageWeight": "Overage Weight",
   "detail.proxyURL": "Account Proxy",

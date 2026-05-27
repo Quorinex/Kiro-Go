@@ -3052,6 +3052,9 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		if v < 0 {
 			v = 0
 		}
+		if v > 100 {
+			v = 100
+		}
 		existing.MainQuotaThreshold = v
 	}
 	if v, ok := updates["overageWeight"].(float64); ok {

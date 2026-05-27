@@ -89,12 +89,14 @@ func TestAccountMainQuotaThresholdOverridesGlobalThreshold(t *testing.T) {
 		ID:                 "acct-threshold",
 		UsageCurrent:       60,
 		UsageLimit:         100,
+		UsagePercent:       0.60,
 		MainQuotaThreshold: 50,
 	}
 	globalOnly := config.Account{
 		ID:           "global-ok",
 		UsageCurrent: 60,
 		UsageLimit:   100,
+		UsagePercent: 0.60,
 	}
 	p.accounts = []config.Account{accountLevelLimited, globalOnly}
 
@@ -106,6 +108,30 @@ func TestAccountMainQuotaThresholdOverridesGlobalThreshold(t *testing.T) {
 		if acc.ID == accountLevelLimited.ID {
 			t.Fatalf("expected account-level threshold account to be skipped")
 		}
+	}
+}
+
+func TestAccountMainQuotaThresholdResumesBelowPercentThreshold(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	p := &AccountPool{}
+	account := config.Account{
+		ID:                 "acct-threshold",
+		UsageCurrent:       40,
+		UsageLimit:         100,
+		UsagePercent:       0.40,
+		MainQuotaThreshold: 50,
+	}
+	p.accounts = []config.Account{account}
+
+	acc := p.GetNext()
+	if acc == nil {
+		t.Fatalf("expected account to resume below percent threshold")
+	}
+	if acc.ID != account.ID {
+		t.Fatalf("expected account %q, got %q", account.ID, acc.ID)
 	}
 }
 
