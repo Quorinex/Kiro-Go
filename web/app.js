@@ -34,6 +34,7 @@
   let customSelectObserver = null;
   let customSelectRefreshQueued = false;
   let proxyOptions = [];
+  let proxyProbeLogsData = [];
 
   // DOM helpers
   const $ = (id) => document.getElementById(id);
@@ -670,6 +671,7 @@
     const res = await api('/accounts');
     accountsData = await res.json();
     renderAccounts();
+    renderProxySettingsList();
   }
   async function loadProbeModelOptions(selectedModel) {
     const list = $('probeModelOptions');
@@ -939,6 +941,7 @@
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
       const copySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+      const editSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 
       return '' +
         '<div class="account-card' + (isSelected ? ' selected' : '') + '" data-id="' + idAttr + '">' +
@@ -959,6 +962,7 @@
         '</div>' +
         '<div class="account-actions">' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="refresh" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refresh')) + '">' + refreshSvg + '</button>' +
+        '<button class="btn btn-icon btn-sm btn-ghost" data-action="edit" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.edit')) + '">' + editSvg + '</button>' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="detail" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.detail')) + '">' + userSvg + '</button>' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="copyJSON" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.copyJSON')) + '">' + copySvg + '</button>' +
         (banned ? '' :
@@ -1187,7 +1191,7 @@
       '</div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
-      '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +
+      accountProxyOptionsHtml(a.proxyURL || '') +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveProxyURL" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div><p class="help-block">' + escapeHtml(t('detail.proxyHint')) + '</p></div>' +
 
@@ -1220,6 +1224,7 @@
       '</div>';
 
     openDialog('detailModal');
+    enhanceCustomSelects($('detailBody'));
   }
   async function loadModels(id) {
     const c = $('modelsList');
@@ -1292,7 +1297,8 @@
     await putAccount(id, { allowOverage, overageWeight }, t('detail.saved'));
   }
   async function saveProxyURL(id) {
-    const url = $('proxyURLInput').value.trim();
+    const select = $('proxyURLSelect');
+    const url = select ? select.value.trim() : '';
     if (url && !/^(socks5|socks5h|http|https):\/\//.test(url)) {
       toast(t('detail.proxyFormatError'), 'warning'); return;
     }
@@ -1493,17 +1499,15 @@
     const d = await res.json();
     const urls = Array.isArray(d.proxyURLs) ? d.proxyURLs : (d.proxyURL ? [d.proxyURL] : []);
     proxyOptions = urls;
-    $('proxyURLs').value = urls.join('\n');
+    if ($('proxyURLInputNew')) $('proxyURLInputNew').value = '';
     $('proxyProbeEnabled').checked = !!d.proxyProbeEnabled;
     $('proxyProbeCron').value = d.proxyProbeCron || '';
     $('proxyProbeTargetURL').value = d.proxyProbeTargetURL || 'https://www.google.com/generate_204';
     $('proxyProbeTimeoutSeconds').value = d.proxyProbeTimeoutSeconds || 10;
+    renderProxySettingsList();
   }
-  async function saveProxyConfig() {
-    const urls = $('proxyURLs').value
-      .split(/\r?\n/)
-      .map(s => s.trim())
-      .filter(Boolean);
+  async function saveProxyConfig(urlsOverride) {
+    const urls = Array.isArray(urlsOverride) ? urlsOverride.slice() : proxyOptions.slice();
     for (const url of urls) {
       if (!/^(socks5|socks5h|http|https):\/\//.test(url)) {
         toast(t('settings.proxyFormatError'), 'warning'); return;
@@ -1520,10 +1524,143 @@
     const d = await res.json();
     if (d.success) {
       proxyOptions = urls;
+      if ($('proxyURLInputNew')) $('proxyURLInputNew').value = '';
+      renderProxySettingsList();
+      const modalBody = $('modalBody');
+      if (modalBody && modalBody.innerHTML && $('addProxyURL')) enhanceCustomSelects(modalBody);
       toast(t('settings.proxySaved'), 'success');
       loadProxyProbeLogs();
     }
     else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+  }
+  function proxyUsageMap() {
+    const usage = new Map();
+    accountsData.forEach(acc => {
+      const key = (acc.proxyURL || '').trim();
+      if (!key) return;
+      if (!usage.has(key)) usage.set(key, []);
+      usage.get(key).push(acc.nickname || acc.email || acc.id);
+    });
+    return usage;
+  }
+  function latestProxyProbeMap() {
+    const latest = new Map();
+    proxyProbeLogsData.forEach(log => {
+      const key = (log.proxyURL || '').trim();
+      if (!key || latest.has(key)) return;
+      latest.set(key, log);
+    });
+    return latest;
+  }
+  function proxyStatusClass(log) {
+    if (!log) return 'warn';
+    if (log.success) return 'ok';
+    return log.error ? 'err' : 'warn';
+  }
+  function renderProxySettingsList() {
+    const container = $('proxyList');
+    if (!container) return;
+    if (!proxyOptions.length) {
+      container.innerHTML = '<div class="proxy-settings-empty">' + escapeHtml(t('settings.proxyListEmpty')) + '</div>';
+      return;
+    }
+    const usage = proxyUsageMap();
+    const latest = latestProxyProbeMap();
+    container.innerHTML = proxyOptions.map((url, idx) => {
+      const users = usage.get(url) || [];
+      const log = latest.get(url);
+      const statusClass = proxyStatusClass(log);
+      const latency = log && log.latencyMs > 0 ? (log.latencyMs + ' ms') : t('common.none');
+      const statusText = log
+        ? (log.success ? t('proxyProbe.ok') : (log.error || (log.status ? t('proxyProbe.status', log.status) : t('proxyProbe.failed'))))
+        : t('settings.proxyNeverTested');
+      const usedBy = users.length ? users.join(', ') : t('settings.proxyUnused');
+      return '<div class="proxy-settings-item">' +
+        '<div class="proxy-settings-main">' +
+        '<div class="proxy-settings-url">' + escapeHtml(url) + '</div>' +
+        '<div class="proxy-settings-meta">' +
+        '<span class="proxy-settings-pill ' + statusClass + '">' + escapeHtml(statusText) + '</span>' +
+        '<span>' + escapeHtml(t('settings.proxyLatency')) + ': ' + escapeHtml(latency) + '</span>' +
+        '<span>' + escapeHtml(t('settings.proxyUsedBy')) + ': ' + escapeHtml(usedBy) + '</span>' +
+        '</div>' +
+        '</div>' +
+        '<div class="proxy-settings-actions">' +
+        '<button class="btn btn-outline btn-sm" data-proxy-action="probe" data-proxy-idx="' + idx + '" type="button">' + escapeHtml(t('settings.proxyProbeNow')) + '</button>' +
+        '<button class="btn btn-outline btn-sm" data-proxy-action="edit" data-proxy-idx="' + idx + '" type="button">' + escapeHtml(t('settings.proxyEdit')) + '</button>' +
+        '<button class="btn btn-outline btn-sm" data-proxy-action="delete" data-proxy-idx="' + idx + '" type="button">' + escapeHtml(t('settings.proxyDelete')) + '</button>' +
+        '</div>' +
+        '</div>';
+    }).join('');
+  }
+  async function addProxyURL() {
+    const input = $('proxyURLInputNew');
+    const value = (input && input.value || '').trim();
+    if (!value) {
+      toast(t('settings.proxyHostRequired'), 'warning');
+      return;
+    }
+    if (!/^(socks5|socks5h|http|https):\/\//.test(value)) {
+      toast(t('settings.proxyFormatError'), 'warning');
+      return;
+    }
+    if (proxyOptions.includes(value)) {
+      toast(t('settings.proxyDuplicate'), 'warning');
+      return;
+    }
+    await saveProxyConfig(proxyOptions.concat(value));
+  }
+  async function editProxyURL(index) {
+    const current = proxyOptions[index];
+    if (!current) return;
+    const next = window.prompt(t('settings.proxyEditPrompt'), current);
+    if (next == null) return;
+    const value = next.trim();
+    if (!value) {
+      toast(t('settings.proxyHostRequired'), 'warning');
+      return;
+    }
+    if (!/^(socks5|socks5h|http|https):\/\//.test(value)) {
+      toast(t('settings.proxyFormatError'), 'warning');
+      return;
+    }
+    if (proxyOptions.some((item, idx) => idx !== index && item === value)) {
+      toast(t('settings.proxyDuplicate'), 'warning');
+      return;
+    }
+    const urls = proxyOptions.slice();
+    urls[index] = value;
+    await saveProxyConfig(urls);
+  }
+  async function deleteProxyURL(index) {
+    const current = proxyOptions[index];
+    if (!current) return;
+    const ok = await confirmAction(t('settings.proxyDeleteConfirm'), {
+      title: t('settings.proxyDelete')
+    });
+    if (!ok) return;
+    const urls = proxyOptions.filter((_, idx) => idx !== index);
+    await saveProxyConfig(urls);
+  }
+  async function probeSingleProxy(index) {
+    const current = proxyOptions[index];
+    if (!current) return;
+    try {
+      const res = await api('/proxy/probe/one', {
+        method: 'POST',
+        body: JSON.stringify({ proxyURL: current })
+      });
+      const d = await res.json();
+      if (d.success) {
+        proxyProbeLogsData = d.logs || [];
+        renderProxyProbeLogs(proxyProbeLogsData);
+        renderProxySettingsList();
+        toast(t('settings.proxyProbeDone'), 'success');
+      } else {
+        toast(t('common.failed') + ': ' + (d.error || ''), 'error');
+      }
+    } catch (e) {
+      toast(t('common.failed'), 'error');
+    }
   }
   function renderProxyProbeLogs(logs) {
     const c = $('proxyProbeLogs');
@@ -1534,9 +1671,13 @@
     try {
       const res = await api('/proxy/probe');
       const d = await res.json();
+      proxyProbeLogsData = d.logs || [];
       renderProxyProbeLogs(d.logs || []);
+      renderProxySettingsList();
     } catch (e) {
+      proxyProbeLogsData = [];
       renderProxyProbeLogs([]);
+      renderProxySettingsList();
     }
   }
   async function runProxyProbeNow() {
@@ -1546,7 +1687,9 @@
       const res = await api('/proxy/probe/run', { method: 'POST' });
       const d = await res.json();
       if (d.success) {
+        proxyProbeLogsData = d.logs || [];
         renderProxyProbeLogs(d.logs || []);
+        renderProxySettingsList();
         toast(t('proxyProbe.runDone'), 'success');
         loadProxyProbeLogs();
       } else {
@@ -1730,6 +1873,16 @@
     } catch (e) {
       return proxyURL;
     }
+  }
+  function accountProxyOptionsHtml(selectedURL) {
+    const current = (selectedURL || '').trim();
+    const options = proxyOptions.map(url =>
+      '<option value="' + escapeAttr(url) + '"' + (url === current ? ' selected' : '') + '>' + escapeHtml(proxyLabel(url)) + '</option>'
+    ).join('');
+    return '<select id="proxyURLSelect">' +
+      '<option value="">' + escapeHtml(t('detail.proxyUseGlobal')) + '</option>' +
+      options +
+      '</select>';
   }
   function addProxySelectHtml() {
     const options = proxyOptions.map(url =>
@@ -2457,6 +2610,7 @@
       const id = btn.dataset.id;
       const action = btn.dataset.action;
       if (action === 'refresh') refreshAccount(id, btn.closest('.account-card'));
+      else if (action === 'edit') showDetail(id);
       else if (action === 'detail') showDetail(id);
       else if (action === 'copyJSON') copyAccountJSON(id, btn);
       else if (action === 'toggle') toggleAccount(id, btn.dataset.enabled === 'true');
@@ -2474,12 +2628,22 @@
     $('saveEndpointBtn').addEventListener('click', saveEndpointConfig);
     $('changePasswordBtn').addEventListener('click', changePassword);
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
+    $('addProxyBtn').addEventListener('click', addProxyURL);
     $('runProxyProbeBtn').addEventListener('click', runProxyProbeNow);
     $('resetStatsBtn').addEventListener('click', resetStats);
     $('proxyProbeLogs').addEventListener('click', e => {
       const probeBar = e.target.closest('.probe-timeline-bar');
       if (!probeBar) return;
       showProbeDetail(probeBar.dataset.probeDetail || probeBar.title || '');
+    });
+    $('proxyList').addEventListener('click', e => {
+      const btn = e.target.closest('[data-proxy-action]');
+      if (!btn) return;
+      const idx = parseInt(btn.dataset.proxyIdx, 10);
+      const action = btn.dataset.proxyAction;
+      if (action === 'probe') probeSingleProxy(idx);
+      else if (action === 'edit') editProxyURL(idx);
+      else if (action === 'delete') deleteProxyURL(idx);
     });
   }
 

@@ -359,10 +359,16 @@
         <div class="card">
           <div class="card-header"><span class="card-title" data-i18n="settings.proxySettings"></span></div>
           <div class="form-group">
-            <label data-i18n="settings.proxyURLs"></label>
-            <textarea id="proxyURLs" rows="6" data-i18n-placeholder="settings.proxyURLsPlaceholder"
-              autocomplete="off"></textarea>
+            <label data-i18n="settings.proxyAdd"></label>
+            <div class="input-row proxy-editor-row">
+              <input type="text" id="proxyURLInputNew" data-i18n-placeholder="settings.proxyURLsPlaceholderSingle" autocomplete="off" />
+              <button class="btn btn-primary btn-sm" id="addProxyBtn" type="button" data-i18n="settings.addProxy"></button>
+            </div>
             <p class="help-block" data-i18n="settings.proxyURLsHint"></p>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.proxyList"></label>
+            <div id="proxyList" class="proxy-settings-list"></div>
           </div>
           <div class="form-group">
             <label class="flex items-center gap-2">

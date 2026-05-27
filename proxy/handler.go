@@ -2864,6 +2864,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetProxyProbe(w, r)
 	case path == "/proxy/probe/run" && r.Method == "POST":
 		h.apiRunProxyProbe(w, r)
+	case path == "/proxy/probe/one" && r.Method == "POST":
+		h.apiRunSingleProxyProbe(w, r)
 	case path == "/proxy" && r.Method == "GET":
 		h.apiGetProxy(w, r)
 	case path == "/proxy" && r.Method == "POST":
@@ -4318,6 +4320,39 @@ func (h *Handler) apiRunProxyProbe(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
 		"logs":    logs,
+	})
+}
+
+func (h *Handler) apiRunSingleProxyProbe(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProxyURL string `json:"proxyURL"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	req.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	if req.ProxyURL == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "proxyURL is required"})
+		return
+	}
+	if err := validateProxyURL(req.ProxyURL); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	_, _, targetURL, timeoutSeconds := config.GetProxyProbeConfig()
+	log := probeProxyURL(req.ProxyURL, targetURL, timeoutSeconds)
+	if err := config.AppendProxyProbeLogs([]config.ProxyProbeLog{log}); err != nil {
+		logger.Warnf("[ProxyProbe] Failed to save single proxy log: %v", err)
+	}
+	_, allLogs := config.GetProxyProbeState()
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"log":     log,
+		"logs":    allLogs,
 	})
 }
 
