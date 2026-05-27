@@ -88,3 +88,25 @@ func TestUpdateProxySettingsSupportsMultipleURLs(t *testing.T) {
 		t.Fatalf("unexpected round-robin order: %#v", got)
 	}
 }
+
+func TestCreditUsageThresholdDefaultsAndClamps(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	if got := GetCreditUsageThreshold(); got != 0 {
+		t.Fatalf("expected default threshold 0, got %v", got)
+	}
+	if err := UpdateCreditUsageThreshold(800); err != nil {
+		t.Fatalf("update threshold: %v", err)
+	}
+	if got := GetCreditUsageThreshold(); got != 800 {
+		t.Fatalf("expected threshold 800, got %v", got)
+	}
+	if err := UpdateCreditUsageThreshold(-1); err != nil {
+		t.Fatalf("update low threshold: %v", err)
+	}
+	if got := GetCreditUsageThreshold(); got != 0 {
+		t.Fatalf("expected low threshold clamp to 0, got %v", got)
+	}
+}

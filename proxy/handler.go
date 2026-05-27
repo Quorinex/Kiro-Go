@@ -47,6 +47,8 @@ type Handler struct {
 	modelsCacheTime int64
 	promptCache     *promptCacheTracker
 	tokenRefreshMu  sync.Mutex
+	manualProbeMu   sync.Mutex
+	manualProbeLast map[string]string
 }
 
 type thinkingStreamSource int
@@ -234,6 +236,7 @@ func NewHandler() *Handler {
 		stopRefresh:     make(chan struct{}),
 		stopStatsSaver:  make(chan struct{}),
 		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
+		manualProbeLast: make(map[string]string),
 	}
 	// 启动后台刷新
 	go h.backgroundRefresh()
@@ -247,199 +250,199 @@ func NewHandler() *Handler {
 }
 
 var randomProbePrompts = []string{
-	"Give one simple sentence about weather.",
-	"Give one simple sentence about time.",
-	"Give one simple sentence about math.",
-	"Give one simple sentence about color.",
-	"Give one simple sentence about music.",
-	"Give one simple sentence about book.",
-	"Give one simple sentence about tea.",
-	"Give one simple sentence about coffee.",
-	"Give one simple sentence about garden.",
-	"Give one simple sentence about river.",
-	"Give one simple sentence about mountain.",
-	"Give one simple sentence about city.",
-	"Give one simple sentence about ocean.",
-	"Give one simple sentence about moon.",
-	"Give one simple sentence about sun.",
-	"Give one simple sentence about tree.",
-	"Give one simple sentence about flower.",
-	"Give one simple sentence about road.",
-	"Give one simple sentence about train.",
-	"Give one simple sentence about plane.",
-	"Give one simple sentence about camera.",
-	"Give one simple sentence about window.",
-	"Give one simple sentence about desk.",
-	"Give one simple sentence about lamp.",
-	"Give one simple sentence about phone.",
-	"Give one simple sentence about paper.",
-	"Give one simple sentence about pencil.",
-	"Give one simple sentence about clock.",
-	"Give one simple sentence about bread.",
-	"Give one simple sentence about fruit.",
-	"Give one simple sentence about cloud.",
-	"Give one simple sentence about rain.",
-	"Give one simple sentence about snow.",
-	"Give one simple sentence about wind.",
-	"Give one simple sentence about map.",
-	"Give one simple sentence about code.",
-	"Give one simple sentence about robot.",
-	"Give one simple sentence about story.",
-	"Give one simple sentence about poem.",
-	"Give one simple sentence about game.",
-	"Give one simple sentence about movie.",
-	"Give one simple sentence about bird.",
-	"Give one simple sentence about cat.",
-	"Give one simple sentence about dog.",
-	"Give one simple sentence about fish.",
-	"Give one simple sentence about star.",
-	"Give one simple sentence about forest.",
-	"Give one simple sentence about beach.",
-	"Give one simple sentence about bridge.",
-	"Give one simple sentence about market.",
-	"Give one simple sentence about school.",
-	"Give one simple sentence about library.",
-	"Give one simple sentence about kitchen.",
-	"Give one simple sentence about breakfast.",
-	"Give one simple sentence about lunch.",
-	"Give one simple sentence about dinner.",
-	"Give one simple sentence about travel.",
-	"Give one simple sentence about language.",
-	"Give one simple sentence about history.",
-	"Give one simple sentence about science.",
-	"Give one simple sentence about art.",
-	"Give one simple sentence about dance.",
-	"Give one simple sentence about song.",
-	"Give one simple sentence about picture.",
-	"Give one simple sentence about idea.",
-	"Give one simple sentence about habit.",
-	"Give one simple sentence about health.",
-	"Give one simple sentence about sleep.",
-	"Give one simple sentence about dream.",
-	"Give one simple sentence about smile.",
-	"Give one simple sentence about friend.",
-	"Give one simple sentence about family.",
-	"Give one simple sentence about work.",
-	"Give one simple sentence about plan.",
-	"Give one simple sentence about goal.",
-	"Give one simple sentence about question.",
-	"Give one simple sentence about answer.",
-	"Give one simple sentence about memory.",
-	"Give one simple sentence about future.",
-	"Give one simple sentence about season.",
-	"Give one simple sentence about spring.",
-	"Give one simple sentence about summer.",
-	"Give one simple sentence about autumn.",
-	"Give one simple sentence about winter.",
-	"Give one simple sentence about morning.",
-	"Give one simple sentence about evening.",
-	"Give one simple sentence about night.",
-	"Give one simple sentence about weekend.",
-	"Give one simple sentence about holiday.",
-	"Give one simple sentence about note.",
-	"Give one simple sentence about message.",
-	"Give one simple sentence about email.",
-	"Give one simple sentence about meeting.",
-	"Give one simple sentence about task.",
-	"Give one simple sentence about list.",
-	"Give one simple sentence about number.",
-	"Give one simple sentence about shape.",
-	"Give one simple sentence about pattern.",
-	"Give one simple sentence about light.",
-	"Give one simple sentence about shadow.",
-	"Give one simple sentence about sound.",
-	"Give one simple sentence about silence.",
-	"Give one simple sentence about space.",
-	"Give one simple sentence about room.",
-	"Give one simple sentence about door.",
-	"Give one simple sentence about key.",
-	"Give one simple sentence about bag.",
-	"Give one simple sentence about shoe.",
-	"Give one simple sentence about shirt.",
-	"Give one simple sentence about water.",
-	"Give one simple sentence about fire.",
-	"Give one simple sentence about earth.",
-	"Give one simple sentence about metal.",
-	"Give one simple sentence about wood.",
-	"Give one simple sentence about glass.",
-	"Give one simple sentence about stone.",
-	"Give one simple sentence about sand.",
-	"Give one simple sentence about field.",
-	"Give one simple sentence about farm.",
-	"Give one simple sentence about park.",
-	"Give one simple sentence about shop.",
-	"Give one simple sentence about street.",
-	"Give one simple sentence about bike.",
-	"Give one simple sentence about bus.",
-	"Give one simple sentence about boat.",
-	"Give one simple sentence about harbor.",
-	"Give one simple sentence about island.",
-	"Give one simple sentence about valley.",
-	"Give one simple sentence about hill.",
-	"Give one simple sentence about path.",
-	"Give one simple sentence about trail.",
-	"Give one simple sentence about camp.",
-	"Give one simple sentence about tent.",
-	"Give one simple sentence about starry sky.",
-	"Give one simple sentence about sunrise.",
-	"Give one simple sentence about sunset.",
-	"Give one simple sentence about rainbow.",
-	"Give one simple sentence about mirror.",
-	"Give one simple sentence about photo.",
-	"Give one simple sentence about recipe.",
-	"Give one simple sentence about snack.",
-	"Give one simple sentence about soup.",
-	"Give one simple sentence about salad.",
-	"Give one simple sentence about cookie.",
-	"Give one simple sentence about cake.",
-	"Give one simple sentence about music box.",
-	"Give one simple sentence about keyboard.",
-	"Give one simple sentence about screen.",
-	"Give one simple sentence about server.",
-	"Give one simple sentence about network.",
-	"Give one simple sentence about battery.",
-	"Give one simple sentence about signal.",
-	"Give one simple sentence about button.",
-	"Give one simple sentence about switch.",
-	"Give one simple sentence about folder.",
-	"Give one simple sentence about file.",
-	"Give one simple sentence about backup.",
-	"Give one simple sentence about calendar.",
-	"Give one simple sentence about timer.",
-	"Give one simple sentence about alarm.",
-	"Give one simple sentence about weather app.",
-	"Give one simple sentence about notebook.",
-	"Give one simple sentence about journal.",
-	"Give one simple sentence about wallet.",
-	"Give one simple sentence about ticket.",
-	"Give one simple sentence about station.",
-	"Give one simple sentence about airport.",
-	"Give one simple sentence about museum.",
-	"Give one simple sentence about theater.",
-	"Give one simple sentence about concert.",
-	"Give one simple sentence about festival.",
-	"Give one simple sentence about lesson.",
-	"Give one simple sentence about practice.",
-	"Give one simple sentence about exercise.",
-	"Give one simple sentence about stretch.",
-	"Give one simple sentence about walk.",
-	"Give one simple sentence about run.",
-	"Give one simple sentence about swim.",
-	"Give one simple sentence about climb.",
-	"Give one simple sentence about paint.",
-	"Give one simple sentence about draw.",
-	"Give one simple sentence about write.",
-	"Give one simple sentence about read.",
-	"Give one simple sentence about learn.",
-	"Give one simple sentence about teach.",
-	"Give one simple sentence about build.",
-	"Give one simple sentence about fix.",
-	"Give one simple sentence about clean.",
+	"OK?",
+	"Are you OK?",
+	"Model?",
+	"Ready?",
+	"Ping?",
+	"Hello?",
+	"Hi?",
+	"Test?",
+	"Check?",
+	"Run?",
+	"Go?",
+	"Yes?",
+	"No?",
+	"Why?",
+	"How?",
+	"When?",
+	"Where?",
+	"Who?",
+	"What?",
+	"Which?",
+	"Again?",
+	"Now?",
+	"Later?",
+	"Today?",
+	"Tomorrow?",
+	"Fast?",
+	"Slow?",
+	"Good?",
+	"Bad?",
+	"Safe?",
+	"Open?",
+	"Close?",
+	"Start?",
+	"Stop?",
+	"Next?",
+	"Back?",
+	"More?",
+	"Less?",
+	"Done?",
+	"Busy?",
+	"Free?",
+	"Clear?",
+	"Simple?",
+	"Short?",
+	"Long?",
+	"New?",
+	"Old?",
+	"Local?",
+	"Remote?",
+	"Online?",
+	"Offline?",
+	"Input?",
+	"Output?",
+	"Token?",
+	"Limit?",
+	"Status?",
+	"Health?",
+	"Alive?",
+	"Works?",
+	"Stable?",
+	"Error?",
+	"Retry?",
+	"Pass?",
+	"Fail?",
+	"Save?",
+	"Load?",
+	"Sync?",
+	"Build?",
+	"Deploy?",
+	"Probe?",
+	"Proxy?",
+	"Account?",
+	"Server?",
+	"Client?",
+	"Port?",
+	"Path?",
+	"File?",
+	"Data?",
+	"Log?",
+	"Time?",
+	"Date?",
+	"Name?",
+	"Key?",
+	"Value?",
+	"Count?",
+	"Total?",
+	"Mode?",
+	"Level?",
+	"Speed?",
+	"Queue?",
+	"Cache?",
+	"Memory?",
+	"CPU?",
+	"Disk?",
+	"Network?",
+	"Request?",
+	"Response?",
+	"Message?",
+	"Reply?",
+	"Text?",
+	"JSON?",
+	"Code?",
+	"Task?",
+	"Plan?",
+	"Note?",
+	"Idea?",
+	"Question?",
+	"Answer?",
+	"Weather?",
+	"Music?",
+	"Book?",
+	"Tea?",
+	"Coffee?",
+	"Water?",
+	"Food?",
+	"Apple?",
+	"Bread?",
+	"Light?",
+	"Dark?",
+	"Sun?",
+	"Moon?",
+	"Sky?",
+	"Cloud?",
+	"Rain?",
+	"Snow?",
+	"Wind?",
+	"Tree?",
+	"Flower?",
+	"River?",
+	"Mountain?",
+	"Road?",
+	"City?",
+	"Room?",
+	"Door?",
+	"Window?",
+	"Desk?",
+	"Chair?",
+	"Phone?",
+	"Clock?",
+	"Map?",
+	"Image?",
+	"Color?",
+	"Sound?",
+	"Quiet?",
+	"Happy?",
+	"Calm?",
+	"Clean?",
+	"Fix?",
+	"Learn?",
+	"Read?",
+	"Write?",
+	"Draw?",
+	"Paint?",
+	"Move?",
+	"Walk?",
+	"Run now?",
+	"Try it?",
+	"Need help?",
+	"All good?",
+	"Still there?",
+	"Can you reply?",
+	"Say OK.",
+	"Say hi.",
+	"Say yes.",
+	"Say no.",
+	"Say ready.",
+	"Say done.",
+	"Reply OK.",
+	"Reply hi.",
+	"Reply yes.",
+	"Reply no.",
+	"Reply ready.",
+	"Reply done.",
+	"One word.",
+	"Two words.",
+	"Short reply.",
+	"Tiny reply.",
+	"Answer briefly.",
+	"Keep it short.",
+	"Use one word.",
+	"Use two words.",
+	"Just say OK.",
+	"Just say hi.",
+	"What model?",
+	"What time?",
+	"What status?",
+	"Any error?",
+	"Proxy OK?",
 }
 
 func randomProbePrompt(randSource *rand.Rand) string {
 	if len(randomProbePrompts) == 0 {
-		return "Give one simple sentence about weather."
+		return "OK?"
 	}
 	if randSource == nil {
 		n, err := cryptoRand.Int(cryptoRand.Reader, big.NewInt(int64(len(randomProbePrompts))))
@@ -449,6 +452,47 @@ func randomProbePrompt(randSource *rand.Rand) string {
 		return randomProbePrompts[time.Now().Nanosecond()%len(randomProbePrompts)]
 	}
 	return randomProbePrompts[randSource.Intn(len(randomProbePrompts))]
+}
+
+func (h *Handler) manualProbePrompt(accountID string, recentLogs []config.ProbeLog) string {
+	prompt := randomProbePrompt(nil)
+	if len(randomProbePrompts) < 2 {
+		return prompt
+	}
+	used := make(map[string]struct{}, len(recentLogs)+1)
+	for _, log := range recentLogs {
+		if log.Prompt != "" {
+			used[log.Prompt] = struct{}{}
+		}
+	}
+
+	h.manualProbeMu.Lock()
+	defer h.manualProbeMu.Unlock()
+
+	if last := h.manualProbeLast[accountID]; last != "" {
+		used[last] = struct{}{}
+	}
+	if len(used) >= len(randomProbePrompts) {
+		used = nil
+	}
+
+	for i := 0; used != nil && i < 12; i++ {
+		if _, ok := used[prompt]; !ok {
+			h.manualProbeLast[accountID] = prompt
+			return prompt
+		}
+		prompt = randomProbePrompt(nil)
+	}
+	if used != nil {
+		for _, candidate := range randomProbePrompts {
+			if _, ok := used[candidate]; !ok {
+				prompt = candidate
+				break
+			}
+		}
+	}
+	h.manualProbeLast[accountID] = prompt
+	return prompt
 }
 
 func (h *Handler) backgroundRandomProbe() {
@@ -842,6 +886,17 @@ func redactProxyURL(rawURL string) string {
 	return u.String()
 }
 
+func proxyHostPort(rawURL string) string {
+	if strings.TrimSpace(rawURL) == "" {
+		return "direct"
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	return u.Host
+}
+
 func cronMatchesMinute(expr string, t time.Time) bool {
 	fields := strings.Fields(expr)
 	if len(fields) != 5 {
@@ -1118,18 +1173,22 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleStats 统计数据（需要 API Key 鉴权）
 func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
+	kiroCreditsUsed, kiroCreditsLimit := kiroCreditTotals()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":          "ok",
-		"version":         config.Version,
-		"accounts":        h.pool.Count(),
-		"available":       h.pool.AvailableCount(),
-		"totalRequests":   atomic.LoadInt64(&h.totalRequests),
-		"successRequests": atomic.LoadInt64(&h.successRequests),
-		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
-		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
-		"totalCredits":    h.getCredits(),
-		"uptime":          time.Now().Unix() - h.startTime,
+		"status":           "ok",
+		"version":          config.Version,
+		"accounts":         h.pool.Count(),
+		"available":        h.pool.AvailableCount(),
+		"totalRequests":    atomic.LoadInt64(&h.totalRequests),
+		"successRequests":  atomic.LoadInt64(&h.successRequests),
+		"failedRequests":   atomic.LoadInt64(&h.failedRequests),
+		"totalTokens":      atomic.LoadInt64(&h.totalTokens),
+		"totalCredits":     h.getCredits(),
+		"localCredits":     h.getCredits(),
+		"kiroCreditsUsed":  kiroCreditsUsed,
+		"kiroCreditsLimit": kiroCreditsLimit,
+		"uptime":           time.Now().Unix() - h.startTime,
 	})
 }
 
@@ -2886,6 +2945,9 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"errorCount":         stats.ErrorCount,
 			"totalTokens":        stats.TotalTokens,
 			"totalCredits":       stats.TotalCredits,
+			"localTotalCredits":  stats.TotalCredits,
+			"kiroCreditsUsed":    a.UsageCurrent,
+			"kiroCreditsLimit":   a.UsageLimit,
 			"lastUsed":           stats.LastUsed,
 		}
 	}
@@ -2905,6 +2967,14 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if account.Region == "" {
 		account.Region = "us-east-1"
+	}
+	account.ProxyURL = strings.TrimSpace(account.ProxyURL)
+	if account.ProxyURL != "" {
+		if err := validateProxyURL(account.ProxyURL); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -2979,6 +3049,14 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		existing.OverageWeight = clampInt(int(v), 1, 10)
 	}
 	if v, ok := updates["proxyURL"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			if err := validateProxyURL(v); err != nil {
+				w.WriteHeader(400)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+		}
 		existing.ProxyURL = v
 	}
 
@@ -3111,6 +3189,7 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		StartUrl string `json:"startUrl"`
 		Region   string `json:"region"`
+		ProxyURL string `json:"proxyURL"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3123,8 +3202,16 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "startUrl is required"})
 		return
 	}
+	req.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	if req.ProxyURL != "" {
+		if err := validateProxyURL(req.ProxyURL); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
 
-	sessionID, authorizeUrl, expiresIn, err := auth.StartIamSsoLogin(req.StartUrl, req.Region)
+	sessionID, authorizeUrl, expiresIn, err := auth.StartIamSsoLoginWithProxy(req.StartUrl, req.Region, req.ProxyURL)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3142,6 +3229,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID   string `json:"sessionId"`
 		CallbackUrl string `json:"callbackUrl"`
+		ProxyURL    string `json:"proxyURL"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3149,7 +3237,15 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, err := auth.CompleteIamSsoLogin(req.SessionID, req.CallbackUrl)
+	req.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	if req.ProxyURL != "" {
+		if err := validateProxyURL(req.ProxyURL); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, err := auth.CompleteIamSsoLoginWithProxy(req.SessionID, req.CallbackUrl, req.ProxyURL)
 	if err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3157,7 +3253,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
+	email, _, _ := auth.GetUserInfoWithProxy(accessToken, req.ProxyURL)
 
 	// 创建账号
 	account := config.Account{
@@ -3172,6 +3268,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
+		ProxyURL:     req.ProxyURL,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -3192,11 +3289,20 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Region string `json:"region"`
+		Region   string `json:"region"`
+		ProxyURL string `json:"proxyURL"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
+	req.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	if req.ProxyURL != "" {
+		if err := validateProxyURL(req.ProxyURL); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
 
-	session, err := auth.StartBuilderIdLogin(req.Region)
+	session, err := auth.StartBuilderIdLoginWithProxy(req.Region, req.ProxyURL)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3214,6 +3320,7 @@ func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request)
 func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID string `json:"sessionId"`
+		ProxyURL  string `json:"proxyURL"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3221,7 +3328,15 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, status, err := auth.PollBuilderIdAuth(req.SessionID)
+	req.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	if req.ProxyURL != "" {
+		if err := validateProxyURL(req.ProxyURL); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, status, err := auth.PollBuilderIdAuthWithProxy(req.SessionID, req.ProxyURL)
 	if err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3247,7 +3362,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 授权完成，获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
+	email, _, _ := auth.GetUserInfoWithProxy(accessToken, req.ProxyURL)
 
 	// 创建账号
 	account := config.Account{
@@ -3263,6 +3378,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
+		ProxyURL:     req.ProxyURL,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -3286,6 +3402,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BearerToken string `json:"bearerToken"`
 		Region      string `json:"region"`
+		ProxyURL    string `json:"proxyURL"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3297,6 +3414,14 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "bearerToken is required"})
 		return
+	}
+	req.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	if req.ProxyURL != "" {
+		if err := validateProxyURL(req.ProxyURL); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	// 支持批量导入，按行分割
@@ -3310,14 +3435,14 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		accessToken, refreshToken, clientID, clientSecret, expiresIn, err := auth.ImportFromSsoToken(token, req.Region)
+		accessToken, refreshToken, clientID, clientSecret, expiresIn, err := auth.ImportFromSsoTokenWithProxy(token, req.Region, req.ProxyURL)
 		if err != nil {
 			errors = append(errors, err.Error())
 			continue
 		}
 
 		// 获取用户信息
-		email, _, _ := auth.GetUserInfo(accessToken)
+		email, _, _ := auth.GetUserInfoWithProxy(accessToken, req.ProxyURL)
 
 		// 创建账号
 		account := config.Account{
@@ -3332,6 +3457,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 			Enabled:      true,
 			MachineId:    config.GenerateMachineId(),
+			ProxyURL:     req.ProxyURL,
 		}
 
 		if err := config.AddAccount(account); err != nil {
@@ -3372,6 +3498,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		AuthMethod   string `json:"authMethod"`
 		Provider     string `json:"provider"`
 		Region       string `json:"region"`
+		ProxyURL     string `json:"proxyURL"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3383,6 +3510,14 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "refreshToken is required"})
 		return
+	}
+	req.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	if req.ProxyURL != "" {
+		if err := validateProxyURL(req.ProxyURL); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	// 设置默认值
@@ -3419,6 +3554,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		ClientSecret: req.ClientSecret,
 		AuthMethod:   req.AuthMethod,
 		Region:       req.Region,
+		ProxyURL:     req.ProxyURL,
 	}
 	newAccessToken, newRefreshToken, newExpiresAt, newProfileArn, err := auth.RefreshToken(tempAccount)
 	if err != nil {
@@ -3440,7 +3576,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
+	email, _, _ := auth.GetUserInfoWithProxy(accessToken, req.ProxyURL)
 
 	// 创建账号
 	account := config.Account{
@@ -3457,6 +3593,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
 		ProfileArn:   newProfileArn,
+		ProxyURL:     req.ProxyURL,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -3476,27 +3613,41 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
+	kiroCreditsUsed, kiroCreditsLimit := kiroCreditTotals()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"accounts":        h.pool.Count(),
-		"available":       h.pool.AvailableCount(),
-		"totalRequests":   h.totalRequests,
-		"successRequests": h.successRequests,
-		"failedRequests":  h.failedRequests,
-		"totalTokens":     h.totalTokens,
-		"totalCredits":    h.totalCredits,
-		"uptime":          time.Now().Unix() - h.startTime,
+		"accounts":         h.pool.Count(),
+		"available":        h.pool.AvailableCount(),
+		"totalRequests":    h.totalRequests,
+		"successRequests":  h.successRequests,
+		"failedRequests":   h.failedRequests,
+		"totalTokens":      h.totalTokens,
+		"totalCredits":     h.totalCredits,
+		"localCredits":     h.totalCredits,
+		"kiroCreditsUsed":  kiroCreditsUsed,
+		"kiroCreditsLimit": kiroCreditsLimit,
+		"uptime":           time.Now().Unix() - h.startTime,
 	})
+}
+
+func kiroCreditTotals() (float64, float64) {
+	var used, limit float64
+	for _, account := range config.GetAccounts() {
+		used += account.UsageCurrent
+		limit += account.UsageLimit
+	}
+	return used, limit
 }
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":             config.GetApiKey(),
-		"requireApiKey":      config.IsApiKeyRequired(),
-		"port":               config.GetPort(),
-		"host":               config.GetHost(),
-		"allowOverUsage":     config.GetAllowOverUsage(),
-		"randomProbePerHour": config.GetRandomProbePerHour(),
-		"randomProbeModel":   config.GetRandomProbeModel(),
+		"apiKey":               config.GetApiKey(),
+		"requireApiKey":        config.IsApiKeyRequired(),
+		"port":                 config.GetPort(),
+		"host":                 config.GetHost(),
+		"allowOverUsage":       config.GetAllowOverUsage(),
+		"creditUsageThreshold": config.GetCreditUsageThreshold(),
+		"randomProbePerHour":   config.GetRandomProbePerHour(),
+		"randomProbeModel":     config.GetRandomProbeModel(),
 	})
 }
 
@@ -3545,12 +3696,13 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey             *string `json:"apiKey,omitempty"`
-		RequireApiKey      *bool   `json:"requireApiKey,omitempty"`
-		Password           string  `json:"password,omitempty"`
-		AllowOverUsage     *bool   `json:"allowOverUsage,omitempty"`
-		RandomProbePerHour *int    `json:"randomProbePerHour,omitempty"`
-		RandomProbeModel   *string `json:"randomProbeModel,omitempty"`
+		ApiKey               *string  `json:"apiKey,omitempty"`
+		RequireApiKey        *bool    `json:"requireApiKey,omitempty"`
+		Password             string   `json:"password,omitempty"`
+		AllowOverUsage       *bool    `json:"allowOverUsage,omitempty"`
+		CreditUsageThreshold *float64 `json:"creditUsageThreshold,omitempty"`
+		RandomProbePerHour   *int     `json:"randomProbePerHour,omitempty"`
+		RandomProbeModel     *string  `json:"randomProbeModel,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3571,6 +3723,14 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+	}
+	if req.CreditUsageThreshold != nil {
+		if err := config.UpdateCreditUsageThreshold(*req.CreditUsageThreshold); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		h.pool.Reload()
 	}
 	if req.RandomProbePerHour != nil {
 		if err := config.UpdateRandomProbePerHour(*req.RandomProbePerHour); err != nil {
@@ -3645,12 +3805,16 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	if req.Model == "" {
 		req.Model = "claude-sonnet-4"
 	}
-	req.Prompt = randomProbePrompt(nil)
+	req.Prompt = h.manualProbePrompt(account.ID, account.ProbeLogs)
+	effectiveProxyURL := ResolveAccountProxyURL(account)
+	testAccount := *account
+	testAccount.ProxyURL = effectiveProxyURL
 
-	success, content, errMsg, latencyMs := h.probeAccount(account, req.Model, req.Prompt)
+	success, content, errMsg, latencyMs := h.probeAccount(&testAccount, req.Model, req.Prompt)
 	if err := config.UpdateAccountProbeResult(account.ID, success, "manual", req.Model, req.Prompt, content, errMsg, latencyMs); err != nil {
 		logger.Warnf("[AccountTest] Failed to save result for %s: %v", account.Email, err)
 	}
+	proxyDisplay := proxyHostPort(effectiveProxyURL)
 	if !success {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3658,6 +3822,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 			"error":     errMsg,
 			"model":     req.Model,
 			"prompt":    req.Prompt,
+			"proxyURL":  proxyDisplay,
 			"latencyMs": latencyMs,
 		})
 		return
@@ -3668,6 +3833,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		"reply":     content,
 		"model":     req.Model,
 		"prompt":    req.Prompt,
+		"proxyURL":  proxyDisplay,
 		"latencyMs": latencyMs,
 	})
 }

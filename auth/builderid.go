@@ -30,6 +30,11 @@ var (
 
 // StartBuilderIdLogin 开始 Builder ID 登录
 func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
+	return StartBuilderIdLoginWithProxy(region, "")
+}
+
+// StartBuilderIdLoginWithProxy starts Builder ID login through an optional proxy.
+func StartBuilderIdLoginWithProxy(region, proxyURL string) (*BuilderIdSession, error) {
 	if region == "" {
 		region = "us-east-1"
 	}
@@ -57,7 +62,7 @@ func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
 	regReq, _ := http.NewRequest("POST", oidcBase+"/client/register", bytes.NewReader(regBody))
 	regReq.Header.Set("Content-Type", "application/json")
 
-	client := httpClient()
+	client := GetAuthClientForProxy(proxyURL)
 	regResp, err := client.Do(regReq)
 	if err != nil {
 		return nil, fmt.Errorf("register client failed: %v", err)
@@ -147,6 +152,11 @@ func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
 
 // PollBuilderIdAuth 轮询 Builder ID 授权状态
 func PollBuilderIdAuth(sessionID string) (accessToken, refreshToken, clientID, clientSecret, region string, expiresIn int, status string, err error) {
+	return PollBuilderIdAuthWithProxy(sessionID, "")
+}
+
+// PollBuilderIdAuthWithProxy polls Builder ID authorization through an optional proxy.
+func PollBuilderIdAuthWithProxy(sessionID, proxyURL string) (accessToken, refreshToken, clientID, clientSecret, region string, expiresIn int, status string, err error) {
 	builderIdMu.RLock()
 	session, exists := builderIdSessions[sessionID]
 	builderIdMu.RUnlock()
@@ -175,7 +185,7 @@ func PollBuilderIdAuth(sessionID string) (accessToken, refreshToken, clientID, c
 	tokenReq, _ := http.NewRequest("POST", oidcBase+"/token", bytes.NewReader(tokenBody))
 	tokenReq.Header.Set("Content-Type", "application/json")
 
-	client := httpClient()
+	client := GetAuthClientForProxy(proxyURL)
 	tokenResp, err := client.Do(tokenReq)
 	if err != nil {
 		return "", "", "", "", "", 0, "", fmt.Errorf("token request failed: %v", err)

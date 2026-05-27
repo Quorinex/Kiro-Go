@@ -9,6 +9,9 @@ import (
 )
 
 func TestOverageAccountsAreSkippedByDefault(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
 	p := &AccountPool{}
 	normal := config.Account{ID: "normal"}
 	overLimit := config.Account{ID: "over", UsageCurrent: 10, UsageLimit: 10}
@@ -27,6 +30,9 @@ func TestOverageAccountsAreSkippedByDefault(t *testing.T) {
 }
 
 func TestOverageAccountsCanBeSelectedWhenAllowed(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
 	p := &AccountPool{}
 	overLimit := config.Account{
 		ID:            "over",
@@ -44,6 +50,29 @@ func TestOverageAccountsCanBeSelectedWhenAllowed(t *testing.T) {
 	}
 	if acc.ID != "over" {
 		t.Fatalf("expected overage account, got %q", acc.ID)
+	}
+}
+
+func TestCreditUsageThresholdSkipsAccount(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := config.UpdateCreditUsageThreshold(80); err != nil {
+		t.Fatalf("update threshold: %v", err)
+	}
+	p := &AccountPool{}
+	normal := config.Account{ID: "normal", UsageCurrent: 79, UsageLimit: 100}
+	overThreshold := config.Account{ID: "threshold", UsageCurrent: 80, UsageLimit: 100}
+	p.accounts = []config.Account{normal, overThreshold}
+
+	for i := 0; i < 5; i++ {
+		acc := p.GetNext()
+		if acc == nil {
+			t.Fatalf("expected an account")
+		}
+		if acc.ID == "threshold" {
+			t.Fatalf("expected account at threshold to be skipped")
+		}
 	}
 }
 

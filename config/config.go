@@ -176,6 +176,10 @@ type Config struct {
 	// solely because usageCurrent >= usageLimit.
 	AllowOverUsage bool `json:"allowOverUsage,omitempty"`
 
+	// CreditUsageThreshold pauses normal routing for accounts whose Kiro credit
+	// usage reaches this absolute value. Zero keeps the original usage-limit behavior.
+	CreditUsageThreshold float64 `json:"creditUsageThreshold,omitempty"`
+
 	// RandomProbePerHour controls background lightweight random account probes.
 	RandomProbePerHour int `json:"randomProbePerHour,omitempty"`
 
@@ -249,7 +253,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.0.9"
+const Version = "1.11"
 
 var (
 	cfg               *Config
@@ -922,6 +926,27 @@ func UpdateAllowOverUsage(allow bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.AllowOverUsage = allow
+	return Save()
+}
+
+// GetCreditUsageThreshold returns the absolute Kiro credit usage threshold for routing.
+func GetCreditUsageThreshold() float64 {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.CreditUsageThreshold <= 0 {
+		return 0
+	}
+	return cfg.CreditUsageThreshold
+}
+
+// UpdateCreditUsageThreshold persists the absolute routing credit usage threshold.
+func UpdateCreditUsageThreshold(threshold float64) error {
+	if threshold < 0 {
+		threshold = 0
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.CreditUsageThreshold = threshold
 	return Save()
 }
 

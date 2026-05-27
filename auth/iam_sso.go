@@ -42,6 +42,11 @@ var scopes = []string{
 
 // StartIamSsoLogin 发起 IAM SSO 登录
 func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, expiresIn int, err error) {
+	return StartIamSsoLoginWithProxy(startUrl, region, "")
+}
+
+// StartIamSsoLoginWithProxy starts IAM SSO login through an optional proxy.
+func StartIamSsoLoginWithProxy(startUrl, region, proxyURL string) (sessionID, authorizeUrl string, expiresIn int, err error) {
 	if region == "" {
 		region = "us-east-1"
 	}
@@ -50,7 +55,8 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 	redirectUri := "http://127.0.0.1/oauth/callback"
 
 	// 1. 注册 OIDC 客户端
-	clientID, clientSecret, err := registerOIDCClient(oidcBase, startUrl, redirectUri)
+	client := GetAuthClientForProxy(proxyURL)
+	clientID, clientSecret, err := registerOIDCClient(oidcBase, startUrl, redirectUri, client)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("注册客户端失败: %w", err)
 	}
@@ -97,6 +103,11 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 
 // CompleteIamSsoLogin 完成 IAM SSO 登录
 func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshToken, clientID, clientSecret, region string, expiresIn int, err error) {
+	return CompleteIamSsoLoginWithProxy(sessionID, callbackUrl, "")
+}
+
+// CompleteIamSsoLoginWithProxy completes IAM SSO login through an optional proxy.
+func CompleteIamSsoLoginWithProxy(sessionID, callbackUrl, proxyURL string) (accessToken, refreshToken, clientID, clientSecret, region string, expiresIn int, err error) {
 	sessionsMu.RLock()
 	session, ok := sessions[sessionID]
 	sessionsMu.RUnlock()
@@ -136,6 +147,7 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 
 	// 用 code 换取 token
 	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", session.Region)
+	client := GetAuthClientForProxy(proxyURL)
 	accessToken, refreshToken, expiresIn, err = exchangeToken(
 		oidcBase,
 		session.ClientID,
@@ -143,6 +155,7 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 		code,
 		session.CodeVerifier,
 		session.RedirectUri,
+		client,
 	)
 	if err != nil {
 		return "", "", "", "", "", 0, err
@@ -156,7 +169,7 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 	return accessToken, refreshToken, session.ClientID, session.ClientSecret, session.Region, expiresIn, nil
 }
 
-func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clientSecret string, err error) {
+func registerOIDCClient(oidcBase, startUrl, redirectUri string, client *http.Client) (clientID, clientSecret string, err error) {
 	payload := map[string]interface{}{
 		"clientName":   "Kiro",
 		"clientType":   "public",
@@ -170,7 +183,7 @@ func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clien
 	req, _ := http.NewRequest("POST", oidcBase+"/client/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
 	}
@@ -193,7 +206,7 @@ func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clien
 	return result.ClientID, result.ClientSecret, nil
 }
 
-func exchangeToken(oidcBase, clientID, clientSecret, code, codeVerifier, redirectUri string) (accessToken, refreshToken string, expiresIn int, err error) {
+func exchangeToken(oidcBase, clientID, clientSecret, code, codeVerifier, redirectUri string, client *http.Client) (accessToken, refreshToken string, expiresIn int, err error) {
 	payload := map[string]string{
 		"clientId":     clientID,
 		"clientSecret": clientSecret,
@@ -207,7 +220,7 @@ func exchangeToken(oidcBase, clientID, clientSecret, code, codeVerifier, redirec
 	req, _ := http.NewRequest("POST", oidcBase+"/token", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", 0, err
 	}

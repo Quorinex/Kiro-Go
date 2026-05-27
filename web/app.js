@@ -33,6 +33,7 @@
   let customSelectUid = 0;
   let customSelectObserver = null;
   let customSelectRefreshQueued = false;
+  let proxyOptions = [];
 
   // DOM helpers
   const $ = (id) => document.getElementById(id);
@@ -654,12 +655,16 @@
   async function loadStats() {
     const res = await api('/status');
     const d = await res.json();
+    const kiroCreditsLimit = Number(d.kiroCreditsLimit || 0);
+    const kiroCreditsUsed = Number(d.kiroCreditsUsed || 0);
     $('statAccounts').textContent = d.accounts || 0;
     $('statRequests').textContent = d.totalRequests || 0;
     $('statSuccess').textContent = d.successRequests || 0;
     $('statFailed').textContent = d.failedRequests || 0;
     $('statTokens').textContent = formatNum(d.totalTokens || 0);
-    $('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
+    $('statCredits').textContent = kiroCreditsLimit > 0
+      ? kiroCreditsUsed.toFixed(1) + '/' + kiroCreditsLimit.toFixed(0)
+      : (d.totalCredits || 0).toFixed(1);
   }
   async function loadAccounts() {
     const res = await api('/accounts');
@@ -925,6 +930,11 @@
       const probeDetail = a.probeLastAt
         ? (a.probeLastSuccess ? (a.probeLastReply || '-') : (a.probeLastError || '-'))
         : t('accounts.probeNoResult');
+      const kiroCreditsLimit = Number(a.kiroCreditsLimit || a.usageLimit || 0);
+      const kiroCreditsUsed = Number(a.kiroCreditsUsed || a.usageCurrent || 0);
+      const creditsDisplay = kiroCreditsLimit > 0
+        ? kiroCreditsUsed.toFixed(1) + '/' + kiroCreditsLimit.toFixed(0)
+        : (a.totalCredits || 0).toFixed(1);
 
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
@@ -974,7 +984,7 @@
         '<div class="account-stats">' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
-        '<div class="account-stat"><div class="account-stat-value">' + (a.totalCredits || 0).toFixed(1) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.credits')) + '</div></div>' +
+        '<div class="account-stat"><div class="account-stat-value">' + escapeHtml(creditsDisplay) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.credits')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + escapeHtml(formatTokenExpiry(a.expiresAt)) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.expiry')) + '</div></div>' +
         '</div>' +
         '<div class="probe-row probe-' + probeClass + '">' +
@@ -1197,7 +1207,8 @@
       detailItem(t('detail.requestCount'), a.requestCount || 0) +
       detailItem(t('detail.errorCount'), a.errorCount || 0) +
       detailItem(t('detail.totalTokens'), formatNum(a.totalTokens || 0)) +
-      detailItem(t('detail.totalCredits'), (a.totalCredits || 0).toFixed(2)) +
+      detailItem(t('detail.totalCredits'), (a.usageCurrent != null ? a.usageCurrent.toFixed(2) : 0) + ' / ' + (a.usageLimit != null ? a.usageLimit.toFixed(0) : 0)) +
+      detailItem(t('detail.localCredits'), (a.localTotalCredits || a.totalCredits || 0).toFixed(2)) +
       '</div></div>' +
 
       '<div class="detail-section">' +
@@ -1401,17 +1412,18 @@
   async function runTestAccount(id, model) {
     if (testModalRunning) return;
     testModalRunning = true;
+    clearTestLog();
     const modalBtn = $('testRunBtn');
     if (modalBtn) modalBtn.setAttribute('aria-busy', 'true');
     const acc = accountsData.find(a => a.id === id);
     const email = acc ? getDisplayEmail(acc.email, acc.id) : id;
-    const proxy = acc ? (acc.proxyURL || t('accounts.testLog.globalProxy')) : '?';
-    addTestLog(t('accounts.testLog.start', email, model, proxy), 'info');
     try {
       const startTime = Date.now();
       const res = await api('/accounts/' + id + '/test', { method: 'POST', body: JSON.stringify({ model }) });
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const d = await res.json();
+      const proxy = d.proxyURL || (acc && acc.proxyURL) || t('common.none');
+      addTestLog(t('accounts.testLog.start', email, d.model || model, proxy), 'info');
       if (d.prompt) addTestLog(t('accounts.testLog.prompt', d.prompt), 'info');
       if (d.success) {
         addTestLog(t('accounts.testLog.success', email, elapsed, d.reply), 'ok');
@@ -1433,6 +1445,7 @@
     $('requireApiKey').checked = d.requireApiKey;
     $('apiKeyInput').value = d.apiKey || '';
     $('allowOverUsage').checked = d.allowOverUsage || false;
+    $('creditUsageThreshold').value = d.creditUsageThreshold || 0;
     $('randomProbePerHour').value = d.randomProbePerHour || 0;
     $('randomProbeModel').value = d.randomProbeModel || 'claude-sonnet-4';
     await loadProbeModelOptions($('randomProbeModel').value);
@@ -1479,6 +1492,7 @@
     const res = await api('/proxy');
     const d = await res.json();
     const urls = Array.isArray(d.proxyURLs) ? d.proxyURLs : (d.proxyURL ? [d.proxyURL] : []);
+    proxyOptions = urls;
     $('proxyURLs').value = urls.join('\n');
     $('proxyProbeEnabled').checked = !!d.proxyProbeEnabled;
     $('proxyProbeCron').value = d.proxyProbeCron || '';
@@ -1505,6 +1519,7 @@
     });
     const d = await res.json();
     if (d.success) {
+      proxyOptions = urls;
       toast(t('settings.proxySaved'), 'success');
       loadProxyProbeLogs();
     }
@@ -1558,7 +1573,12 @@
   }
   async function saveOverUsageConfig() {
     const allowOverUsage = $('allowOverUsage').checked;
-    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage }) });
+    const thresholdInput = $('creditUsageThreshold');
+    const creditUsageThreshold = Math.max(0, parseFloat(thresholdInput.value) || 0);
+    thresholdInput.value = creditUsageThreshold;
+    const res = await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage, creditUsageThreshold }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
     toast(t('settings.overUsageSaved'), 'success');
   }
   async function saveProbeSettings() {
@@ -1703,6 +1723,31 @@
       '<span class="method-arrow" aria-hidden="true"><i class="fa-solid fa-chevron-right"></i></span>' +
       '</button>';
   }
+  function proxyLabel(proxyURL) {
+    try {
+      const u = new URL(proxyURL);
+      return u.hostname + (u.port ? ':' + u.port : '');
+    } catch (e) {
+      return proxyURL;
+    }
+  }
+  function addProxySelectHtml() {
+    const options = proxyOptions.map(url =>
+      '<option value="' + escapeAttr(url) + '">' + escapeHtml(proxyLabel(url)) + '</option>'
+    ).join('');
+    return '<div class="form-group">' +
+      '<label>' + escapeHtml(t('modal.proxySelect')) + '</label>' +
+      '<select id="addProxyURL">' +
+      '<option value="">' + escapeHtml(t('modal.proxyGlobal')) + '</option>' +
+      options +
+      '</select>' +
+      '<small>' + escapeHtml(t('modal.proxyHint')) + '</small>' +
+      '</div>';
+  }
+  function getAddProxyURL() {
+    const el = $('addProxyURL');
+    return el ? el.value.trim() : '';
+  }
   function showModal(type) {
     const modal = $('addModal');
     const title = $('modalTitle');
@@ -1742,6 +1787,7 @@
       '<p class="help-block">' + escapeHtml(t('modal.builderIdDesc')) + '</p>' +
       '<div id="builderIdStep1">' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="builderIdRegion" value="us-east-1" /></div>' +
+      addProxySelectHtml() +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="startBuilderIdBtn" type="button">' + escapeHtml(t('builderid.startLogin')) + '</button>' +
@@ -1767,6 +1813,7 @@
       '<p class="help-block">' + escapeHtml(t('modal.iamDesc')) + '</p>' +
       '<div class="form-group"><label>' + escapeHtml(t('iam.startUrl')) + '</label><input type="text" id="iamStartUrl" placeholder="https://xxx.awsapps.com/start" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="iamRegion" value="us-east-1" /></div>' +
+      addProxySelectHtml() +
       '<div id="iamStep2" class="hidden">' +
       '<div class="form-group"><label>' + escapeHtml(t('iam.loginUrl')) + '</label>' +
       '<div class="endpoint"><span id="iamAuthUrl" class="font-mono text-xs"></span></div>' +
@@ -1798,6 +1845,7 @@
       '<div class="form-group"><label>' + escapeHtml(t('sso.tokenLabel')) + ' <small>' + escapeHtml(t('sso.tokenHint')) + '</small></label>' +
       '<textarea id="ssoToken" placeholder="' + escapeAttr(t('sso.tokenPlaceholder')) + '"></textarea></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="ssoRegion" value="us-east-1" /></div>' +
+      addProxySelectHtml() +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="importSsoBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
@@ -1822,6 +1870,7 @@
       '<option value="Github">' + escapeHtml(t('local.providerGithub')) + '</option>' +
       '</select>' +
       '</div>' +
+      addProxySelectHtml() +
       '<div class="form-group">' +
       '<label>' + escapeHtml(t('local.tokenFile')) + ' <small>' + escapeHtml(t('local.tokenRequired')) + '</small></label>' +
       '<div class="input-row">' +
@@ -1857,6 +1906,7 @@
       '<div class="form-group"><label>' + escapeHtml(t('credentials.label')) + '</label>' +
       '<textarea id="credJson" class="font-mono" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderID"}]\'></textarea>' +
       '</div>' +
+      addProxySelectHtml() +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="importCredBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
@@ -1880,6 +1930,7 @@
       '<option value="Github">' + escapeHtml(t('cookie.github')) + '</option>' +
       '</select>' +
       '</div>' +
+      addProxySelectHtml() +
       '<div class="form-group"><label>' + escapeHtml(t('cookie.refreshToken')) + '</label>' +
       '<textarea id="cookieRefreshToken" class="font-mono" placeholder="' + escapeAttr(t('cookie.refreshTokenPlaceholder')) + '"></textarea>' +
       '</div>' +
@@ -1904,6 +1955,7 @@
   // Import handlers
   async function importLocalKiro() {
     const provider = $('localProvider').value;
+    const proxyURL = getAddProxyURL();
     const tokenJson = $('localTokenJson').value.trim();
     const clientJson = $('localClientJson').value.trim();
     const isSocial = provider === 'Google' || provider === 'Github';
@@ -1922,7 +1974,7 @@
       accessToken: tokenData.accessToken || '',
       clientId: clientData?.clientId || '',
       clientSecret: clientData?.clientSecret || '',
-      authMethod, provider
+      authMethod, provider, proxyURL
     };
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
     const d = await res.json();
@@ -1935,6 +1987,7 @@
   async function importCredentials() {
     try {
       const json = JSON.parse($('credJson').value.trim());
+      const proxyURL = getAddProxyURL();
       let items;
       if (json.accounts && Array.isArray(json.accounts)) {
         items = json.accounts.map(a => {
@@ -1967,7 +2020,8 @@
           clientId: item.clientId || '',
           clientSecret: item.clientSecret || '',
           authMethod, provider,
-          region: item.region || 'us-east-1'
+          region: item.region || 'us-east-1',
+          proxyURL: item.proxyURL || proxyURL
         };
         try {
           const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
@@ -1989,7 +2043,7 @@
     const refreshToken = $('cookieRefreshToken').value.trim();
     if (!refreshToken) return toastWarning(t('cookie.refreshTokenMissing'));
     const provider = $('cookieProvider').value;
-    const payload = { refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider };
+    const payload = { refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider, proxyURL: getAddProxyURL() };
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
     const d = await res.json();
     if (d.success) {
@@ -2002,7 +2056,8 @@
     const res = await api('/auth/sso-token', {
       method: 'POST', body: JSON.stringify({
         bearerToken: $('ssoToken').value,
-        region: $('ssoRegion').value
+        region: $('ssoRegion').value,
+        proxyURL: getAddProxyURL()
       })
     });
     const d = await res.json();
@@ -2018,7 +2073,8 @@
   }
   async function startBuilderIdLogin() {
     const region = $('builderIdRegion').value || 'us-east-1';
-    const res = await api('/auth/builderid/start', { method: 'POST', body: JSON.stringify({ region }) });
+    const proxyURL = getAddProxyURL();
+    const res = await api('/auth/builderid/start', { method: 'POST', body: JSON.stringify({ region, proxyURL }) });
     const d = await res.json();
     if (d.sessionId) {
       builderIdSession = d.sessionId;
@@ -2032,12 +2088,12 @@
         toast(t('common.copied'), 'primary');
       });
       $('builderIdCancelBtn').addEventListener('click', cancelBuilderIdLogin);
-      pollBuilderIdAuth(d.interval || 5);
+      pollBuilderIdAuth(d.interval || 5, proxyURL);
     } else toastError(t('common.failed') + ': ' + (d.error || ''));
   }
-  function pollBuilderIdAuth(interval) {
+  function pollBuilderIdAuth(interval, proxyURL) {
     builderIdPollTimer = setTimeout(async () => {
-      const res = await api('/auth/builderid/poll', { method: 'POST', body: JSON.stringify({ sessionId: builderIdSession }) });
+      const res = await api('/auth/builderid/poll', { method: 'POST', body: JSON.stringify({ sessionId: builderIdSession, proxyURL }) });
       const d = await res.json();
       if (d.completed) {
         closeModal(); loadAccounts(); loadStats();
@@ -2045,7 +2101,7 @@
         autoRefreshNewAccount(d.account?.id);
       } else if (d.success && !d.completed) {
         $('builderIdStatus').textContent = t('builderid.waiting');
-        pollBuilderIdAuth(d.interval || interval);
+        pollBuilderIdAuth(d.interval || interval, proxyURL);
       } else {
         toastError(t('common.failed') + ': ' + (d.error || ''));
         cancelBuilderIdLogin();
@@ -2061,7 +2117,7 @@
     if (iamSession) {
       const res = await api('/auth/iam-sso/complete', {
         method: 'POST', body: JSON.stringify({
-          sessionId: iamSession, callbackUrl: $('iamCallback').value
+          sessionId: iamSession, callbackUrl: $('iamCallback').value, proxyURL: getAddProxyURL()
         })
       });
       const d = await res.json();
@@ -2073,7 +2129,7 @@
     } else {
       const res = await api('/auth/iam-sso/start', {
         method: 'POST', body: JSON.stringify({
-          startUrl: $('iamStartUrl').value, region: $('iamRegion').value
+          startUrl: $('iamStartUrl').value, region: $('iamRegion').value, proxyURL: getAddProxyURL()
         })
       });
       const d = await res.json();

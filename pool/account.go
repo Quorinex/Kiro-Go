@@ -48,11 +48,12 @@ func (p *AccountPool) Reload() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	enabled := config.GetEnabledAccounts()
+	allowOverUsage := config.GetAllowOverUsage()
 	var weighted []config.Account
 	for _, a := range enabled {
 		w := effectiveWeight(a.Weight) * overageFrequencyScale
 		if isOverUsageLimit(a) {
-			if !a.AllowOverage {
+			if !a.AllowOverage && !allowOverUsage {
 				continue
 			}
 			w = effectiveOverageWeight(a.OverageWeight)
@@ -477,7 +478,14 @@ func (p *AccountPool) GetAllAccounts() []config.Account {
 }
 
 func isOverUsageLimit(acc config.Account) bool {
-	return acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit
+	if acc.UsageLimit <= 0 {
+		threshold := config.GetCreditUsageThreshold()
+		return threshold > 0 && acc.UsageCurrent >= threshold
+	}
+	if threshold := config.GetCreditUsageThreshold(); threshold > 0 {
+		return acc.UsageCurrent >= threshold
+	}
+	return acc.UsageCurrent >= acc.UsageLimit
 }
 
 func effectiveWeight(weight int) int {
