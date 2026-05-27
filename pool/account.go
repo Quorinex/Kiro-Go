@@ -478,6 +478,9 @@ func (p *AccountPool) GetAllAccounts() []config.Account {
 }
 
 func isOverUsageLimit(acc config.Account) bool {
+	if acc.MainQuotaThreshold > 0 {
+		return acc.UsageCurrent >= acc.MainQuotaThreshold
+	}
 	if acc.UsageLimit <= 0 {
 		threshold := config.GetCreditUsageThreshold()
 		return threshold > 0 && acc.UsageCurrent >= threshold

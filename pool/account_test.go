@@ -76,6 +76,39 @@ func TestCreditUsageThresholdSkipsAccount(t *testing.T) {
 	}
 }
 
+func TestAccountMainQuotaThresholdOverridesGlobalThreshold(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := config.UpdateCreditUsageThreshold(80); err != nil {
+		t.Fatalf("update threshold: %v", err)
+	}
+
+	p := &AccountPool{}
+	accountLevelLimited := config.Account{
+		ID:                 "acct-threshold",
+		UsageCurrent:       60,
+		UsageLimit:         100,
+		MainQuotaThreshold: 50,
+	}
+	globalOnly := config.Account{
+		ID:           "global-ok",
+		UsageCurrent: 60,
+		UsageLimit:   100,
+	}
+	p.accounts = []config.Account{accountLevelLimited, globalOnly}
+
+	for i := 0; i < 5; i++ {
+		acc := p.GetNext()
+		if acc == nil {
+			t.Fatalf("expected an account")
+		}
+		if acc.ID == accountLevelLimited.ID {
+			t.Fatalf("expected account-level threshold account to be skipped")
+		}
+	}
+}
+
 func TestOverageWeightIsLowerThanNormalWeight(t *testing.T) {
 	normalWeight := effectiveWeight(1) * overageFrequencyScale
 	overageWeight := effectiveOverageWeight(1)

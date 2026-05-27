@@ -2917,6 +2917,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"machineId":          a.MachineId,
 			"weight":             a.Weight,
 			"allowOverage":       a.AllowOverage,
+			"mainQuotaThreshold": a.MainQuotaThreshold,
 			"overageWeight":      a.OverageWeight,
 			"proxyURL":           a.ProxyURL,
 			"subscriptionType":   a.SubscriptionType,
@@ -3046,6 +3047,12 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["allowOverage"].(bool); ok {
 		existing.AllowOverage = v
+	}
+	if v, ok := updates["mainQuotaThreshold"].(float64); ok {
+		if v < 0 {
+			v = 0
+		}
+		existing.MainQuotaThreshold = v
 	}
 	if v, ok := updates["overageWeight"].(float64); ok {
 		existing.OverageWeight = clampInt(int(v), 1, 10)
@@ -3973,45 +3980,46 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 
 	// 返回完整账号信息（包含敏感字段）
 	result := map[string]interface{}{
-		"id":                account.ID,
-		"email":             account.Email,
-		"userId":            account.UserId,
-		"nickname":          account.Nickname,
-		"accessToken":       account.AccessToken,
-		"refreshToken":      account.RefreshToken,
-		"clientId":          account.ClientID,
-		"clientSecret":      account.ClientSecret,
-		"authMethod":        account.AuthMethod,
-		"provider":          account.Provider,
-		"region":            account.Region,
-		"expiresAt":         account.ExpiresAt,
-		"machineId":         account.MachineId,
-		"weight":            account.Weight,
-		"allowOverage":      account.AllowOverage,
-		"overageWeight":     account.OverageWeight,
-		"proxyURL":          account.ProxyURL,
-		"enabled":           account.Enabled,
-		"banStatus":         account.BanStatus,
-		"banReason":         account.BanReason,
-		"banTime":           account.BanTime,
-		"subscriptionType":  account.SubscriptionType,
-		"subscriptionTitle": account.SubscriptionTitle,
-		"daysRemaining":     account.DaysRemaining,
-		"usageCurrent":      account.UsageCurrent,
-		"usageLimit":        account.UsageLimit,
-		"usagePercent":      account.UsagePercent,
-		"nextResetDate":     account.NextResetDate,
-		"lastRefresh":       account.LastRefresh,
-		"trialUsageCurrent": account.TrialUsageCurrent,
-		"trialUsageLimit":   account.TrialUsageLimit,
-		"trialUsagePercent": account.TrialUsagePercent,
-		"trialStatus":       account.TrialStatus,
-		"trialExpiresAt":    account.TrialExpiresAt,
-		"requestCount":      stats.RequestCount,
-		"errorCount":        stats.ErrorCount,
-		"totalTokens":       stats.TotalTokens,
-		"totalCredits":      stats.TotalCredits,
-		"lastUsed":          stats.LastUsed,
+		"id":                 account.ID,
+		"email":              account.Email,
+		"userId":             account.UserId,
+		"nickname":           account.Nickname,
+		"accessToken":        account.AccessToken,
+		"refreshToken":       account.RefreshToken,
+		"clientId":           account.ClientID,
+		"clientSecret":       account.ClientSecret,
+		"authMethod":         account.AuthMethod,
+		"provider":           account.Provider,
+		"region":             account.Region,
+		"expiresAt":          account.ExpiresAt,
+		"machineId":          account.MachineId,
+		"weight":             account.Weight,
+		"allowOverage":       account.AllowOverage,
+		"mainQuotaThreshold": account.MainQuotaThreshold,
+		"overageWeight":      account.OverageWeight,
+		"proxyURL":           account.ProxyURL,
+		"enabled":            account.Enabled,
+		"banStatus":          account.BanStatus,
+		"banReason":          account.BanReason,
+		"banTime":            account.BanTime,
+		"subscriptionType":   account.SubscriptionType,
+		"subscriptionTitle":  account.SubscriptionTitle,
+		"daysRemaining":      account.DaysRemaining,
+		"usageCurrent":       account.UsageCurrent,
+		"usageLimit":         account.UsageLimit,
+		"usagePercent":       account.UsagePercent,
+		"nextResetDate":      account.NextResetDate,
+		"lastRefresh":        account.LastRefresh,
+		"trialUsageCurrent":  account.TrialUsageCurrent,
+		"trialUsageLimit":    account.TrialUsageLimit,
+		"trialUsagePercent":  account.TrialUsagePercent,
+		"trialStatus":        account.TrialStatus,
+		"trialExpiresAt":     account.TrialExpiresAt,
+		"requestCount":       stats.RequestCount,
+		"errorCount":         stats.ErrorCount,
+		"totalTokens":        stats.TotalTokens,
+		"totalCredits":       stats.TotalCredits,
+		"lastUsed":           stats.LastUsed,
 	}
 
 	json.NewEncoder(w).Encode(result)

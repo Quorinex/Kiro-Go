@@ -251,6 +251,8 @@
   "detail.weightHint": "0-1 = normal, 2+ = higher priority",
   "detail.overage": "Overage Settings",
   "detail.allowOverage": "Continue calling after quota is exhausted",
+  "detail.mainQuotaThreshold": "Main Quota Threshold",
+  "detail.mainQuotaThresholdHint": "Set an account-specific main quota pause threshold. Once reached, this account stops serving traffic. 0 disables the override.",
   "detail.overageHint": "Call frequency weight when over quota (1–10); higher = more frequent",
   "detail.overageWeight": "Overage Weight",
   "detail.proxyURL": "Account Proxy",

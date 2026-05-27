@@ -251,6 +251,8 @@
   "detail.weightHint": "0-1=普通, 2+=高优先级",
   "detail.overage": "超额调用设置",
   "detail.allowOverage": "配额耗尽后继续调用",
+  "detail.mainQuotaThreshold": "主配额阈值",
+  "detail.mainQuotaThresholdHint": "设置该账号主配额的独立暂停阈值；达到后暂停该账号提供服务，0 表示不单独限制。",
   "detail.overageHint": "超额后调用频率权重（1~10），值越大频率越高",
   "detail.overageWeight": "超额调用权重",
   "detail.proxyURL": "独立代理",

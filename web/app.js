@@ -1187,6 +1187,11 @@
       '<input type="number" id="overageWeightInput" value="' + (a.overageWeight || 1) + '" min="1" max="10" />' +
       '<small>' + escapeHtml(t('detail.overageHint')) + '</small>' +
       '</div>' +
+      '<div class="form-group">' +
+      '<label>' + escapeHtml(t('detail.mainQuotaThreshold')) + '</label>' +
+      '<input type="number" id="mainQuotaThresholdInput" value="' + (a.mainQuotaThreshold || 0) + '" min="0" step="0.1" />' +
+      '<small>' + escapeHtml(t('detail.mainQuotaThresholdHint')) + '</small>' +
+      '</div>' +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveOverage" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div>' +
 
@@ -1294,7 +1299,10 @@
     let overageWeight = parseInt($('overageWeightInput').value, 10) || 1;
     overageWeight = Math.max(1, Math.min(10, overageWeight));
     $('overageWeightInput').value = overageWeight;
-    await putAccount(id, { allowOverage, overageWeight }, t('detail.saved'));
+    const thresholdInput = $('mainQuotaThresholdInput');
+    const mainQuotaThreshold = Math.max(0, parseFloat(thresholdInput.value) || 0);
+    thresholdInput.value = mainQuotaThreshold;
+    await putAccount(id, { allowOverage, mainQuotaThreshold, overageWeight }, t('detail.saved'));
   }
   async function saveProxyURL(id) {
     const select = $('proxyURLSelect');
