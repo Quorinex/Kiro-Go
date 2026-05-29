@@ -48,9 +48,10 @@ func (p *AccountPool) Reload() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	enabled := config.GetEnabledAccounts()
+	allowOverUsage := config.GetAllowOverUsage()
 	var weighted []config.Account
 	for _, a := range enabled {
-		if isOverUsageLimit(a) && !isUpstreamOverageEnabled(a) {
+		if isOverUsageLimit(a) && !isUpstreamOverageEnabled(a) && !allowOverUsage {
 			continue
 		}
 		w := effectiveWeight(a.Weight)
