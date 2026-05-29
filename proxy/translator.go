@@ -947,6 +947,61 @@ type OpenAITool struct {
 	} `json:"function"`
 }
 
+// UnmarshalJSON 兼容两种工具格式：
+//   - Chat Completions（嵌套）：{"type":"function","function":{"name","description","parameters"}}
+//   - Responses API（扁平）：    {"type":"function","name","description","parameters"}
+//
+// codex-tui 等 Responses API 客户端发送扁平结构，若仅按嵌套结构解析会导致
+// name/description/parameters 全部为空，进而被上游判定为 Improperly formed request。
+func (t *OpenAITool) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Type        string          `json:"type"`
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+		Function    *struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	t.Type = raw.Type
+
+	// 优先使用嵌套 function 字段（Chat Completions），缺失时回退到扁平字段（Responses API）。
+	name, desc, params := raw.Name, raw.Description, raw.Parameters
+	if raw.Function != nil {
+		if raw.Function.Name != "" {
+			name = raw.Function.Name
+		}
+		if raw.Function.Description != "" {
+			desc = raw.Function.Description
+		}
+		if len(raw.Function.Parameters) > 0 {
+			params = raw.Function.Parameters
+		}
+	}
+
+	// 扁平结构常省略 type，但带有 name 时即为 function 工具，补齐以免被跳过。
+	if t.Type == "" && name != "" {
+		t.Type = "function"
+	}
+
+	t.Function.Name = name
+	t.Function.Description = desc
+	if len(params) > 0 {
+		var parsed interface{}
+		if err := json.Unmarshal(params, &parsed); err != nil {
+			return err
+		}
+		t.Function.Parameters = parsed
+	}
+	return nil
+}
+
 type OpenAIResponse struct {
 	ID      string         `json:"id"`
 	Object  string         `json:"object"`
@@ -1482,7 +1537,12 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Type != "function" {
+		// 接受函数工具：显式 type=function，或扁平结构（无 type 但带 name）。
+		if tool.Type != "" && tool.Type != "function" {
+			continue
+		}
+		// 名称为空的工具会被上游判定为 Improperly formed request，直接跳过而非污染整个请求。
+		if strings.TrimSpace(tool.Function.Name) == "" {
 			continue
 		}
 		desc := tool.Function.Description

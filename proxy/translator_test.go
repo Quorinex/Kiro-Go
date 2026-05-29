@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -337,6 +338,74 @@ func TestEnsureObjectSchemaRemovesKiroRejectedFieldsRecursively(t *testing.T) {
 	}
 	if _, stillPresent := input["additionalProperties"]; !stillPresent {
 		t.Fatalf("expected sanitizer not to mutate caller schema")
+	}
+}
+
+func TestOpenAIToolUnmarshalSupportsFlatResponsesShape(t *testing.T) {
+	// Responses API（codex-tui 等）发送扁平工具结构，name/description/parameters 与 type 同级。
+	flat := []byte(`{"type":"function","name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}`)
+	var tool OpenAITool
+	if err := json.Unmarshal(flat, &tool); err != nil {
+		t.Fatalf("unmarshal flat tool: %v", err)
+	}
+	if tool.Function.Name != "read_file" {
+		t.Fatalf("expected flat tool name to be parsed, got %q", tool.Function.Name)
+	}
+	if tool.Function.Description != "Read a file" {
+		t.Fatalf("expected flat tool description, got %q", tool.Function.Description)
+	}
+	if tool.Function.Parameters == nil {
+		t.Fatalf("expected flat tool parameters to be parsed")
+	}
+}
+
+func TestOpenAIToolUnmarshalSupportsNestedChatCompletionsShape(t *testing.T) {
+	// Chat Completions 发送嵌套结构，必须继续兼容。
+	nested := []byte(`{"type":"function","function":{"name":"get_weather","description":"Weather","parameters":{"type":"object"}}}`)
+	var tool OpenAITool
+	if err := json.Unmarshal(nested, &tool); err != nil {
+		t.Fatalf("unmarshal nested tool: %v", err)
+	}
+	if tool.Function.Name != "get_weather" {
+		t.Fatalf("expected nested tool name to be parsed, got %q", tool.Function.Name)
+	}
+	if tool.Function.Description != "Weather" {
+		t.Fatalf("expected nested tool description, got %q", tool.Function.Description)
+	}
+}
+
+func TestConvertOpenAIToolsFromFlatResponsesPayloadHasNames(t *testing.T) {
+	// 回归测试：扁平工具经反序列化与转换后，name 不能为空，否则上游会回 Improperly formed request。
+	raw := []byte(`[{"type":"function","name":"shell","description":"Run shell","parameters":{"type":"object"}},{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]`)
+	var tools []OpenAITool
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+	converted := convertOpenAITools(tools)
+	if len(converted) != 2 {
+		t.Fatalf("expected 2 converted tools, got %d", len(converted))
+	}
+	for i, w := range converted {
+		if strings.TrimSpace(w.ToolSpecification.Name) == "" {
+			t.Fatalf("converted tool %d has empty name: %#v", i, w.ToolSpecification)
+		}
+	}
+}
+
+func TestConvertOpenAIToolsSkipsEmptyName(t *testing.T) {
+	// 名称为空的工具必须被跳过，避免污染整个上游请求。
+	var named OpenAITool
+	named.Type = "function"
+	named.Function.Name = "ok_tool"
+	var empty OpenAITool
+	empty.Type = "function"
+
+	converted := convertOpenAITools([]OpenAITool{empty, named})
+	if len(converted) != 1 {
+		t.Fatalf("expected empty-name tool to be skipped, got %d tools", len(converted))
+	}
+	if converted[0].ToolSpecification.Name != "ok_tool" {
+		t.Fatalf("expected only the named tool to survive, got %q", converted[0].ToolSpecification.Name)
 	}
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": "1.1.1",
-  "changelog": "✨ Added and fixed several improvements across the project.\n✨ 新增并修复了一些内容，包含若干功能改进与问题修复。",
+  "version": "1.1.2",
+  "changelog": "🐛 Fixed /v1/responses tools being sent upstream with empty names, which caused AmazonQ to reject requests with \"Improperly formed request\".\n🐛 修复 /v1/responses 工具因扁平结构未被正确解析导致 name 为空、被上游判定为 Improperly formed request 的问题。",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }
