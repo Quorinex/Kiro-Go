@@ -340,6 +340,94 @@ func TestEnsureObjectSchemaRemovesKiroRejectedFieldsRecursively(t *testing.T) {
 	}
 }
 
+func TestNormalizeHistoryAlternationMergesConsecutiveSameRole(t *testing.T) {
+	history := []KiroHistoryMessage{
+		{UserInputMessage: &KiroUserInputMessage{Content: "u1"}},
+		{UserInputMessage: &KiroUserInputMessage{Content: "u2"}},
+		{UserInputMessage: &KiroUserInputMessage{Content: "u3"}},
+		{AssistantResponseMessage: &KiroAssistantResponseMessage{Content: "a1"}},
+		{AssistantResponseMessage: &KiroAssistantResponseMessage{Content: "", ToolUses: []KiroToolUse{{ToolUseID: "t1", Name: "shell"}}}},
+		{AssistantResponseMessage: &KiroAssistantResponseMessage{Content: "", ToolUses: []KiroToolUse{{ToolUseID: "t2", Name: "apply_patch"}}}},
+		{UserInputMessage: &KiroUserInputMessage{Content: "u4"}},
+	}
+
+	got := normalizeHistoryAlternation(history)
+
+	// 期望折叠为 U, A, U 三条严格交替。
+	if len(got) != 3 {
+		t.Fatalf("expected 3 alternating entries, got %d", len(got))
+	}
+	if got[0].UserInputMessage == nil || got[1].AssistantResponseMessage == nil || got[2].UserInputMessage == nil {
+		t.Fatalf("expected U/A/U pattern, got %#v", got)
+	}
+	if got[0].UserInputMessage.Content != "u1\nu2\nu3" {
+		t.Fatalf("expected merged user content, got %q", got[0].UserInputMessage.Content)
+	}
+	if got[1].AssistantResponseMessage.Content != "a1" {
+		t.Fatalf("expected assistant content preserved, got %q", got[1].AssistantResponseMessage.Content)
+	}
+	if len(got[1].AssistantResponseMessage.ToolUses) != 2 {
+		t.Fatalf("expected merged tool uses, got %d", len(got[1].AssistantResponseMessage.ToolUses))
+	}
+	if got[2].UserInputMessage.Content != "u4" {
+		t.Fatalf("expected trailing user content, got %q", got[2].UserInputMessage.Content)
+	}
+}
+
+func TestNormalizeHistoryAlternationMergesUserToolResults(t *testing.T) {
+	history := []KiroHistoryMessage{
+		{UserInputMessage: &KiroUserInputMessage{
+			Content:                 "first",
+			UserInputMessageContext: &UserInputMessageContext{ToolResults: []KiroToolResult{{ToolUseID: "a"}}},
+		}},
+		{UserInputMessage: &KiroUserInputMessage{
+			Content:                 "second",
+			UserInputMessageContext: &UserInputMessageContext{ToolResults: []KiroToolResult{{ToolUseID: "b"}}},
+		}},
+	}
+
+	got := normalizeHistoryAlternation(history)
+	if len(got) != 1 {
+		t.Fatalf("expected single merged user entry, got %d", len(got))
+	}
+	ctx := got[0].UserInputMessage.UserInputMessageContext
+	if ctx == nil || len(ctx.ToolResults) != 2 {
+		t.Fatalf("expected merged tool results, got %#v", ctx)
+	}
+}
+
+func TestOpenAIToKiroProducesStrictlyAlternatingHistory(t *testing.T) {
+	// 模拟 Codex agent 场景：文本说明 + 并行 tool_call 拆成多条 assistant，
+	// 中间夹杂多条 tool 结果，最终历史必须严格交替。
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "do work"},
+			{Role: "assistant", Content: "let me check"},
+			{Role: "assistant", Content: "", ToolCalls: []ToolCall{{ID: "c1", Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "shell", Arguments: "{}"}}}},
+			{Role: "tool", ToolCallID: "c1", Content: "out1"},
+			{Role: "user", Content: "continue"},
+			{Role: "assistant", Content: "almost done"},
+			{Role: "user", Content: "now"},
+		},
+	}
+
+	payload := OpenAIToKiro(req, false)
+	hist := payload.ConversationState.History
+
+	for i := 1; i < len(hist); i++ {
+		prevUser := hist[i-1].UserInputMessage != nil
+		curUser := hist[i].UserInputMessage != nil
+		if prevUser == curUser {
+			t.Fatalf("history not strictly alternating at index %d", i)
+		}
+	}
+}
+
 func TestConvertOpenAIToolsSanitizesSchemaAndDescription(t *testing.T) {
 	var tool OpenAITool
 	tool.Type = "function"

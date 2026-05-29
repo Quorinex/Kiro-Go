@@ -265,6 +265,9 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// 转换工具
 	kiroTools, toolNameMap := convertClaudeTools(req.Tools)
 
+	// 强制历史严格交替，避免连续同角色被上游判定为 Improperly formed request。
+	history = normalizeHistoryAlternation(history)
+
 	// 构建 payload
 	payload := &KiroPayload{}
 	payload.ToolNameMap = toolNameMap
@@ -1107,6 +1110,9 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	// 转换工具
 	kiroTools := convertOpenAITools(req.Tools)
 
+	// 强制历史严格交替，避免连续同角色被上游判定为 Improperly formed request。
+	history = normalizeHistoryAlternation(history)
+
 	// 构建 payload
 	payload := &KiroPayload{}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
@@ -1266,6 +1272,87 @@ func trimLeadingAssistantHistory(history []KiroHistoryMessage) []KiroHistoryMess
 		return nil
 	}
 	return history[idx:]
+}
+
+// normalizeHistoryAlternation 强制让历史消息严格按 user/assistant 交替。
+//
+// AmazonQ/CodeWhisperer 要求 conversationState.history 严格交替（user→assistant→…）。
+// 在 Codex 等 agent 场景里，一轮回复常被拆成「文本说明 + 多个并行 tool_use」多条 assistant 消息，
+// 紧接着又是多条 tool 结果 / 排队的 user 消息，导致出现连续同角色条目，
+// 被上游判定为 "Improperly formed request" (HTTP 400)。
+//
+// 这里把连续同角色的条目合并为一条（assistant 合并 content 与 toolUses，
+// user 合并 content、images 与 toolResults），从而恢复严格交替且不丢失信息。
+func normalizeHistoryAlternation(history []KiroHistoryMessage) []KiroHistoryMessage {
+	if len(history) <= 1 {
+		return history
+	}
+
+	merged := make([]KiroHistoryMessage, 0, len(history))
+	for _, h := range history {
+		if len(merged) == 0 {
+			merged = append(merged, h)
+			continue
+		}
+		last := &merged[len(merged)-1]
+
+		switch {
+		case last.UserInputMessage != nil && h.UserInputMessage != nil:
+			mergeUserHistory(last.UserInputMessage, h.UserInputMessage)
+		case last.AssistantResponseMessage != nil && h.AssistantResponseMessage != nil:
+			mergeAssistantHistory(last.AssistantResponseMessage, h.AssistantResponseMessage)
+		default:
+			merged = append(merged, h)
+		}
+	}
+	return merged
+}
+
+// mergeUserHistory 把 src 用户消息合并进 dst（content 换行拼接，images/toolResults/tools 追加）。
+func mergeUserHistory(dst, src *KiroUserInputMessage) {
+	dst.Content = joinHistoryContent(dst.Content, src.Content)
+	if dst.ModelID == "" {
+		dst.ModelID = src.ModelID
+	}
+	if dst.Origin == "" {
+		dst.Origin = src.Origin
+	}
+	if len(src.Images) > 0 {
+		dst.Images = append(dst.Images, src.Images...)
+	}
+	if src.UserInputMessageContext != nil {
+		if dst.UserInputMessageContext == nil {
+			dst.UserInputMessageContext = &UserInputMessageContext{}
+		}
+		if len(src.UserInputMessageContext.Tools) > 0 {
+			dst.UserInputMessageContext.Tools = append(dst.UserInputMessageContext.Tools, src.UserInputMessageContext.Tools...)
+		}
+		if len(src.UserInputMessageContext.ToolResults) > 0 {
+			dst.UserInputMessageContext.ToolResults = append(dst.UserInputMessageContext.ToolResults, src.UserInputMessageContext.ToolResults...)
+		}
+	}
+}
+
+// mergeAssistantHistory 把 src 助手消息合并进 dst（content 换行拼接，toolUses 追加）。
+func mergeAssistantHistory(dst, src *KiroAssistantResponseMessage) {
+	dst.Content = joinHistoryContent(dst.Content, src.Content)
+	if len(src.ToolUses) > 0 {
+		dst.ToolUses = append(dst.ToolUses, src.ToolUses...)
+	}
+}
+
+// joinHistoryContent 用换行拼接两段内容，自动忽略空串。
+func joinHistoryContent(a, b string) string {
+	a = strings.TrimRight(a, "\n")
+	b = strings.TrimLeft(b, "\n")
+	switch {
+	case strings.TrimSpace(a) == "":
+		return b
+	case strings.TrimSpace(b) == "":
+		return a
+	default:
+		return a + "\n" + b
+	}
 }
 
 func firstClaudeConversationAnchor(messages []ClaudeMessage) string {
