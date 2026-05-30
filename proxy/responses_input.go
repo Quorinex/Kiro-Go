@@ -98,11 +98,23 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 			}
 			tc.Function.Name, _ = obj["name"].(string)
 			tc.Function.Arguments = stringifyArbitrary(obj["arguments"])
-			messages = append(messages, OpenAIMessage{
-				Role:      "assistant",
-				Content:   "",
-				ToolCalls: []ToolCall{tc},
-			})
+			// Merge consecutive function_call items into a single assistant
+			// message so parallel tool calls stay grouped in one turn. The
+			// Responses API emits each parallel call as a separate input item;
+			// keeping them in one assistant message preserves the tool_use /
+			// tool_result pairing that Kiro requires.
+			if n := len(messages); n > 0 &&
+				messages[n-1].Role == "assistant" &&
+				len(messages[n-1].ToolCalls) > 0 &&
+				strings.TrimSpace(extractOpenAIMessageText(messages[n-1].Content)) == "" {
+				messages[n-1].ToolCalls = append(messages[n-1].ToolCalls, tc)
+			} else {
+				messages = append(messages, OpenAIMessage{
+					Role:      "assistant",
+					Content:   "",
+					ToolCalls: []ToolCall{tc},
+				})
+			}
 
 		case typ == "input_text" || typ == "text":
 			text, _ := obj["text"].(string)

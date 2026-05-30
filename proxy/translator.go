@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"kiro-go/config"
 	"regexp"
 	"strings"
@@ -43,6 +44,24 @@ const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
 
 const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
+
+// maxPayloadBytes is the upper bound for the serialized Kiro request body.
+// Kiro's upstream rejects oversized requests with HTTP 400
+// "Input is too long." (CONTENT_LENGTH_EXCEEDS_THRESHOLD). When a converted
+// payload exceeds this size we drop the oldest history turns (keeping the
+// system priming, the most recent turns, the active tool turn, and the current
+// message) and insert a placeholder note so the model knows context was elided.
+// The limit is kept conservatively below the observed upstream threshold to
+// leave room for headers and minor serialization overhead.
+const maxPayloadBytes = 900 * 1024
+
+// truncationPlaceholder is inserted in history where older turns were dropped to
+// fit within maxPayloadBytes.
+const truncationPlaceholder = "[Earlier conversation history was truncated to fit the model's input limit. Older messages and tool activity have been omitted.]"
+
+// minRecentHistoryTurns is the number of most-recent history entries always kept
+// (in addition to system priming and the active tool turn) when truncating.
+const minRecentHistoryTurns = 4
 
 // ParseModelAndThinking resolves a client-supplied model name to a Kiro model ID
 // and reports whether thinking mode was requested via the configured suffix.
@@ -250,6 +269,21 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		history = append(priming, history...)
 	}
 
+	// Decide whether the current tool results form a valid "active" tool turn:
+	// the last history assistant must carry matching structured toolUses. If not
+	// (orphaned tool results, e.g. after context compaction), flatten them into
+	// the current message text so the upstream does not reject the request.
+	currentToolResultIDs := collectToolResultIDs(currentToolResults)
+	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
+
+	// Flatten structured tool calls/results that live in history; upstream only
+	// accepts a single active tool turn (last assistant toolUses ⟺ current toolResults).
+	if keepCurrentToolResults {
+		history = sanitizeKiroHistory(history, currentToolResultIDs)
+	} else {
+		history = sanitizeKiroHistory(history, nil)
+	}
+
 	// 构建最终内容
 	finalContent := ""
 	if currentContent != "" {
@@ -279,10 +313,16 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		Images:  currentImages,
 	}
 
-	if len(kiroTools) > 0 || len(currentToolResults) > 0 {
+	// Only attach structured tool results when they answer the last history
+	// assistant turn; otherwise they have already been folded into finalContent.
+	var attachToolResults []KiroToolResult
+	if keepCurrentToolResults {
+		attachToolResults = currentToolResults
+	}
+	if len(kiroTools) > 0 || len(attachToolResults) > 0 {
 		payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{
 			Tools:       kiroTools,
-			ToolResults: currentToolResults,
+			ToolResults: attachToolResults,
 		}
 	}
 
@@ -297,6 +337,8 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 			TopP:        req.TopP,
 		}
 	}
+
+	truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
 }
@@ -947,6 +989,54 @@ type OpenAITool struct {
 	} `json:"function"`
 }
 
+// UnmarshalJSON accepts both the Chat Completions tool shape, where the tool
+// definition is nested under "function":
+//
+//	{"type":"function","function":{"name":"x","description":"...","parameters":{...}}}
+//
+// and the Responses API tool shape, where name/description/parameters live at
+// the top level:
+//
+//	{"type":"function","name":"x","description":"...","parameters":{...}}
+//
+// Without this, Responses API tools would parse with an empty Function.Name,
+// which Kiro rejects with HTTP 400 "Improperly formed request".
+func (t *OpenAITool) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Type        string      `json:"type"`
+		Name        string      `json:"name"`
+		Description string      `json:"description"`
+		Parameters  interface{} `json:"parameters"`
+		Function    *struct {
+			Name        string      `json:"name"`
+			Description string      `json:"description"`
+			Parameters  interface{} `json:"parameters"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	t.Type = raw.Type
+	if raw.Function != nil {
+		t.Function.Name = raw.Function.Name
+		t.Function.Description = raw.Function.Description
+		t.Function.Parameters = raw.Function.Parameters
+	}
+	// Fall back to top-level (Responses API) fields when the nested form is
+	// absent or incomplete.
+	if t.Function.Name == "" {
+		t.Function.Name = raw.Name
+	}
+	if t.Function.Description == "" {
+		t.Function.Description = raw.Description
+	}
+	if t.Function.Parameters == nil {
+		t.Function.Parameters = raw.Parameters
+	}
+	return nil
+}
+
 type OpenAIResponse struct {
 	ID      string         `json:"id"`
 	Object  string         `json:"object"`
@@ -1092,6 +1182,17 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		history = append(priming, history...)
 	}
 
+	// Decide whether current tool results form a valid active tool turn; if not,
+	// flatten them into the current message text (see ClaudeToKiro for rationale).
+	currentToolResultIDs := collectToolResultIDs(currentToolResults)
+	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
+
+	if keepCurrentToolResults {
+		history = sanitizeKiroHistory(history, currentToolResultIDs)
+	} else {
+		history = sanitizeKiroHistory(history, nil)
+	}
+
 	// 构建最终内容
 	finalContent := currentContent
 	if finalContent == "" {
@@ -1118,10 +1219,14 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		Images:  currentImages,
 	}
 
-	if len(kiroTools) > 0 || len(currentToolResults) > 0 {
+	var attachToolResults []KiroToolResult
+	if keepCurrentToolResults {
+		attachToolResults = currentToolResults
+	}
+	if len(kiroTools) > 0 || len(attachToolResults) > 0 {
 		payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{
 			Tools:       kiroTools,
-			ToolResults: currentToolResults,
+			ToolResults: attachToolResults,
 		}
 	}
 
@@ -1136,6 +1241,8 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			TopP:        req.TopP,
 		}
 	}
+
+	truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
 }
@@ -1224,6 +1331,307 @@ func extractOpenAIMessageText(content interface{}) string {
 	}
 
 	return ""
+}
+
+// collectToolResultIDs returns the set of toolUseId values referenced by the
+// given tool results.
+func collectToolResultIDs(toolResults []KiroToolResult) map[string]bool {
+	if len(toolResults) == 0 {
+		return nil
+	}
+	ids := make(map[string]bool, len(toolResults))
+	for _, tr := range toolResults {
+		if id := strings.TrimSpace(tr.ToolUseID); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+// currentToolResultsMatchLastAssistant reports whether the current message's
+// tool results answer the structured tool calls of the final history assistant
+// message. Only in that case may the current toolResults stay structured.
+func currentToolResultsMatchLastAssistant(history []KiroHistoryMessage, currentToolResultIDs map[string]bool) bool {
+	if len(currentToolResultIDs) == 0 || len(history) == 0 {
+		return false
+	}
+	last := history[len(history)-1]
+	if last.AssistantResponseMessage == nil || len(last.AssistantResponseMessage.ToolUses) == 0 {
+		return false
+	}
+	for _, tu := range last.AssistantResponseMessage.ToolUses {
+		if !currentToolResultIDs[tu.ToolUseID] {
+			return false
+		}
+	}
+	return true
+}
+
+// narrateToolUses renders structured assistant tool calls as plain text so they
+// can live in conversation history without the structured toolUses field.
+// Kiro's upstream rejects history that carries structured tool calls/results
+// (HTTP 400 "Improperly formed request"); only the active tool turn
+// (last history assistant toolUse ⟺ current message toolResults) may be structured.
+func narrateToolUses(toolUses []KiroToolUse) string {
+	if len(toolUses) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(toolUses))
+	for _, tu := range toolUses {
+		input := ""
+		if len(tu.Input) > 0 {
+			if raw, err := json.Marshal(tu.Input); err == nil {
+				input = string(raw)
+			}
+		}
+		if input != "" {
+			parts = append(parts, fmt.Sprintf("[Called tool %s with input %s]", tu.Name, input))
+		} else {
+			parts = append(parts, fmt.Sprintf("[Called tool %s]", tu.Name))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// narrateToolResults renders structured tool results as plain text for history.
+func narrateToolResults(toolResults []KiroToolResult) string {
+	if len(toolResults) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(toolResults))
+	for _, tr := range toolResults {
+		var texts []string
+		for _, c := range tr.Content {
+			if strings.TrimSpace(c.Text) != "" {
+				texts = append(texts, c.Text)
+			}
+		}
+		body := strings.Join(texts, "\n")
+		if strings.TrimSpace(body) == "" {
+			continue
+		}
+		parts = append(parts, body)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return toolResultsContinuationPrefix + "\n\n" + strings.Join(parts, "\n\n")
+}
+
+// joinHistoryText combines an existing message body with narrated tool text.
+func joinHistoryText(existing, narrated string) string {
+	existing = strings.TrimSpace(existing)
+	narrated = strings.TrimSpace(narrated)
+	switch {
+	case existing != "" && narrated != "":
+		return existing + "\n\n" + narrated
+	case narrated != "":
+		return narrated
+	default:
+		return existing
+	}
+}
+
+// sanitizeKiroHistory flattens structured tool calls/results inside history into
+// plain text, leaving at most one active structured tool turn intact: the final
+// history assistant message whose tool-use IDs are answered by the current
+// message's toolResults. Everything else is narrated as text so the upstream
+// accepts the request.
+//
+// currentToolResultIDs is the set of toolUseId values carried by the current
+// (outgoing) message. When the last history entry is an assistant message whose
+// tool uses are fully covered by that set, its structured toolUses are kept.
+func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[string]bool) []KiroHistoryMessage {
+	if len(history) == 0 {
+		return history
+	}
+
+	// Determine whether the last history assistant turn is the "active" tool turn
+	// answered by the current message. If so, its structured toolUses stay.
+	activeIdx := -1
+	if len(currentToolResultIDs) > 0 {
+		last := history[len(history)-1]
+		if last.AssistantResponseMessage != nil && len(last.AssistantResponseMessage.ToolUses) > 0 {
+			allCovered := true
+			for _, tu := range last.AssistantResponseMessage.ToolUses {
+				if !currentToolResultIDs[tu.ToolUseID] {
+					allCovered = false
+					break
+				}
+			}
+			if allCovered {
+				activeIdx = len(history) - 1
+			}
+		}
+	}
+
+	for i := range history {
+		msg := &history[i]
+
+		if msg.AssistantResponseMessage != nil && len(msg.AssistantResponseMessage.ToolUses) > 0 {
+			if i == activeIdx {
+				continue // keep the active tool turn structured
+			}
+			narrated := narrateToolUses(msg.AssistantResponseMessage.ToolUses)
+			msg.AssistantResponseMessage.Content = joinHistoryText(msg.AssistantResponseMessage.Content, narrated)
+			msg.AssistantResponseMessage.ToolUses = nil
+		}
+
+		if msg.UserInputMessage != nil && msg.UserInputMessage.UserInputMessageContext != nil {
+			ctx := msg.UserInputMessage.UserInputMessageContext
+			if len(ctx.ToolResults) > 0 {
+				narrated := narrateToolResults(ctx.ToolResults)
+				msg.UserInputMessage.Content = joinHistoryText(msg.UserInputMessage.Content, narrated)
+				ctx.ToolResults = nil
+			}
+			// History messages must not carry structured tool specs either.
+			ctx.Tools = nil
+			if len(ctx.Tools) == 0 && len(ctx.ToolResults) == 0 {
+				msg.UserInputMessage.UserInputMessageContext = nil
+			}
+		}
+
+		// Guard against empty content after flattening (Kiro requires non-empty).
+		if msg.UserInputMessage != nil && strings.TrimSpace(msg.UserInputMessage.Content) == "" && len(msg.UserInputMessage.Images) == 0 {
+			msg.UserInputMessage.Content = minimalFallbackUserContent
+		}
+		if msg.AssistantResponseMessage != nil && strings.TrimSpace(msg.AssistantResponseMessage.Content) == "" && len(msg.AssistantResponseMessage.ToolUses) == 0 {
+			msg.AssistantResponseMessage.Content = minimalFallbackUserContent
+		}
+	}
+
+	return history
+}
+
+// truncatePayloadToLimit drops the oldest conversation history turns until the
+// serialized payload fits within maxPayloadBytes. It preserves, in order:
+//   - the system priming pair (if present) at the front of history,
+//   - the most recent turns (at least minRecentHistoryTurns, and always the
+//     active tool turn that pairs with the current message),
+//   - the current message itself.
+//
+// A single placeholder note (truncationPlaceholder) is inserted where older
+// turns were removed so the model is aware context was elided. hasPriming
+// indicates whether history begins with the 2-entry system priming pair.
+func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
+	if payload == nil {
+		return
+	}
+	if payloadByteSize(payload) <= maxPayloadBytes {
+		return
+	}
+
+	history := payload.ConversationState.History
+	primingCount := 0
+	if hasPriming && len(history) >= 2 {
+		primingCount = 2
+	}
+
+	priming := history[:primingCount]
+	conversation := history[primingCount:]
+
+	// Compute the fixed overhead (everything except the trimmable conversation):
+	// priming, current message, inference config, profileArn, etc. We estimate by
+	// measuring the payload with an empty conversation tail, then add a budget for
+	// the placeholder and retained tail turns.
+	placeholderEntry := KiroHistoryMessage{
+		UserInputMessage: &KiroUserInputMessage{
+			Content: truncationPlaceholder,
+			ModelID: currentMessageModelID(payload),
+			Origin:  "AI_EDITOR",
+		},
+	}
+
+	// Precompute byte size of each conversation entry once (O(n)).
+	entrySizes := make([]int, len(conversation))
+	for i := range conversation {
+		entrySizes[i] = historyEntryByteSize(conversation[i])
+	}
+
+	// Base size: payload with priming only (no conversation), plus placeholder.
+	payload.ConversationState.History = priming
+	baseSize := payloadByteSize(payload) + historyEntryByteSize(placeholderEntry)
+
+	// Keep the largest suffix of the conversation that fits, but never fewer than
+	// minRecentHistoryTurns entries (so recent context is preserved).
+	keepFrom := len(conversation)
+	running := baseSize
+	for i := len(conversation) - 1; i >= 0; i-- {
+		running += entrySizes[i]
+		kept := len(conversation) - i
+		if running > maxPayloadBytes && kept > minRecentHistoryTurns {
+			break
+		}
+		keepFrom = i
+	}
+
+	tail := conversation[keepFrom:]
+	tail = dropLeadingAssistant(tail)
+
+	rebuilt := make([]KiroHistoryMessage, 0, len(priming)+1+len(tail))
+	rebuilt = append(rebuilt, priming...)
+	if keepFrom > 0 { // older turns were dropped → note the elision
+		rebuilt = append(rebuilt, placeholderEntry)
+	}
+	rebuilt = append(rebuilt, tail...)
+	payload.ConversationState.History = rebuilt
+
+	// If still too large (current message or retained tail alone exceeds the
+	// limit), shrink the current message content as a last resort.
+	if payloadByteSize(payload) > maxPayloadBytes {
+		truncateCurrentMessage(payload)
+	}
+}
+
+// historyEntryByteSize returns the serialized size of a single history entry,
+// including the surrounding JSON array delimiter overhead (1 byte for the comma).
+func historyEntryByteSize(entry KiroHistoryMessage) int {
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return 0
+	}
+	return len(raw) + 1
+}
+
+// dropLeadingAssistant removes a leading assistant message from a history tail so
+// it does not directly follow the placeholder user turn with a broken pairing.
+func dropLeadingAssistant(tail []KiroHistoryMessage) []KiroHistoryMessage {
+	for len(tail) > 0 && tail[0].AssistantResponseMessage != nil {
+		tail = tail[1:]
+	}
+	return tail
+}
+
+// payloadByteSize returns the serialized size of the payload in bytes.
+func payloadByteSize(payload *KiroPayload) int {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0
+	}
+	return len(raw)
+}
+
+func currentMessageModelID(payload *KiroPayload) string {
+	return payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
+}
+
+// truncateCurrentMessage hard-truncates the current message content as a last
+// resort when even the minimal retained history plus current message exceeds the
+// limit.
+func truncateCurrentMessage(payload *KiroPayload) {
+	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
+	overhead := payloadByteSize(payload) - len(cur.Content)
+	budget := maxPayloadBytes - overhead
+	if budget < 0 {
+		budget = 0
+	}
+	if len(cur.Content) > budget {
+		if budget == 0 {
+			cur.Content = minimalFallbackUserContent
+			return
+		}
+		cur.Content = cur.Content[:budget]
+	}
 }
 
 func buildToolResultsContinuation(toolResults []KiroToolResult) string {
@@ -1489,9 +1897,14 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 		if len(desc) > maxToolDescLen {
 			desc = desc[:maxToolDescLen] + "..."
 		}
+		name := shortenToolName(tool.Function.Name)
+		if strings.TrimSpace(name) == "" {
+			// Kiro rejects tools with empty names; skip unusable specs.
+			continue
+		}
 		wrapper := KiroToolWrapper{}
-		wrapper.ToolSpecification.Name = shortenToolName(tool.Function.Name)
-		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, wrapper.ToolSpecification.Name)
+		wrapper.ToolSpecification.Name = name
+		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
 		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
 		result = append(result, wrapper)
 	}

@@ -97,16 +97,17 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 		t.Fatalf("expected assistant structured content to be preserved, got %q", historyAssistant.Content)
 	}
 
+	// The tool result answers call_1, but the last history assistant has no
+	// matching structured tool call (it is text-only), so the tool result is an
+	// orphan. Kiro's upstream rejects structured tool results that do not answer
+	// the immediately preceding assistant tool call, so it must be narrated into
+	// the current message text rather than kept structured.
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage
 	if !strings.Contains(cur.Content, "tool-result-structured") {
 		t.Fatalf("expected tool-result continuation content, got %q", cur.Content)
 	}
-	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
-		t.Fatalf("expected one tool result in current context")
-	}
-	gotToolText := cur.UserInputMessageContext.ToolResults[0].Content[0].Text
-	if gotToolText != "tool-result-structured" {
-		t.Fatalf("expected structured tool result text, got %q", gotToolText)
+	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) != 0 {
+		t.Fatalf("expected orphan tool result to be flattened into text, not kept structured")
 	}
 }
 
@@ -163,8 +164,15 @@ func TestOpenAIToKiroAssistantToolCallsDoNotInjectPlaceholder(t *testing.T) {
 	if assistant == nil {
 		t.Fatalf("expected assistant history entry")
 	}
-	if assistant.Content != "" {
-		t.Fatalf("expected empty assistant content for tool-call-only turn, got %q", assistant.Content)
+	// This assistant tool call sits in the middle of history (the conversation
+	// continues with a later user turn), so it is not the active tool turn.
+	// Kiro's upstream rejects structured tool calls buried in history, so it is
+	// narrated as text and the structured toolUses are cleared.
+	if len(assistant.ToolUses) != 0 {
+		t.Fatalf("expected mid-history tool call to be flattened, got %d structured toolUses", len(assistant.ToolUses))
+	}
+	if !strings.Contains(assistant.Content, "get_weather") {
+		t.Fatalf("expected narrated tool call to mention tool name, got %q", assistant.Content)
 	}
 }
 
