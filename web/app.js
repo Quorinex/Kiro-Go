@@ -2123,6 +2123,7 @@
       accessToken: tokenData.accessToken || '',
       clientId: clientData?.clientId || '',
       clientSecret: clientData?.clientSecret || '',
+      region: tokenData.region || '',
       authMethod, provider
     };
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
