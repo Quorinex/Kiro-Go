@@ -1147,9 +1147,12 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			nextIdx := i + 1
 			if nextIdx >= len(nonSystemMessages) || nonSystemMessages[nextIdx].Role != "tool" {
 				if !isLast {
+					// Store the tool results structurally only; sanitizeKiroHistory
+					// narrates them into text exactly once. Pre-filling Content with
+					// buildToolResultsContinuation here would duplicate the output
+					// (continuation text + narrated text).
 					history = append(history, KiroHistoryMessage{
 						UserInputMessage: &KiroUserInputMessage{
-							Content: buildToolResultsContinuation(currentToolResults),
 							ModelID: modelID,
 							Origin:  origin,
 							UserInputMessageContext: &UserInputMessageContext{
