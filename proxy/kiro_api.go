@@ -121,8 +121,8 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 		return profileArn, nil
 	}
 
-	// Try ListAvailableProfiles first
-	profileArn, err := listAvailableProfiles(account)
+	// Try ListAvailableProfiles first, retrying on transient failures.
+	profileArn, err := listAvailableProfilesWithRetry(account)
 	if err == nil && profileArn != "" {
 		if updateErr := config.UpdateAccountProfileArn(account.ID, profileArn); updateErr != nil {
 			logger.Warnf("[ProfileArn] Failed to cache profile ARN for %s: %v", account.Email, updateErr)
@@ -144,6 +144,49 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 	}
 
 	return "", fmt.Errorf("no available Kiro profile")
+}
+
+func listAvailableProfilesWithRetry(account *config.Account) (string, error) {
+	// Retry transient failures (network errors, 5xx, 429) with short backoff.
+	// An empty profile list or 4xx (other than 429) is treated as authoritative
+	// and not retried — they reflect account state, not upstream flakiness.
+	const maxAttempts = 3
+	backoff := 200 * time.Millisecond
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		profileArn, err := listAvailableProfiles(account)
+		if err == nil {
+			return profileArn, nil
+		}
+		lastErr = err
+		if !isTransientProfileFetchError(err) || attempt == maxAttempts {
+			return "", err
+		}
+		logger.Debugf("[ProfileArn] ListAvailableProfiles transient failure for %s (attempt %d/%d): %v",
+			account.Email, attempt, maxAttempts, err)
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+	return "", lastErr
+}
+
+// isTransientProfileFetchError reports whether a ListAvailableProfiles error
+// is worth retrying. Network errors and upstream 5xx/429 are transient; other
+// HTTP errors and an empty profile list are not.
+func isTransientProfileFetchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "empty profile list") {
+		return false
+	}
+	if strings.HasPrefix(msg, "HTTP ") {
+		return strings.HasPrefix(msg, "HTTP 5") || strings.HasPrefix(msg, "HTTP 429")
+	}
+	// Non-HTTP errors are network/transport level — retry.
+	return true
 }
 
 func listAvailableProfiles(account *config.Account) (string, error) {

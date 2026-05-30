@@ -62,41 +62,26 @@ jobs:
               const stripped = content.replace(/```[\s\S]*?```/g, '').trim();
               if (!stripped) return true;
               if (/^_no response_$/i.test(stripped)) return true;
-              return stripped.length < 10;
+              return false;
             };
 
-            const reasons = [];
-
-            // 1) Every checkbox in the body must be ticked.
-            const boxes = body.match(/^\s*[-*]\s*\[( |x|X)\]/gm) || [];
-            const unchecked = boxes.filter(b => /\[ \]/.test(b)).length;
-            if (boxes.length === 0) {
-              reasons.push('Pre-flight checklist is missing. / 缺少预检清单。');
-            } else if (unchecked > 0) {
-              reasons.push(`Pre-flight checklist contains ${unchecked} unchecked item(s). / 预检清单存在 ${unchecked} 项未勾选。`);
-            }
-
-            // 2) Required text fields must contain meaningful content.
-            const required = isBug
+            // Optional but commonly-needed fields. The form already enforces
+            // truly-required fields; this only nudges on the rest.
+            const watched = isBug
               ? [
-                  { name: 'AI diagnosis summary / AI 排查记录', keys: ['ai diagnosis', 'AI 排查'] },
-                  { name: 'Version / 版本',                     keys: ['version', '版本'] },
-                  { name: 'Steps to reproduce / 复现步骤',      keys: ['steps to reproduce', '复现步骤'] },
-                  { name: 'Expected behavior / 预期行为',       keys: ['expected behavior', '预期行为'] },
-                  { name: 'Actual behavior / 实际行为',         keys: ['actual behavior', '实际行为'] },
-                  { name: 'Logs and error output / 日志与报错信息', keys: ['logs and error', '日志与报错'] },
+                  { name: 'Steps to reproduce / 复现步骤',  keys: ['steps to reproduce', '复现步骤'] },
+                  { name: 'Relevant log output / 相关日志', keys: ['relevant log output', '相关日志'] },
+                  { name: 'Environment / 环境信息',         keys: ['environment', '环境信息'] },
                 ]
               : [
-                  { name: 'Problem or use case / 待解决的问题与使用场景', keys: ['problem or use case', '待解决的问题'] },
-                  { name: 'Proposed solution / 建议的解决方案',           keys: ['proposed solution', '建议的解决方案'] },
+                  { name: "Describe alternatives you've considered / 已考虑的替代方案", keys: ['alternatives', '替代方案'] },
                 ];
 
-            for (const r of required) {
+            const reasons = [];
+            for (const r of watched) {
               const sec = findSection(r.keys);
-              if (!sec) {
-                reasons.push(`Missing section: ${r.name}. / 缺少字段：${r.name}。`);
-              } else if (isEmpty(sec.content)) {
-                reasons.push(`Section is empty or too short: ${r.name}. / 字段为空或内容过短：${r.name}。`);
+              if (!sec || isEmpty(sec.content)) {
+                reasons.push(`Empty field: ${r.name}. / 字段为空：${r.name}。`);
               }
             }
 
@@ -105,38 +90,33 @@ jobs:
             const priorComment = comments.find(c => (c.body || '').includes(marker));
 
             if (reasons.length === 0) {
-              // Passes. Reopen if we previously auto-closed it.
-              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'invalid' }).catch(() => {});
-              if (issue.state === 'closed' && priorComment) {
-                await github.rest.issues.update({ owner, repo, issue_number, state: 'open' });
+              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'incomplete' }).catch(() => {});
+              if (priorComment) {
                 const ok = [
                   marker,
-                  'The issue now meets the template requirements and has been reopened automatically.',
+                  'The required information has been provided. Thank you for the update.',
                   '',
-                  '该 issue 已满足模板要求，现已自动重新打开。',
+                  '相关信息已补充完整，感谢您的更新。',
                 ].join('\n');
-                await github.rest.issues.createComment({ owner, repo, issue_number, body: ok });
+                await github.rest.issues.updateComment({ owner, repo, comment_id: priorComment.id, body: ok });
               }
               return;
             }
 
-            // Fails. Comment, label, close.
+            // Some optional fields are blank. Nudge but never close.
             const list = reasons.map(r => `- ${r}`).join('\n');
             const commentBody = [
               marker,
-              'This issue does not follow the required template and has been closed automatically. Please edit the issue to address every item below; it will be reopened once all requirements are met.',
+              'The following fields are optional, but completing them significantly improves the likelihood that this issue can be triaged and addressed. Issues lacking this information may remain unresolved.',
               '',
-              '此 issue 未按要求的模板填写，已被自动关闭。请编辑 issue 并补全以下内容，全部满足后将自动重新打开。',
+              '以下字段虽为可选项，但完整填写有助于维护者评估与处理。缺少相关信息的 issue 可能无法得到及时跟进。',
               '',
               list,
             ].join('\n');
 
-            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['invalid'] }).catch(() => {});
+            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['incomplete'] }).catch(() => {});
             if (priorComment) {
               await github.rest.issues.updateComment({ owner, repo, comment_id: priorComment.id, body: commentBody });
             } else {
               await github.rest.issues.createComment({ owner, repo, issue_number, body: commentBody });
-            }
-            if (issue.state !== 'closed') {
-              await github.rest.issues.update({ owner, repo, issue_number, state: 'closed', state_reason: 'not_planned' });
             }

@@ -1,61 +1,49 @@
 name: Feature Request / 功能建议
-description: Propose a new feature or enhancement. / 提出新功能或改进建议。
+description: Suggest a new idea or new functionality. / 提出新想法或新功能。
 title: "[Feature]: "
 labels: ["enhancement"]
+assignees: []
 body:
   - type: markdown
     attributes:
       value: |
-        Before submitting, please discuss your idea with an AI coding assistant such as Claude Code, Codex, Cursor, or GitHub Copilot to verify that the desired behavior cannot already be achieved through existing functionality, configuration, or a small custom script.
+        Before submitting, please search existing issues and the README to confirm this functionality is not already supported. If unsure whether existing options or a small script can already meet your needs, an AI coding assistant (Claude Code, Codex, etc.) may help clarify. A working pull request is the most effective path to landing a feature; maintainers may decline requests that fall outside the project's scope.
 
-        提交前，请先与 Claude Code、Codex、Cursor 或 GitHub Copilot 等 AI 编程助手讨论你的想法，确认目标行为无法通过现有功能、配置或简单脚本实现。
-
-        A working pull request is the most effective way to introduce a new feature. Maintainers reserve the right to decline requests that fall outside the project's scope.
-        提交可用的 Pull Request 是落地新功能最有效的方式。维护者保留拒绝超出项目范围的需求的权利。
-
-  - type: checkboxes
-    id: preflight
-    attributes:
-      label: Pre-flight Checklist / 预检清单
-      options:
-        - label: I have searched both **open and closed issues** and confirmed this has not been requested before. / 我已检索全部 **open 与 closed 的 issue**，确认此前未有人提出过。
-          required: true
-        - label: I have reviewed the **README** and confirmed this functionality does not already exist (including under a different name). / 我已查阅 **README**，确认该功能尚不存在（也未以其他名称存在）。
-          required: true
-        - label: I have discussed this idea with **Claude Code, Codex, Cursor, or GitHub Copilot** and confirmed it cannot be achieved through existing options. / 我已与 **Claude Code、Codex、Cursor 或 GitHub Copilot** 讨论该想法，确认无法通过现有选项实现。
-          required: true
-        - label: I understand the maintainers may **decline this proposal**, and that submitting a PR is more likely to result in the feature being implemented. / 我理解维护者可能**拒绝此提案**，且提交 PR 更有可能使该功能落地。
-          required: true
+        提交前请先搜索已有 issue 与 README，确认该功能尚未提供。若不确定现有功能或简单脚本是否已能满足需求，可先借助 AI 编程助手（Claude Code、Codex 等）协助分析。提交可用的 Pull Request 是落地新功能最有效的方式；维护者保留拒绝超出项目范围之需求的权利。
 
   - type: textarea
     id: problem
     attributes:
-      label: Problem or use case / 待解决的问题与使用场景
+      label: Is your feature request related to a problem? Please describe. / 该需求是否源于某个具体问题？
       description: |
-        Describe the underlying problem before proposing a solution: what are you trying to accomplish, what is preventing it, and how frequently does this affect you?
-        请先描述实际问题，再说明方案：你希望完成什么、目前是什么阻碍了你、该问题出现的频率如何？
+        A clear and concise description of what the problem is.
+        请简明描述实际遇到的问题。
+      placeholder: |
+        e.g., I'm frustrated when I need to do X manually because Y is missing.
+        例如：因为缺少 Y，每次都要手动做 X，很麻烦。
     validations:
       required: true
 
   - type: textarea
-    id: proposal
+    id: solution
     attributes:
-      label: Proposed solution / 建议的解决方案
+      label: Describe the solution you'd like / 期望的解决方案
       description: |
-        Provide concrete details: API surface, configuration keys, CLI flags, or UI behavior. Vague proposals are difficult to act upon.
-        请提供具体细节：API 接口、配置项、CLI 参数或 UI 行为。过于宽泛的建议难以推进。
+        A clear and concise description of what you want to happen.
+        请简明描述希望实现的效果。
+      placeholder: |
+        e.g., It would be great if the system could automatically handle X by doing Y.
+        例如：希望系统能够通过 Y 自动处理 X。
     validations:
       required: true
 
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives considered / 已考虑的替代方案
+      label: Describe alternatives you've considered / 已考虑的替代方案
       description: |
-        Workarounds you have attempted, related projects you have evaluated, or designs you have ruled out, along with the reasons.
-        你已尝试过的临时方案、参考过的相关项目，或被排除的设计及其原因。
-    validations:
-      required: false
+        Include any alternative solutions or features you've considered.
+        请列出已考虑或尝试过的其他方案。
 
   - type: dropdown
     id: contribution
@@ -65,5 +53,3 @@ body:
         - "Yes, I will submit a PR. / 愿意，我将提交 PR。"
         - "Yes, with some guidance. / 愿意，但需要一定指导。"
         - "No. / 不愿意。"
-    validations:
-      required: true

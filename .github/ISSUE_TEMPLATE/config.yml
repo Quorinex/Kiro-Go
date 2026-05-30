@@ -1,8 +1,17 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Diagnose with an AI coding assistant / 借助 AI 编程助手排查
-    url: https://claude.com/claude-code
-    about: Please attempt to diagnose the issue using Claude Code, Codex, Cursor, or GitHub Copilot before opening a ticket. / 提交 issue 前，请先使用 Claude Code、Codex、Cursor 或 GitHub Copilot 进行排查。
-  - name: README and documentation / README 与文档
+  - name: Self-diagnosis / 自行排查
     url: https://github.com/Quorinex/Kiro-Go#readme
-    about: Many configuration-related questions are addressed in the documentation. / 许多与配置相关的问题在文档中已有说明。
+    about: |
+      Review the README, configuration, and logs first; if anything remains unclear, an AI coding assistant (Claude Code, Codex, etc.) can help analyze them.
+      请先查阅 README、确认配置并核对日志；如仍不明确，可借助 AI 编程助手（Claude Code、Codex 等）协助分析。
+  - name: Search existing issues / 检索已有 issue
+    url: https://github.com/Quorinex/Kiro-Go/issues?q=is%3Aissue
+    about: |
+      Search both open and closed issues to confirm this has not been reported.
+      检索全部 open 与 closed 的 issue，确认问题尚未被提交过。
+  - name: Community discussions / 社区与论坛
+    url: https://linux.do
+    about: |
+      Similar questions and workarounds may already have been discussed in the community.
+      类似问题与解决方案可能已在社区中有过讨论，建议先行检索。
