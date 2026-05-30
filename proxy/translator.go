@@ -1530,16 +1530,37 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 			}
 		}
 
-		// Guard against empty content after flattening (Kiro requires non-empty).
+		// After scrubbing, an assistant turn that held only tool-call text (or
+		// only structured tool calls) is now empty. Do NOT backfill it with a
+		// placeholder like ".": replayed across a long history that produces
+		// dozens of "." assistant turns, which the model then imitates by
+		// replying ".". Mark such turns for removal instead.
 		if msg.UserInputMessage != nil && strings.TrimSpace(msg.UserInputMessage.Content) == "" && len(msg.UserInputMessage.Images) == 0 {
 			msg.UserInputMessage.Content = minimalFallbackUserContent
 		}
-		if msg.AssistantResponseMessage != nil && strings.TrimSpace(msg.AssistantResponseMessage.Content) == "" && len(msg.AssistantResponseMessage.ToolUses) == 0 {
-			msg.AssistantResponseMessage.Content = minimalFallbackUserContent
-		}
 	}
 
-	return history
+	// Second pass: drop assistant turns that carry no real content — either left
+	// empty by scrubbing, or consisting solely of the "." placeholder that an
+	// earlier version emitted (and that a polluted client now replays). Their
+	// tool activity already survives as narrated text in the adjacent user
+	// "Tool results" turn, so removing the hollow assistant turn loses no
+	// information and avoids seeding mimicable empty/"." turns.
+	cleaned := history[:0:0]
+	for i := range history {
+		msg := history[i]
+		if msg.AssistantResponseMessage != nil && len(msg.AssistantResponseMessage.ToolUses) == 0 {
+			c := strings.TrimSpace(msg.AssistantResponseMessage.Content)
+			if c == "" || c == minimalFallbackUserContent {
+				continue // drop hollow assistant turn
+			}
+		}
+		cleaned = append(cleaned, msg)
+	}
+
+	// Dropping hollow assistant turns can leave history starting with an
+	// assistant message; re-trim so it begins with a user turn.
+	return trimLeadingAssistantHistory(cleaned)
 }
 
 // truncatePayloadToLimit drops the oldest conversation history turns until the

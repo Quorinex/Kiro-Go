@@ -74,6 +74,44 @@ func newPollToolCall(id, name, args string) ToolCall {
 	return tc
 }
 
+// TestDropsDotPollutedAssistantTurns covers the second-order pollution: after
+// stripping "[Called tool ...]" from assistant turns that held only that text,
+// the turns become empty and must NOT be backfilled with ".". A history full of
+// "." assistant turns trains the model to reply ".". Such hollow turns are
+// dropped instead.
+func TestDropsDotPollutedAssistantTurns(t *testing.T) {
+	msgs := []ClaudeMessage{{Role: "user", Content: "start"}}
+	for i := 0; i < 6; i++ {
+		// Assistant turn that is pure replayed tool-call text (becomes empty after scrub).
+		msgs = append(msgs,
+			ClaudeMessage{Role: "assistant", Content: "[Called tool exec_command with input {\"cmd\":\"x\"}]"},
+			ClaudeMessage{Role: "user", Content: "continue"},
+		)
+		// Also a turn that is already a bare "." (client-replayed prior placeholder).
+		msgs = append(msgs,
+			ClaudeMessage{Role: "assistant", Content: "."},
+			ClaudeMessage{Role: "user", Content: "go on"},
+		)
+	}
+	msgs = append(msgs, ClaudeMessage{Role: "user", Content: "final question"})
+
+	payload := ClaudeToKiro(&ClaudeRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
+
+	for i, h := range payload.ConversationState.History {
+		a := h.AssistantResponseMessage
+		if a == nil {
+			continue
+		}
+		c := strings.TrimSpace(a.Content)
+		if c == "." || c == "" {
+			t.Fatalf("history[%d] is a hollow/dot assistant turn that should have been dropped", i)
+		}
+		if strings.Contains(a.Content, "[Called tool") {
+			t.Fatalf("history[%d] still contains replayed tool-call text", i)
+		}
+	}
+}
+
 // TestScrubsClientReplayedToolCallText covers the recovery path: a polluted
 // client stored the model's "[Called tool ...]" text output as assistant
 // history and replays it. The proxy must strip that text from assistant turns

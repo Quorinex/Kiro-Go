@@ -157,24 +157,26 @@ func TestOpenAIToKiroAssistantToolCallsDoNotInjectPlaceholder(t *testing.T) {
 	}
 
 	payload := OpenAIToKiro(req, false)
-	if len(payload.ConversationState.History) < 2 {
-		t.Fatalf("expected history with assistant tool call")
-	}
-	assistant := payload.ConversationState.History[1].AssistantResponseMessage
-	if assistant == nil {
-		t.Fatalf("expected assistant history entry")
-	}
-	// This assistant tool call sits in the middle of history (the conversation
-	// continues with a later user turn), so it is not the active tool turn.
-	// Kiro's upstream rejects structured tool calls buried in history, so its
-	// structured toolUses are cleared. Crucially, NO tool-invocation text is
-	// written into the assistant turn — doing so would train the model to emit
-	// that text instead of issuing real tool calls.
-	if len(assistant.ToolUses) != 0 {
-		t.Fatalf("expected mid-history tool call to be cleared, got %d structured toolUses", len(assistant.ToolUses))
-	}
-	if strings.Contains(assistant.Content, "get_weather") || strings.Contains(assistant.Content, "[Called tool") {
-		t.Fatalf("assistant turn must not contain tool-invocation text, got %q", assistant.Content)
+
+	// The mid-history assistant turn carried ONLY a tool call (no text) and is
+	// not the active tool turn, so its structured toolUses are cleared. That
+	// leaves it hollow, and a hollow assistant turn is dropped entirely rather
+	// than backfilled with a "." placeholder (which the model would imitate).
+	// No surviving turn may contain tool-invocation text or structured toolUses.
+	for i, h := range payload.ConversationState.History {
+		a := h.AssistantResponseMessage
+		if a == nil {
+			continue
+		}
+		if len(a.ToolUses) != 0 {
+			t.Fatalf("history[%d] retains structured toolUses", i)
+		}
+		if strings.Contains(a.Content, "get_weather") || strings.Contains(a.Content, "[Called tool") {
+			t.Fatalf("history[%d] assistant contains tool-invocation text: %q", i, a.Content)
+		}
+		if strings.TrimSpace(a.Content) == "." || strings.TrimSpace(a.Content) == "" {
+			t.Fatalf("history[%d] is a hollow assistant turn that should have been dropped", i)
+		}
 	}
 }
 
