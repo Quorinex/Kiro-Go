@@ -74,6 +74,36 @@ func newPollToolCall(id, name, args string) ToolCall {
 	return tc
 }
 
+// TestCollapsesConsecutiveIdenticalToolResults covers a client retry loop that
+// sends the same failing tool result many times. After hollow assistant turns
+// are dropped, those identical user "Tool results" turns become adjacent
+// duplicates; the proxy collapses each run to a single copy.
+func TestCollapsesConsecutiveIdenticalToolResults(t *testing.T) {
+	msgs := []OpenAIMessage{{Role: "user", Content: "start"}}
+	// 5 identical failing cycles in a row (model retrying the same tool).
+	for i := 0; i < 5; i++ {
+		msgs = append(msgs,
+			OpenAIMessage{Role: "assistant", Content: "", ToolCalls: []ToolCall{
+				newPollToolCall(fmt.Sprintf("c%d", i), "exec_command", `{"cmd":"x"}`),
+			}},
+			OpenAIMessage{Role: "tool", ToolCallID: fmt.Sprintf("c%d", i), Content: "SAME_ERROR_OUTPUT"},
+		)
+	}
+	msgs = append(msgs, OpenAIMessage{Role: "user", Content: "final"})
+
+	payload := OpenAIToKiro(&OpenAIRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
+
+	count := 0
+	for _, h := range payload.ConversationState.History {
+		if h.UserInputMessage != nil && strings.Contains(h.UserInputMessage.Content, "SAME_ERROR_OUTPUT") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected 5 identical tool-result turns collapsed to 1, got %d", count)
+	}
+}
+
 // TestDropsDotPollutedAssistantTurns covers the second-order pollution: after
 // stripping "[Called tool ...]" from assistant turns that held only that text,
 // the turns become empty and must NOT be backfilled with ".". A history full of

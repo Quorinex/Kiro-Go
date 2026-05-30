@@ -1555,6 +1555,20 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 				continue // drop hollow assistant turn
 			}
 		}
+		// Collapse runs of consecutive identical user "Tool results" turns. A
+		// client stuck in a retry loop (e.g. the same tool error 100+ times)
+		// sends many identical tool results; once the hollow assistant turns
+		// between them are dropped they become adjacent duplicates that waste
+		// context and form a repetitive pattern. Keep one copy of each run.
+		if msg.UserInputMessage != nil && len(cleaned) > 0 {
+			last := cleaned[len(cleaned)-1]
+			if last.UserInputMessage != nil &&
+				strings.TrimSpace(last.UserInputMessage.Content) == strings.TrimSpace(msg.UserInputMessage.Content) &&
+				strings.TrimSpace(msg.UserInputMessage.Content) != "" &&
+				len(msg.UserInputMessage.Images) == 0 {
+				continue // skip duplicate consecutive user turn
+			}
+		}
 		cleaned = append(cleaned, msg)
 	}
 
