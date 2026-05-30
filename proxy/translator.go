@@ -1370,34 +1370,18 @@ func currentToolResultsMatchLastAssistant(history []KiroHistoryMessage, currentT
 	return true
 }
 
-// narrateToolUses renders structured assistant tool calls as plain text so they
-// can live in conversation history without the structured toolUses field.
-// Kiro's upstream rejects history that carries structured tool calls/results
-// (HTTP 400 "Improperly formed request"); only the active tool turn
-// (last history assistant toolUse ⟺ current message toolResults) may be structured.
-func narrateToolUses(toolUses []KiroToolUse) string {
-	if len(toolUses) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(toolUses))
-	for _, tu := range toolUses {
-		input := ""
-		if len(tu.Input) > 0 {
-			if raw, err := json.Marshal(tu.Input); err == nil {
-				input = string(raw)
-			}
-		}
-		if input != "" {
-			parts = append(parts, fmt.Sprintf("[Called tool %s with input %s]", tu.Name, input))
-		} else {
-			parts = append(parts, fmt.Sprintf("[Called tool %s]", tu.Name))
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
-// narrateToolResults renders structured tool results as plain text for history.
-func narrateToolResults(toolResults []KiroToolResult) string {
+// narrateToolResults renders structured tool results as plain text for a user
+// history turn. Each result is attributed to its originating tool call (by name)
+// when that mapping is known, so the model retains the tool's identity without
+// any assistant-side tool-invocation syntax to imitate.
+//
+// IMPORTANT: tool activity must never be narrated into ASSISTANT turns. Earlier
+// versions wrote "[Called tool X with input ...]" into assistant content, which
+// trained the model (via dozens of in-context examples) to emit that literal
+// text instead of issuing real structured tool calls. All tool narration lives
+// in user "Tool results" turns, which the model reads but never authors, so it
+// has no invocation pattern to copy.
+func narrateToolResults(toolResults []KiroToolResult, names map[string]string) string {
 	if len(toolResults) == 0 {
 		return ""
 	}
@@ -1411,9 +1395,13 @@ func narrateToolResults(toolResults []KiroToolResult) string {
 		}
 		body := strings.Join(texts, "\n")
 		if strings.TrimSpace(body) == "" {
-			continue
+			body = "(no output)"
 		}
-		parts = append(parts, body)
+		if name := names[tr.ToolUseID]; name != "" {
+			parts = append(parts, fmt.Sprintf("[%s] %s", name, body))
+		} else {
+			parts = append(parts, body)
+		}
 	}
 	if len(parts) == 0 {
 		return ""
@@ -1449,6 +1437,20 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 		return history
 	}
 
+	// Map every tool-use ID to its tool name across all assistant turns, so a
+	// user "Tool results" turn can attribute each result to its originating tool
+	// even after the structured toolUses are stripped from the assistant turn.
+	toolNames := make(map[string]string)
+	for i := range history {
+		if a := history[i].AssistantResponseMessage; a != nil {
+			for _, tu := range a.ToolUses {
+				if tu.ToolUseID != "" && tu.Name != "" {
+					toolNames[tu.ToolUseID] = tu.Name
+				}
+			}
+		}
+	}
+
 	// Determine whether the last history assistant turn is the "active" tool turn
 	// answered by the current message. If so, its structured toolUses stay.
 	activeIdx := -1
@@ -1475,15 +1477,19 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 			if i == activeIdx {
 				continue // keep the active tool turn structured
 			}
-			narrated := narrateToolUses(msg.AssistantResponseMessage.ToolUses)
-			msg.AssistantResponseMessage.Content = joinHistoryText(msg.AssistantResponseMessage.Content, narrated)
+			// Drop the structured tool calls WITHOUT writing any tool-invocation
+			// text into the assistant turn. Narrating the call here (e.g.
+			// "[Called tool X ...]") would give the model dozens of in-context
+			// examples of "invoke a tool by emitting this text", which it then
+			// imitates instead of issuing real structured tool calls. The tool's
+			// identity is preserved on the result side (user turn) via toolNames.
 			msg.AssistantResponseMessage.ToolUses = nil
 		}
 
 		if msg.UserInputMessage != nil && msg.UserInputMessage.UserInputMessageContext != nil {
 			ctx := msg.UserInputMessage.UserInputMessageContext
 			if len(ctx.ToolResults) > 0 {
-				narrated := narrateToolResults(ctx.ToolResults)
+				narrated := narrateToolResults(ctx.ToolResults, toolNames)
 				msg.UserInputMessage.Content = joinHistoryText(msg.UserInputMessage.Content, narrated)
 				ctx.ToolResults = nil
 			}

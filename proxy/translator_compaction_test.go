@@ -76,6 +76,21 @@ func TestClaudeToKiroFlattensHistoryToolCyclesForCompaction(t *testing.T) {
 	if !strings.Contains(combined, "tests pass") {
 		t.Fatalf("expected narrated tool results to retain output, got:\n%s", combined)
 	}
+
+	// Regression guard: assistant turns must NOT contain tool-invocation-looking
+	// text. Such text trains the model to emit it instead of real tool calls.
+	for i, h := range payload.ConversationState.History {
+		if a := h.AssistantResponseMessage; a != nil {
+			if strings.Contains(a.Content, "[Called tool") {
+				t.Fatalf("history[%d] assistant content contains mimicable tool-invocation text: %q", i, a.Content)
+			}
+		}
+	}
+	// Tool identity must be attributed on the user (result) side, never authored
+	// by the assistant.
+	if !strings.Contains(combined, "[exec_command]") {
+		t.Fatalf("expected tool results to be attributed to exec_command on the user side, got:\n%s", combined)
+	}
 }
 
 // TestClaudeToKiroKeepsActiveToolTurnStructured verifies the in-progress tool

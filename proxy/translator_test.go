@@ -166,13 +166,15 @@ func TestOpenAIToKiroAssistantToolCallsDoNotInjectPlaceholder(t *testing.T) {
 	}
 	// This assistant tool call sits in the middle of history (the conversation
 	// continues with a later user turn), so it is not the active tool turn.
-	// Kiro's upstream rejects structured tool calls buried in history, so it is
-	// narrated as text and the structured toolUses are cleared.
+	// Kiro's upstream rejects structured tool calls buried in history, so its
+	// structured toolUses are cleared. Crucially, NO tool-invocation text is
+	// written into the assistant turn — doing so would train the model to emit
+	// that text instead of issuing real tool calls.
 	if len(assistant.ToolUses) != 0 {
-		t.Fatalf("expected mid-history tool call to be flattened, got %d structured toolUses", len(assistant.ToolUses))
+		t.Fatalf("expected mid-history tool call to be cleared, got %d structured toolUses", len(assistant.ToolUses))
 	}
-	if !strings.Contains(assistant.Content, "get_weather") {
-		t.Fatalf("expected narrated tool call to mention tool name, got %q", assistant.Content)
+	if strings.Contains(assistant.Content, "get_weather") || strings.Contains(assistant.Content, "[Called tool") {
+		t.Fatalf("assistant turn must not contain tool-invocation text, got %q", assistant.Content)
 	}
 }
 
