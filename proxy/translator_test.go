@@ -458,3 +458,124 @@ func TestParseModelAndThinkingDoesNotRewriteDatedSnapshotMinor(t *testing.T) {
 		t.Fatalf("dated snapshot must not be rewritten with a dot, got %q", got)
 	}
 }
+
+func TestClaudeToolResultImageAttachedToCurrentMessage(t *testing.T) {
+	const imgData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	req := &ClaudeRequest{
+		Model: "claude-opus-4.8",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "read this image"},
+			{
+				Role: "assistant",
+				Content: []interface{}{
+					map[string]interface{}{"type": "tool_use", "id": "tool_1", "name": "read", "input": map[string]interface{}{"path": "a.png"}},
+				},
+			},
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "tool_1",
+						"content": []interface{}{
+							map[string]interface{}{
+								"type": "image",
+								"source": map[string]interface{}{
+									"type":       "base64",
+									"media_type": "image/png",
+									"data":       imgData,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	if len(cur.Images) != 1 {
+		t.Fatalf("expected tool_result image attached to current message, got %d images", len(cur.Images))
+	}
+	if cur.Images[0].Format != "png" || cur.Images[0].Source.Bytes != imgData {
+		t.Fatalf("unexpected image payload: %+v", cur.Images[0])
+	}
+	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
+		t.Fatalf("expected one tool result preserved")
+	}
+	if strings.TrimSpace(cur.UserInputMessageContext.ToolResults[0].Content[0].Text) == "" {
+		t.Fatalf("expected non-empty placeholder text for image-only tool result")
+	}
+}
+
+func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
+	const imgData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	req := &ClaudeRequest{
+		Model: "claude-opus-4.8",
+		Messages: []ClaudeMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "tool_2",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text", "text": "here is the screenshot"},
+							map[string]interface{}{
+								"type": "image",
+								"source": map[string]interface{}{
+									"type":       "base64",
+									"media_type": "image/png",
+									"data":       imgData,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	if len(cur.Images) != 1 {
+		t.Fatalf("expected one image extracted, got %d", len(cur.Images))
+	}
+	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
+		t.Fatalf("expected one tool result")
+	}
+	gotText := cur.UserInputMessageContext.ToolResults[0].Content[0].Text
+	if gotText != "here is the screenshot" {
+		t.Fatalf("expected original tool text preserved, got %q", gotText)
+	}
+}
+
+func TestOpenAIToolResultImageAttachedToCurrentMessage(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "look at the file"},
+			{
+				Role:       "tool",
+				ToolCallID: "call_img",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":      "image_url",
+						"image_url": map[string]interface{}{"url": dataURL},
+					},
+				},
+			},
+		},
+	}
+
+	payload := OpenAIToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	if len(cur.Images) != 1 {
+		t.Fatalf("expected tool image attached to current message, got %d", len(cur.Images))
+	}
+	if cur.Images[0].Format != "png" {
+		t.Fatalf("expected png format, got %q", cur.Images[0].Format)
+	}
+}

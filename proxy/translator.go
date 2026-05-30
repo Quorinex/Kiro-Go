@@ -43,6 +43,7 @@ const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
 
 const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
+const toolResultImagePlaceholder = "[Tool returned an image; the image is attached to this message.]"
 
 // ParseModelAndThinking resolves a client-supplied model name to a Kiro model ID
 // and reports whether thinking mode was requested via the configured suffix.
@@ -602,7 +603,13 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 				}
 			case "tool_result":
 				toolUseID, _ := block["tool_use_id"].(string)
-				resultContent := extractToolResultContent(block["content"])
+				resultContent, resultImages := extractToolResultContent(block["content"])
+				if len(resultImages) > 0 {
+					images = append(images, resultImages...)
+					if strings.TrimSpace(resultContent) == "" {
+						resultContent = toolResultImagePlaceholder
+					}
+				}
 				toolResults = append(toolResults, KiroToolResult{
 					ToolUseID: toolUseID,
 					Content:   []KiroResultContent{{Text: resultContent}},
@@ -653,22 +660,37 @@ func extractImageFromClaudeBlock(block map[string]interface{}) *KiroImage {
 	return nil
 }
 
-func extractToolResultContent(content interface{}) string {
+func extractToolResultContent(content interface{}) (string, []KiroImage) {
 	if s, ok := content.(string); ok {
-		return s
+		return s, nil
 	}
 	if blocks, ok := content.([]interface{}); ok {
 		var parts []string
+		var images []KiroImage
 		for _, b := range blocks {
-			if block, ok := b.(map[string]interface{}); ok {
-				if text, ok := block["text"].(string); ok {
-					parts = append(parts, text)
+			block, ok := b.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			blockType, _ := block["type"].(string)
+			switch blockType {
+			case "image", "image_url", "input_image":
+				if img := extractImageFromClaudeBlock(block); img != nil {
+					images = append(images, *img)
+					continue
 				}
 			}
+			if text, ok := block["text"].(string); ok {
+				parts = append(parts, text)
+				continue
+			}
+			if img := extractImageFromClaudeBlock(block); img != nil {
+				images = append(images, *img)
+			}
 		}
-		return strings.Join(parts, "")
+		return strings.Join(parts, ""), images
 	}
-	return ""
+	return "", nil
 }
 
 func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) {
@@ -1046,7 +1068,17 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			})
 
 		case "tool":
-			content := extractOpenAIMessageText(msg.Content)
+			cleanText, toolImages := extractOpenAIUserContent(msg.Content)
+			var content string
+			if len(toolImages) > 0 {
+				currentImages = append(currentImages, toolImages...)
+				content = strings.TrimSpace(cleanText)
+				if content == "" {
+					content = toolResultImagePlaceholder
+				}
+			} else {
+				content = extractOpenAIMessageText(msg.Content)
+			}
 			currentToolResults = append(currentToolResults, KiroToolResult{
 				ToolUseID: msg.ToolCallID,
 				Content:   []KiroResultContent{{Text: content}},
