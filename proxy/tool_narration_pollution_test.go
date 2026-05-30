@@ -73,3 +73,43 @@ func newPollToolCall(id, name, args string) ToolCall {
 	tc.Function.Arguments = args
 	return tc
 }
+
+// TestScrubsClientReplayedToolCallText covers the recovery path: a polluted
+// client stored the model's "[Called tool ...]" text output as assistant
+// history and replays it. The proxy must strip that text from assistant turns
+// so the pattern is not reinforced.
+func TestScrubsClientReplayedToolCallText(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-opus-4.8",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "do the task"},
+			// Assistant text the client captured from the model's polluted output.
+			{Role: "assistant", Content: "Let me check.\n\n[Called tool exec_command with input {\"cmd\":\"pwd\"}]"},
+			{Role: "user", Content: "continue"},
+			{Role: "assistant", Content: "[Called tool exec_command with input {\"cmd\":\"ls\"}]"},
+			{Role: "user", Content: "continue"},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+
+	for i, h := range payload.ConversationState.History {
+		if a := h.AssistantResponseMessage; a != nil {
+			if strings.Contains(a.Content, "[Called tool") {
+				t.Fatalf("history[%d] still contains replayed tool-call text: %q", i, a.Content)
+			}
+		}
+	}
+
+	// The natural prose around the stripped marker must be preserved.
+	var combined strings.Builder
+	for _, h := range payload.ConversationState.History {
+		if h.AssistantResponseMessage != nil {
+			combined.WriteString(h.AssistantResponseMessage.Content)
+			combined.WriteString("\n")
+		}
+	}
+	if !strings.Contains(combined.String(), "Let me check.") {
+		t.Fatalf("expected surrounding assistant prose to survive scrubbing, got:\n%s", combined.String())
+	}
+}

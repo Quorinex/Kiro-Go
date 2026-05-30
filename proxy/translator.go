@@ -1370,6 +1370,27 @@ func currentToolResultsMatchLastAssistant(history []KiroHistoryMessage, currentT
 	return true
 }
 
+// pollutedToolCallTextPattern matches the legacy "[Called tool X with input ...]"
+// / "[Called tool X]" narration that an earlier version of this proxy wrote into
+// assistant turns. Models trained on that in-context text began emitting it as
+// output instead of issuing real tool calls; clients then stored that output as
+// assistant history and replay it, re-seeding the pollution. We strip it from
+// assistant content on the way back upstream so the pattern is not reinforced
+// and the model can recover within an ongoing session.
+var pollutedToolCallTextPattern = regexp.MustCompile(`\[Called tool [^\]]*\]`)
+
+// stripPollutedToolCallText removes legacy tool-call narration from text and
+// tidies up the leftover whitespace.
+func stripPollutedToolCallText(content string) string {
+	if !strings.Contains(content, "[Called tool ") {
+		return content
+	}
+	cleaned := pollutedToolCallTextPattern.ReplaceAllString(content, "")
+	// Collapse blank lines left behind by removed markers.
+	cleaned = regexp.MustCompile(`\n{3,}`).ReplaceAllString(cleaned, "\n\n")
+	return strings.TrimSpace(cleaned)
+}
+
 // narrateToolResults renders structured tool results as plain text for a user
 // history turn. Each result is attributed to its originating tool call (by name)
 // when that mapping is known, so the model retains the tool's identity without
@@ -1472,6 +1493,15 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 
 	for i := range history {
 		msg := &history[i]
+
+		if msg.AssistantResponseMessage != nil {
+			// Scrub legacy tool-call narration that a polluted client may be
+			// replaying as assistant text, so we neither reinforce the pattern
+			// nor leave it for the model to imitate.
+			if msg.AssistantResponseMessage.Content != "" {
+				msg.AssistantResponseMessage.Content = stripPollutedToolCallText(msg.AssistantResponseMessage.Content)
+			}
+		}
 
 		if msg.AssistantResponseMessage != nil && len(msg.AssistantResponseMessage.ToolUses) > 0 {
 			if i == activeIdx {
