@@ -579,3 +579,52 @@ func TestOpenAIToolResultImageAttachedToCurrentMessage(t *testing.T) {
 		t.Fatalf("expected png format, got %q", cur.Images[0].Format)
 	}
 }
+
+func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "look at the file"},
+			{
+				Role: "assistant",
+				ToolCalls: []ToolCall{
+					{
+						ID:   "call_img",
+						Type: "function",
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{Name: "read", Arguments: `{"path":"a.png"}`},
+					},
+				},
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call_img",
+				Content: []interface{}{
+					map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": dataURL}},
+				},
+			},
+			{Role: "user", Content: "what do you see?"},
+		},
+	}
+
+	payload := OpenAIToKiro(req, false)
+
+	var toolHistImages int
+	for _, h := range payload.ConversationState.History {
+		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil &&
+			len(h.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
+			toolHistImages += len(h.UserInputMessage.Images)
+		}
+	}
+	if toolHistImages != 1 {
+		t.Fatalf("expected tool image carried on the flushed tool-result history entry, got %d", toolHistImages)
+	}
+
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	if len(cur.Images) != 0 {
+		t.Fatalf("tool image should not leak into a later user message, got %d on current", len(cur.Images))
+	}
+}

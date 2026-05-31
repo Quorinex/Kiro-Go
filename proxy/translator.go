@@ -1094,12 +1094,14 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 							Content: buildToolResultsContinuation(currentToolResults),
 							ModelID: modelID,
 							Origin:  origin,
+							Images:  currentImages,
 							UserInputMessageContext: &UserInputMessageContext{
 								ToolResults: currentToolResults,
 							},
 						},
 					})
 					currentToolResults = nil
+					currentImages = nil
 				}
 			}
 		}
