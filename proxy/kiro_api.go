@@ -19,6 +19,10 @@ const (
 
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
+	if err := ensureRestProfileArn(account); err != nil {
+		return nil, fmt.Errorf("resolve profileArn: %w", err)
+	}
+
 	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
 	url = withProfileArnQuery(url, account)
 
@@ -80,6 +84,10 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 
 // ListAvailableModels 获取可用模型列表
 func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
+	if err := ensureRestProfileArn(account); err != nil {
+		return nil, fmt.Errorf("resolve profileArn: %w", err)
+	}
+
 	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
 	url = withProfileArnQuery(url, account)
 
@@ -144,6 +152,18 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 	}
 
 	return "", fmt.Errorf("no available Kiro profile")
+}
+
+func ensureRestProfileArn(account *config.Account) error {
+	if account == nil || strings.TrimSpace(account.ProfileArn) != "" {
+		return nil
+	}
+	profileArn, err := ResolveProfileArn(account)
+	if err != nil {
+		return err
+	}
+	account.ProfileArn = profileArn
+	return nil
 }
 
 func listAvailableProfilesWithRetry(account *config.Account) (string, error) {
