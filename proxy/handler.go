@@ -265,24 +265,27 @@ func (h *Handler) refreshAllAccounts() {
 			continue
 		}
 
-		// 检查 token 是否需要刷新
-		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
-			newAccessToken, newRefreshToken, newExpiresAt, profileArn, err := auth.RefreshToken(account)
-			if err != nil {
-				logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
-				h.handleAccountFailure(account, err)
-				continue
-			}
-			account.AccessToken = newAccessToken
-			if newRefreshToken != "" {
-				account.RefreshToken = newRefreshToken
-			}
-			account.ExpiresAt = newExpiresAt
-			config.UpdateAccountToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
-			h.pool.UpdateToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
-			if profileArn != "" {
-				account.ProfileArn = profileArn
-				config.UpdateAccountProfileArn(account.ID, profileArn)
+		// Skip token refresh for API-key credentials, but still fetch account info
+		if !account.IsApiKeyCredential() {
+			// 检查 token 是否需要刷新
+			if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
+				newAccessToken, newRefreshToken, newExpiresAt, profileArn, err := auth.RefreshToken(account)
+				if err != nil {
+					logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
+					h.handleAccountFailure(account, err)
+					continue
+				}
+				account.AccessToken = newAccessToken
+				if newRefreshToken != "" {
+					account.RefreshToken = newRefreshToken
+				}
+				account.ExpiresAt = newExpiresAt
+				config.UpdateAccountToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
+				h.pool.UpdateToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
+				if profileArn != "" {
+					account.ProfileArn = profileArn
+					config.UpdateAccountProfileArn(account.ID, profileArn)
+				}
 			}
 		}
 
@@ -1994,6 +1997,11 @@ func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, me
 
 // ensureValidToken 确保 token 有效
 func (h *Handler) ensureValidToken(account *config.Account) error {
+	// API-key credentials are never refreshed
+	if account.IsApiKeyCredential() {
+		return nil
+	}
+
 	if account.ExpiresAt == 0 || time.Now().Unix() < account.ExpiresAt-tokenRefreshSkewSeconds {
 		return nil
 	}
@@ -2236,6 +2244,21 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		account.Region = "us-east-1"
 	}
 
+	// Handle API-key credential creation
+	if account.KiroApiKey != "" || strings.EqualFold(account.AuthMethod, "api_key") || strings.EqualFold(account.AuthMethod, "apikey") {
+		// Reject empty API key
+		if account.KiroApiKey == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "kiroApiKey is required"})
+			return
+		}
+		// Normalize authMethod and set expiry
+		account.AuthMethod = "api_key"
+		account.ExpiresAt = 0
+		account.AccessToken = account.KiroApiKey // Set accessToken to kiroApiKey for pool compatibility
+		// Don't call RefreshToken for API-key accounts
+	}
+
 	if err := config.AddAccount(account); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -2243,8 +2266,8 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.pool.Reload()
-	// 新账号若已启用且有 token，立即拉取并缓存模型列表
-	if account.Enabled && account.AccessToken != "" {
+	// 新账号若已启用且有 token（或是 API-key 账号），立即拉取并缓存模型列表
+	if account.Enabled && (account.AccessToken != "" || account.IsApiKeyCredential()) {
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", acc.Email, err)
@@ -2784,6 +2807,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		AuthMethod   string `json:"authMethod"`
 		Provider     string `json:"provider"`
 		Region       string `json:"region"`
+		AuthRegion   string `json:"authRegion"`
+		ApiRegion    string `json:"apiRegion"`
+		KiroApiKey   string `json:"kiroApiKey"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -2791,16 +2817,73 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 设置默认值
+	if req.Region == "" {
+		req.Region = "us-east-1"
+	}
+
+	// Handle API-key credential import
+	if req.KiroApiKey != "" || strings.EqualFold(req.AuthMethod, "api_key") || strings.EqualFold(req.AuthMethod, "apikey") {
+		// Reject empty API key
+		if req.KiroApiKey == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "kiroApiKey is required"})
+			return
+		}
+
+		// Create API-key account without requiring refresh
+		account := config.Account{
+			ID:         auth.GenerateAccountID(),
+			KiroApiKey: req.KiroApiKey,
+			AuthMethod: "api_key",
+			Region:     req.Region,
+			AuthRegion: req.AuthRegion,
+			ApiRegion:  req.ApiRegion,
+			ExpiresAt:  0,
+			Enabled:    true,
+			MachineId:  config.GenerateMachineId(),
+		}
+
+		// Best-effort: fetch account info to get email
+		tempAccount := &account
+		if info, err := RefreshAccountInfo(tempAccount); err == nil {
+			account.Email = info.Email
+			account.UserId = info.UserId
+			account.SubscriptionType = info.SubscriptionType
+			account.SubscriptionTitle = info.SubscriptionTitle
+			account.DaysRemaining = info.DaysRemaining
+			account.UsageCurrent = info.UsageCurrent
+			account.UsageLimit = info.UsageLimit
+			account.UsagePercent = info.UsagePercent
+			account.NextResetDate = info.NextResetDate
+			account.LastRefresh = info.LastRefresh
+		}
+
+		if err := config.AddAccount(account); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		h.pool.Reload()
+		// Fetch models for the new API-key account
+		go func(acc config.Account) {
+			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
+				logger.Warnf("[ModelsCache] Auto-refresh failed for new api_key account %s: %v", acc.Email, err)
+			}
+		}(account)
+
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "id": account.ID})
+		return
+	}
+
+	// OAuth flow (existing logic)
 	if req.RefreshToken == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "refreshToken is required"})
 		return
 	}
 
-	// 设置默认值
-	if req.Region == "" {
-		req.Region = "us-east-1"
-	}
 	if req.AuthMethod == "" {
 		if req.ClientID != "" {
 			req.AuthMethod = "idc"
@@ -2831,6 +2914,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		ClientSecret: req.ClientSecret,
 		AuthMethod:   req.AuthMethod,
 		Region:       req.Region,
+		AuthRegion:   req.AuthRegion,
+		ApiRegion:    req.ApiRegion,
 	}
 	accessToken, newRefreshToken, expiresAt, newProfileArn, err := auth.RefreshToken(tempAccount)
 	if err != nil {
@@ -2847,8 +2932,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 
 	// 创建账号
 	account := config.Account{
-		ID:           auth.GenerateAccountID(),
-		Email:        email,
+		ID:         auth.GenerateAccountID(),
+		Email:      email,
 		AccessToken:  accessToken,
 		RefreshToken: req.RefreshToken,
 		ClientID:     req.ClientID,
@@ -2856,6 +2941,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		AuthMethod:   req.AuthMethod,
 		Provider:     req.Provider,
 		Region:       req.Region,
+		AuthRegion:   req.AuthRegion,
+		ApiRegion:    req.ApiRegion,
 		ExpiresAt:    expiresAt,
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),

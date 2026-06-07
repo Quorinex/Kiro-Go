@@ -56,8 +56,19 @@ func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, m
 }
 
 func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kiroHeaderValues) {
-	if account != nil && account.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+account.AccessToken)
+	if account != nil {
+		if account.IsApiKeyCredential() {
+			// API key credential: use kiroApiKey as bearer token and add tokentype header
+			if account.KiroApiKey != "" {
+				req.Header.Set("Authorization", "Bearer "+account.KiroApiKey)
+				req.Header.Set("tokentype", "API_KEY")
+			}
+		} else {
+			// OAuth credential: use accessToken as bearer token
+			if account.AccessToken != "" {
+				req.Header.Set("Authorization", "Bearer "+account.AccessToken)
+			}
+		}
 	}
 	req.Header.Set("User-Agent", values.UserAgent)
 	req.Header.Set("x-amz-user-agent", values.AmzUserAgent)

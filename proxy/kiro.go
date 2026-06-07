@@ -342,15 +342,27 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
+		// Build region-specific URL and host
+		apiRegion := account.EffectiveApiRegion()
+		var endpointURL string
+		switch ep.Name {
+		case "CodeWhisperer":
+			endpointURL = fmt.Sprintf("https://codewhisperer.%s.amazonaws.com/generateAssistantResponse", apiRegion)
+		case "AmazonQ":
+			endpointURL = fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", apiRegion)
+		default: // Kiro IDE
+			endpointURL = fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", apiRegion)
+		}
+
 		reqBody, _ := json.Marshal(payload)
-		req, err := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody))
+		req, err := http.NewRequest("POST", endpointURL, bytes.NewReader(reqBody))
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
 		host := ""
-		if parsedURL, parseErr := url.Parse(ep.URL); parseErr == nil {
+		if parsedURL, parseErr := url.Parse(endpointURL); parseErr == nil {
 			host = parsedURL.Host
 		}
 		headerValues := buildStreamingHeaderValues(account, host)
