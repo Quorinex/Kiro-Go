@@ -1911,7 +1911,8 @@
     local: 'fa-solid fa-folder-open',
     credentials: 'fa-solid fa-code',
     cookie: 'fa-solid fa-cookie-bite',
-    apikey: 'fa-solid fa-lock'
+    apikey: 'fa-solid fa-lock',
+    manual: 'fa-solid fa-edit'
   };
   function methodCard(type, title, desc) {
     var icon = METHOD_ICONS[type] || 'fa-solid fa-circle-plus';
@@ -1936,6 +1937,7 @@
     else if (type === 'credentials') modalCredentials(title, body);
     else if (type === 'cookie') modalCookie(title, body);
     else if (type === 'apikey') modalApiKey(title, body);
+    else if (type === 'manual') modalManualEntry(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
@@ -1956,6 +1958,7 @@
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
       methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
       methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
+      methodCard('manual', t('modal.manualTitle'), t('modal.manualDesc')) +
       '</div>' +
       '<div class="modal-footer"><button class="btn btn-secondary" data-close-add="1" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>';
   }
@@ -2129,6 +2132,66 @@
       '<button class="btn btn-primary" id="importApikeyBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
       '</div>';
     $('importApikeyBtn').addEventListener('click', importApiKey);
+  }
+  function modalManualEntry(title, body) {
+    let manualAutoSelectMethod = false;
+    title.textContent = t('modal.manualTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.manualDesc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('manual.refreshTokenLabel')) + ' <small>' + escapeHtml(t('manual.refreshTokenHint')) + '</small></label>' +
+      '<textarea id="manualRefreshToken" placeholder="' + escapeAttr(t('manual.refreshTokenPlaceholder')) + '"></textarea></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('manual.clientIdLabel')) + ' <small>' + escapeHtml(t('manual.clientIdHint')) + '</small></label>' +
+      '<input type="text" id="manualClientId" placeholder="' + escapeAttr(t('manual.clientIdPlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('manual.clientSecretLabel')) + ' <small>' + escapeHtml(t('manual.clientSecretHint')) + '</small></label>' +
+      '<input type="password" id="manualClientSecret" placeholder="' + escapeAttr(t('manual.clientSecretPlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('manual.authMethodLabel')) + '</label>' +
+      '<select id="manualAuthMethod">' +
+      '<option value="idc">' + escapeHtml(t('manual.authMethodIdc')) + '</option>' +
+      '<option value="social">' + escapeHtml(t('manual.authMethodSocial')) + '</option>' +
+      '</select></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('manual.regionLabel')) + ' <small>' + escapeHtml(t('manual.regionHint')) + '</small></label>' +
+      '<input type="text" id="manualRegion" value="us-east-1" placeholder="' + escapeAttr(t('manual.regionPlaceholder')) + '" /></div>' +
+      '<div class="form-group">' +
+      '<a href="#" class="btn-link" id="manualAdvancedToggle">' + escapeHtml(t('manual.advancedLabel')) + ' <i class="fa-solid fa-chevron-right" aria-hidden="true"></i></a>' +
+      '</div>' +
+      '<div id="manualAdvancedGroup" class="hidden">' +
+      '<div class="form-group"><label>' + escapeHtml(t('manual.authRegionLabel')) + '</label>' +
+      '<input type="text" id="manualAuthRegion" placeholder="' + escapeAttr(t('manual.regionPlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('manual.apiRegionLabel')) + '</label>' +
+      '<input type="text" id="manualApiRegion" placeholder="' + escapeAttr(t('manual.regionPlaceholder')) + '" /></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importManualBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+
+    const advancedToggle = $('manualAdvancedToggle');
+    const advancedGroup = $('manualAdvancedGroup');
+    const clientIdInput = $('manualClientId');
+    const clientSecretInput = $('manualClientSecret');
+    const authMethodSelect = $('manualAuthMethod');
+
+    advancedToggle.addEventListener('click', (e) => {
+      e.preventDefault();
+      advancedGroup.classList.toggle('hidden');
+      advancedToggle.querySelector('i').classList.toggle('fa-chevron-right');
+      advancedToggle.querySelector('i').classList.toggle('fa-chevron-down');
+    });
+
+    const updateAutoSelect = () => {
+      if (manualAutoSelectMethod) return;
+      const hasClientId = clientIdInput.value.trim().length > 0;
+      const hasClientSecret = clientSecretInput.value.trim().length > 0;
+      if (hasClientId && hasClientSecret) {
+        authMethodSelect.value = 'idc';
+      }
+    };
+
+    clientIdInput.addEventListener('input', updateAutoSelect);
+    clientSecretInput.addEventListener('input', updateAutoSelect);
+    authMethodSelect.addEventListener('change', () => { manualAutoSelectMethod = true; });
+
+    $('importManualBtn').addEventListener('click', importManualCredentials);
   }
   function updateLocalFields() {
     const p = $('localProvider').value;
@@ -2321,6 +2384,44 @@
       autoRefreshNewAccount(d.id);
     } else {
       toastError(t('common.failed') + ': ' + (d.error || ''));
+    }
+  }
+  async function importManualCredentials() {
+    const refreshToken = $('manualRefreshToken').value.trim();
+    const clientId = $('manualClientId').value.trim();
+    const clientSecret = $('manualClientSecret').value.trim();
+    const authMethod = $('manualAuthMethod').value;
+    const region = $('manualRegion').value.trim() || 'us-east-1';
+    const authRegion = $('manualAuthRegion').value.trim() || '';
+    const apiRegion = $('manualApiRegion').value.trim() || '';
+
+    if (!refreshToken) return toastWarning(t('manual.validationError.refreshTokenRequired'));
+    if (authMethod === 'idc') {
+      if (!clientId) return toastWarning(t('manual.validationError.clientIdRequired'));
+      if (!clientSecret) return toastWarning(t('manual.validationError.clientSecretRequired'));
+    }
+
+    const payload = {
+      refreshToken,
+      clientId,
+      clientSecret,
+      authMethod,
+      region,
+      authRegion,
+      apiRegion
+    };
+
+    const res = await api('/auth/credentials', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    const d = await res.json();
+    if (d.success) {
+      closeModal(); loadAccounts(); loadStats();
+      toastPrimary(t('manual.importSuccess'));
+      autoRefreshNewAccount(d.id);
+    } else {
+      toastError(t('manual.importError', d.error || 'Unknown error'));
     }
   }
   async function startBuilderIdLogin() {
