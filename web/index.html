@@ -107,6 +107,8 @@
                 data-i18n="tabs.settings"></span></button>
             <button type="button" class="tab" data-tab="api"><i class="fa-solid fa-plug tab-icon"></i><span
                 data-i18n="tabs.api"></span></button>
+            <button type="button" class="tab" data-tab="logs"><i class="fa-solid fa-list tab-icon"></i><span
+                data-i18n="tabs.logs"></span></button>
           </div>
         </nav>
         <div class="topbar-actions flex-wrap justify-end">
@@ -467,6 +469,8 @@
                 </div>
               </div>
               <div class="endpoint api-code-row"><span class="api-code" id="modelsEndpoint"></span><button
+                  class="api-view-btn" type="button" id="viewModelsBtn" aria-label=""
+                  data-i18n-aria-label="api.viewModels"><i class="fa-solid fa-eye"></i></button><button
                   class="api-copy-btn" type="button" data-copy="modelsEndpoint" aria-label=""
                   data-i18n-aria-label="api.copyModels"><i class="fa-regular fa-copy"></i></button></div>
             </section>
@@ -479,12 +483,37 @@
                 </div>
               </div>
               <div class="endpoint api-code-row"><span class="api-code" id="statsEndpoint"></span><button
+                  class="api-view-btn" type="button" id="viewStatsBtn" aria-label=""
+                  data-i18n-aria-label="api.viewStats"><i class="fa-solid fa-eye"></i></button><button
                   class="api-copy-btn" type="button" data-copy="statsEndpoint" aria-label=""
                   data-i18n-aria-label="api.copyStats"><i class="fa-regular fa-copy"></i></button></div>
             </section>
           </div>
           <p class="api-hint"><i class="fa-solid fa-key"></i><span data-i18n="api.statsHint"></span></p>
         </section>
+      </div>
+
+      <!-- Logs tab -->
+      <div id="tabLogs" class="tab-content hidden">
+        <div class="card">
+          <div class="card-header logs-header">
+            <span class="card-title" data-i18n="logs.title"></span>
+            <div class="logs-actions">
+              <select id="logsFilterSelect" class="w-40!" data-i18n-aria-label="logs.filter">
+                <option value="all" data-i18n="logs.filterAll"></option>
+                <option value="success" data-i18n="logs.filterSuccess"></option>
+                <option value="error" data-i18n="logs.filterError"></option>
+              </select>
+              <button class="btn btn-outline btn-sm" id="logsRefreshBtn"><i class="fa-solid fa-rotate"></i><span class="btn-text" data-i18n="logs.refresh"></span></button>
+              <label class="logs-auto-toggle"><input type="checkbox" id="logsAutoRefresh" /> <span data-i18n="logs.autoRefresh"></span></label>
+              <button class="btn btn-danger btn-sm" id="logsClearBtn"><i class="fa-solid fa-trash"></i><span class="btn-text" data-i18n="logs.clear"></span></button>
+            </div>
+          </div>
+          <div class="logs-summary" id="logsSummary"></div>
+          <div id="logsList" class="logs-list">
+            <p class="text-muted" data-i18n="logs.empty"></p>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -633,6 +662,20 @@
           <button class="btn btn-outline" id="apiKeyShowCopyBtn" type="button" data-i18n="apiKeys.copyBtn"></button>
           <button class="btn btn-primary" id="apiKeyShowCloseBtn" type="button" data-i18n="apiKeys.closeBtn"></button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- API View Modal -->
+  <div id="apiViewModal" class="modal">
+    <div class="modal-content api-view-modal-content">
+      <div class="modal-header">
+        <span class="modal-title" id="apiViewTitle"></span>
+        <button class="modal-close" id="apiViewModalClose" type="button" aria-label=""
+          data-i18n-aria-label="common.close">&times;</button>
+      </div>
+      <div class="modal-body" id="apiViewBody">
+        <div class="api-view-loading"><i class="fa-solid fa-spinner fa-spin"></i> <span data-i18n="api.loading"></span></div>
       </div>
     </div>
   </div>
