@@ -129,6 +129,7 @@
     renderVersionBadge();
     renderAccounts();
     renderPromptRules();
+    renderLogs(logsCache);
   }
   function updateLangButtons() {
     qsa('.lang-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.lang === currentLang));
@@ -677,6 +678,120 @@
     $('statTokens').textContent = formatNum(d.totalTokens || 0);
     $('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
   }
+
+  // ===== Logs =====
+  let logsFilter = 'all';
+  let logsAutoTimer = null;
+  let logsCache = [];
+
+  function errorTypeLabel(type) {
+    if (!type) return '';
+    const key = 'errors.type' + type.charAt(0).toUpperCase() + type.slice(1);
+    return t(key) || type;
+  }
+
+  function formatLogTime(ts) {
+    const d = new Date(ts * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+      pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  function accountLabel(id) {
+    if (!id) return '-';
+    const acc = accountsData.find(a => a.id === id);
+    if (acc && acc.email) {
+      return privacyModeEnabled ? maskEmail(acc.email) : acc.email;
+    }
+    return id.slice(0, 8);
+  }
+
+  async function loadLogs() {
+    try {
+      const res = await api('/logs');
+      const d = await res.json();
+      const logs = d.logs || [];
+      renderLogs(logs);
+    } catch (e) {
+      // silent
+    }
+  }
+
+  function renderLogs(logs) {
+    logsCache = logs;
+    const list = $('logsList');
+    const summary = $('logsSummary');
+    if (!list) return;
+
+    const total = logs.length;
+    const okCount = logs.filter(l => l.status === 'success').length;
+    const errCount = total - okCount;
+    summary.innerHTML =
+      '<span>' + escapeHtml(t('logs.total')) + ': <strong>' + total + '</strong></span>' +
+      '<span>' + escapeHtml(t('logs.success')) + ': <strong>' + okCount + '</strong></span>' +
+      '<span>' + escapeHtml(t('logs.errors')) + ': <strong>' + errCount + '</strong></span>';
+
+    const filtered = logs.filter(l => logsFilter === 'all' || l.status === logsFilter);
+
+    if (!filtered.length) {
+      list.innerHTML = '<p class="text-muted">' + escapeHtml(t('logs.empty')) + '</p>';
+      return;
+    }
+
+    let html = '<table class="logs-table"><thead><tr>' +
+      '<th>' + escapeHtml(t('logs.time')) + '</th>' +
+      '<th>' + escapeHtml(t('logs.status')) + '</th>' +
+      '<th>' + escapeHtml(t('logs.endpoint')) + '</th>' +
+      '<th>' + escapeHtml(t('logs.model')) + '</th>' +
+      '<th>' + escapeHtml(t('logs.account')) + '</th>' +
+      '<th>' + escapeHtml(t('logs.tokens')) + '</th>' +
+      '<th>' + escapeHtml(t('logs.duration')) + '</th>' +
+      '<th>' + escapeHtml(t('logs.detail')) + '</th>' +
+      '</tr></thead><tbody>';
+    for (const l of filtered) {
+      const isErr = l.status === 'error';
+      const statusCell = '<span class="log-status log-status--' + escapeAttr(l.status) + '">' +
+        escapeHtml(isErr ? t('logs.statusError') : t('logs.statusSuccess')) + '</span>';
+      let detailCell;
+      if (isErr) {
+        detailCell = '<span class="err-badge err-badge--' + escapeAttr(l.errorType || 'unknown') + '">' +
+          escapeHtml(errorTypeLabel(l.errorType || 'unknown')) + '</span> ' +
+          '<span class="log-msg" title="' + escapeAttr(l.error) + '">' + escapeHtml(l.error) + '</span>';
+      } else {
+        detailCell = '<span class="text-muted">' + (l.credits ? (l.credits.toFixed(3) + ' cr') : '-') + '</span>';
+      }
+      html += '<tr>' +
+        '<td>' + escapeHtml(formatLogTime(l.time)) + '</td>' +
+        '<td>' + statusCell + '</td>' +
+        '<td>' + escapeHtml(l.endpoint) + '</td>' +
+        '<td>' + escapeHtml(l.model || '-') + '</td>' +
+        '<td>' + escapeHtml(accountLabel(l.accountId)) + '</td>' +
+        '<td>' + (l.tokens ? formatNum(l.tokens) : '-') + '</td>' +
+        '<td>' + (l.duration ? (l.duration + 'ms') : '-') + '</td>' +
+        '<td>' + detailCell + '</td>' +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    list.innerHTML = html;
+  }
+
+  async function clearLogs() {
+    if (!confirm(t('logs.clearConfirm'))) return;
+    await api('/logs', { method: 'DELETE' });
+    renderLogs([]);
+    toast(t('logs.cleared'), 'success');
+  }
+
+  function toggleLogsAutoRefresh() {
+    const on = $('logsAutoRefresh').checked;
+    if (logsAutoTimer) { clearInterval(logsAutoTimer); logsAutoTimer = null; }
+    if (on) {
+      logsAutoTimer = setInterval(() => {
+        if (!$('tabLogs').classList.contains('hidden')) loadLogs();
+      }, 5000);
+    }
+  }
+
   async function loadAccounts() {
     const res = await api('/accounts');
     accountsData = await res.json();
@@ -2573,6 +2688,7 @@
     qsa('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     qsa('.tab-content').forEach(c => c.classList.add('hidden'));
     $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
+    if (tab === 'logs') loadLogs();
   }
 
   // Event wiring
@@ -2626,6 +2742,25 @@
         toast(t('common.failed'), 'error');
       }
     }));
+
+    // API View buttons
+    $('viewModelsBtn').addEventListener('click', showModelsView);
+    $('viewStatsBtn').addEventListener('click', showStatsView);
+    $('apiViewModalClose').addEventListener('click', closeApiViewModal);
+    bindDialogBackdropClose('apiViewModal', closeApiViewModal);
+
+    // Logs tab
+    const logsRefreshBtn = $('logsRefreshBtn');
+    if (logsRefreshBtn) logsRefreshBtn.addEventListener('click', loadLogs);
+    const logsClearBtn = $('logsClearBtn');
+    if (logsClearBtn) logsClearBtn.addEventListener('click', clearLogs);
+    const logsAuto = $('logsAutoRefresh');
+    if (logsAuto) logsAuto.addEventListener('change', toggleLogsAutoRefresh);
+    const logsFilterSel = $('logsFilterSelect');
+    if (logsFilterSel) logsFilterSel.addEventListener('change', e => {
+      logsFilter = e.target.value;
+      loadLogs();
+    });
   }
 
   function bindAccountEvents() {
@@ -2761,6 +2896,218 @@
       e.preventDefault();
       runTestAccount(run.dataset.id, getTestModelValue());
     });
+  }
+
+  // ── API View Modal ──
+  function closeApiViewModal() {
+    closeDialog('apiViewModal');
+  }
+
+  function formatUptime(seconds) {
+    const d = Math.floor(seconds / 86400);
+    const h = Math.floor((seconds % 86400) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    const parts = [];
+    if (d > 0) parts.push(d + (currentLang === 'zh' ? '天' : 'd'));
+    if (h > 0) parts.push(h + (currentLang === 'zh' ? '时' : 'h'));
+    if (m > 0) parts.push(m + (currentLang === 'zh' ? '分' : 'm'));
+    parts.push(s + (currentLang === 'zh' ? '秒' : 's'));
+    return parts.join(' ');
+  }
+
+  async function showModelsView() {
+    const title = $('apiViewTitle');
+    const body = $('apiViewBody');
+    title.textContent = t('api.viewModelsTitle');
+    body.innerHTML = '<div class="api-view-loading"><i class="fa-solid fa-spinner fa-spin"></i> ' + escapeHtml(t('api.loading')) + '</div>';
+    openDialog('apiViewModal');
+
+    try {
+      const res = await fetch(baseUrl + '/v1/models');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const models = data.data || [];
+      renderModelsView(body, models);
+    } catch (e) {
+      body.innerHTML = '<div class="api-view-error"><i class="fa-solid fa-circle-exclamation"></i> ' + escapeHtml(t('api.fetchError') + ': ' + e.message) + '</div>';
+    }
+  }
+
+  function renderModelsView(container, models) {
+    const thinkingSuffix = '-thinking';
+    let html = '<div class="api-view-toolbar">';
+    html += '<span class="api-view-count">' + escapeHtml(t('api.totalModels').replace('{count}', models.length)) + '</span>';
+    html += '<input type="text" class="api-view-search" id="modelsSearchInput" placeholder="' + escapeAttr(t('api.searchModels')) + '" />';
+    html += '</div>';
+    html += '<div id="modelsGridContainer">';
+    html += buildModelsGroupedHtml(models, thinkingSuffix);
+    html += '</div>';
+    container.innerHTML = html;
+
+    const searchInput = $('modelsSearchInput');
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        const kw = searchInput.value.toLowerCase().trim();
+        const filtered = kw ? models.filter(m => (m.id || '').toLowerCase().includes(kw) || (m.owned_by || '').toLowerCase().includes(kw)) : models;
+        $('modelsGridContainer').innerHTML = buildModelsGroupedHtml(filtered, thinkingSuffix);
+      });
+    }
+  }
+
+  // SVG icons for model providers (inline style forces size over Tailwind preflight)
+  const _svgStyle = 'style="width:1.375rem;height:1.375rem;max-width:1.375rem;max-height:1.375rem;flex:none;display:block"';
+  const MODEL_SVGS = {
+    claude: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/></svg>',
+    openai: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616c.619-.357 1.356-.523 2.117-.523 2.854 0 4.662 2.212 4.662 4.566 0 .167 0 .357-.024.547l-4.71-2.759a.797.797 0 00-.856 0l-5.97 3.473zm10.609 8.8V12.06c0-.333-.143-.57-.429-.737l-5.97-3.473 1.95-1.118a.433.433 0 01.476 0l4.543 2.617c1.309.76 2.189 2.378 2.189 3.948 0 1.808-1.07 3.473-2.76 4.163zM7.802 12.703l-1.95-1.142c-.167-.095-.239-.238-.239-.428V5.899c0-2.545 1.95-4.472 4.591-4.472 1 0 1.927.333 2.712.928L8.23 5.067c-.285.166-.428.404-.428.737v6.898zM12 15.128l-2.795-1.57v-3.33L12 8.658l2.795 1.57v3.33L12 15.128zm1.796 7.23c-1 0-1.927-.332-2.712-.927l4.686-2.712c.285-.166.428-.404.428-.737v-6.898l1.974 1.142c.167.095.238.238.238.428v5.233c0 2.545-1.974 4.472-4.614 4.472zm-5.637-5.303l-4.544-2.617c-1.308-.761-2.188-2.378-2.188-3.948A4.482 4.482 0 014.21 6.327v5.423c0 .333.143.571.428.738l5.947 3.449-1.95 1.118a.432.432 0 01-.476 0zm-.262 3.9c-2.688 0-4.662-2.021-4.662-4.519 0-.19.024-.38.047-.57l4.686 2.71c.286.167.571.167.856 0l5.97-3.448v2.26c0 .19-.07.333-.237.428l-4.543 2.616c-.619.357-1.356.523-2.117.523zm5.899 2.83a5.947 5.947 0 005.827-4.756C22.287 18.339 24 15.84 24 13.296c0-1.665-.713-3.282-1.998-4.448.119-.5.19-.999.19-1.498 0-3.401-2.759-5.947-5.946-5.947-.642 0-1.26.095-1.88.31A5.962 5.962 0 0010.205 0a5.947 5.947 0 00-5.827 4.757C1.713 5.447 0 7.945 0 10.49c0 1.666.713 3.283 1.998 4.448-.119.5-.19 1-.19 1.499 0 3.401 2.759 5.946 5.946 5.946.642 0 1.26-.095 1.88-.309a5.96 5.96 0 004.162 1.713z"/></svg>',
+    deepseek: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z"/></svg>',
+    qwen: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M12.604 1.34c.393.69.784 1.382 1.174 2.075a.18.18 0 00.157.091h5.552c.174 0 .322.11.446.327l1.454 2.57c.19.337.24.478.024.837-.26.43-.513.864-.76 1.3l-.367.658c-.106.196-.223.28-.04.512l2.652 4.637c.172.301.111.494-.043.77-.437.785-.882 1.564-1.335 2.34-.159.272-.352.375-.68.37-.777-.016-1.552-.01-2.327.016a.099.099 0 00-.081.05 575.097 575.097 0 01-2.705 4.74c-.169.293-.38.363-.725.364-.997.003-2.002.004-3.017.002a.537.537 0 01-.465-.271l-1.335-2.323a.09.09 0 00-.083-.049H4.982c-.285.03-.553-.001-.805-.092l-1.603-2.77a.543.543 0 01-.002-.54l1.207-2.12a.198.198 0 000-.197 550.951 550.951 0 01-1.875-3.272l-.79-1.395c-.16-.31-.173-.496.095-.965.465-.813.927-1.625 1.387-2.436.132-.234.304-.334.584-.335a338.3 338.3 0 012.589-.001.124.124 0 00.107-.063l2.806-4.895a.488.488 0 01.422-.246c.524-.001 1.053 0 1.583-.006L11.704 1c.341-.003.724.032.9.34zm-3.432.403a.06.06 0 00-.052.03L6.254 6.788a.157.157 0 01-.135.078H3.253c-.056 0-.07.025-.041.074l5.81 10.156c.025.042.013.062-.034.063l-2.795.015a.218.218 0 00-.2.116l-1.32 2.31c-.044.078-.021.118.068.118l5.716.008c.046 0 .08.02.104.061l1.403 2.454c.046.081.092.082.139 0l5.006-8.76.783-1.382a.055.055 0 01.096 0l1.424 2.53a.122.122 0 00.107.062l2.763-.02a.04.04 0 00.035-.02.041.041 0 000-.04l-2.9-5.086a.108.108 0 010-.113l.293-.507 1.12-1.977c.024-.041.012-.062-.035-.062H9.2c-.059 0-.073-.026-.043-.077l1.434-2.505a.107.107 0 000-.114L9.225 1.774a.06.06 0 00-.053-.031zm6.29 8.02c.046 0 .058.02.034.06l-.832 1.465-2.613 4.585a.056.056 0 01-.05.029.058.058 0 01-.05-.029L8.498 9.841c-.02-.034-.01-.052.028-.054l.216-.012 6.722-.012z"/></svg>',
+    mistral: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path clip-rule="evenodd" fill="currentColor" d="M3.428 3.4h3.429v3.428h3.429v3.429h-.002 3.431V6.828h3.427V3.4h3.43v13.714H24v3.429H13.714v-3.428h-3.428v-3.429h-3.43v3.428h3.43v3.429H0v-3.429h3.428V3.4zm10.286 13.715h3.428v-3.429h-3.427v3.429z"/></svg>',
+    gemini: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"/></svg>',
+    meta: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M6.897 4c1.915 0 3.516.932 5.43 3.376l.282-.373c.19-.246.383-.484.58-.71l.313-.35C14.588 4.788 15.792 4 17.225 4c1.273 0 2.469.557 3.491 1.516l.218.213c1.73 1.765 2.917 4.71 3.053 8.026l.011.392.002.25c0 1.501-.28 2.759-.818 3.7l-.14.23-.108.153c-.301.42-.664.758-1.086 1.009l-.265.142-.087.04a3.493 3.493 0 01-.302.118 4.117 4.117 0 01-1.33.208c-.524 0-.996-.067-1.438-.215-.614-.204-1.163-.56-1.726-1.116l-.227-.235c-.753-.812-1.534-1.976-2.493-3.586l-1.43-2.41-.544-.895-1.766 3.13-.343.592C7.597 19.156 6.227 20 4.356 20c-1.21 0-2.205-.42-2.936-1.182l-.168-.184c-.484-.573-.837-1.311-1.043-2.189l-.067-.32a8.69 8.69 0 01-.136-1.288L0 14.468c.002-.745.06-1.49.174-2.23l.1-.573c.298-1.53.828-2.958 1.536-4.157l.209-.34c1.177-1.83 2.789-3.053 4.615-3.16L6.897 4zm-.033 2.615l-.201.01c-.83.083-1.606.673-2.252 1.577l-.138.199-.01.018c-.67 1.017-1.185 2.378-1.456 3.845l-.004.022a12.591 12.591 0 00-.207 2.254l.002.188c.004.18.017.36.04.54l.043.291c.092.503.257.908.486 1.208l.117.137c.303.323.698.492 1.17.492 1.1 0 1.796-.676 3.696-3.641l2.175-3.4.454-.701-.139-.198C9.11 7.3 8.084 6.616 6.864 6.616zm10.196-.552l-.176.007c-.635.048-1.223.359-1.82.933l-.196.198c-.439.462-.887 1.064-1.367 1.807l.266.398c.18.274.362.56.55.858l.293.475 1.396 2.335.695 1.114c.583.926 1.03 1.6 1.408 2.082l.213.262c.282.326.529.54.777.673l.102.05c.227.1.457.138.718.138.176.002.35-.023.518-.073.338-.104.61-.32.813-.637l.095-.163.077-.162c.194-.459.29-1.06.29-1.785l-.006-.449c-.08-2.871-.938-5.372-2.2-6.798l-.176-.189c-.67-.683-1.444-1.074-2.27-1.074z"/></svg>',
+    zhipu: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M11.991 23.503a.24.24 0 00-.244.248.24.24 0 00.244.249.24.24 0 00.245-.249.24.24 0 00-.22-.247l-.025-.001zM9.671 5.365a1.697 1.697 0 011.099 2.132l-.071.172-.016.04-.018.054c-.07.16-.104.32-.104.498-.035.71.47 1.279 1.186 1.314h.366c1.309.053 2.338 1.173 2.286 2.523-.052 1.332-1.152 2.38-2.478 2.327h-.174c-.715.018-1.274.64-1.239 1.368 0 .124.018.23.053.337.209.373.54.658.96.8.75.23 1.517-.125 1.9-.782l.018-.035c.402-.64 1.17-.96 1.92-.711.854.284 1.378 1.226 1.099 2.167a1.661 1.661 0 01-2.077 1.102 1.711 1.711 0 01-.907-.711l-.017-.035c-.2-.323-.463-.58-.851-.711l-.056-.018a1.646 1.646 0 00-1.954.746 1.66 1.66 0 01-1.065.764 1.677 1.677 0 01-1.989-1.279c-.209-.906.332-1.83 1.257-2.043a1.51 1.51 0 01.296-.035h.018c.68-.071 1.151-.622 1.116-1.333a1.307 1.307 0 00-.227-.693 2.515 2.515 0 01-.366-1.403 2.39 2.39 0 01.366-1.208c.14-.195.21-.444.227-.693.018-.71-.506-1.261-1.186-1.332l-.07-.018a1.43 1.43 0 01-.299-.07l-.05-.019a1.7 1.7 0 01-1.047-2.114 1.68 1.68 0 012.094-1.101zm-5.575 10.11c.26-.264.639-.367.994-.27.355.096.633.379.728.74.095.362-.007.748-.267 1.013-.402.41-1.053.41-1.455 0a1.062 1.062 0 010-1.482zm14.845-.294c.359-.09.738.024.992.297.254.274.344.665.237 1.025-.107.36-.396.634-.756.718-.551.128-1.1-.22-1.23-.781a1.05 1.05 0 01.757-1.26zm-.064-4.39c.314.32.49.753.49 1.206 0 .452-.176.886-.49 1.206-.315.32-.74.5-1.185.5-.444 0-.87-.18-1.184-.5a1.727 1.727 0 010-2.412 1.654 1.654 0 012.369 0zm-11.243.163c.364.484.447 1.128.218 1.691a1.665 1.665 0 01-2.188.923c-.855-.36-1.26-1.358-.907-2.228a1.68 1.68 0 011.33-1.038c.593-.08 1.183.169 1.547.652zm11.545-4.221c.368 0 .708.2.892.524.184.324.184.724 0 1.048a1.026 1.026 0 01-.892.524c-.568 0-1.03-.47-1.03-1.048 0-.579.462-1.048 1.03-1.048zm-14.358 0c.368 0 .707.2.891.524.184.324.184.724 0 1.048a1.026 1.026 0 01-.891.524c-.569 0-1.03-.47-1.03-1.048 0-.579.461-1.048 1.03-1.048zm10.031-1.475c.925 0 1.675.764 1.675 1.706s-.75 1.705-1.675 1.705-1.674-.763-1.674-1.705c0-.942.75-1.706 1.674-1.706zm-2.626-.684c.362-.082.653-.356.761-.718a1.062 1.062 0 00-.238-1.028 1.017 1.017 0 00-.996-.294c-.547.14-.881.7-.752 1.257.13.558.675.907 1.225.783zm0 16.876c.359-.087.644-.36.75-.72a1.062 1.062 0 00-.237-1.019 1.018 1.018 0 00-.985-.301 1.037 1.037 0 00-.762.717c-.108.361-.017.754.239 1.028.245.263.606.377.953.305l.043-.01zM17.19 3.5a.631.631 0 00.628-.64c0-.355-.279-.64-.628-.64a.631.631 0 00-.628.64c0 .355.28.64.628.64zm-10.38 0a.631.631 0 00.628-.64c0-.355-.28-.64-.628-.64a.631.631 0 00-.628.64c0 .355.279.64.628.64zm-5.182 7.852a.631.631 0 00-.628.64c0 .354.28.639.628.639a.63.63 0 00.627-.606l.001-.034a.62.62 0 00-.628-.64zm5.182 9.13a.631.631 0 00-.628.64c0 .355.279.64.628.64a.631.631 0 00.628-.64c0-.355-.28-.64-.628-.64zm10.38.018a.631.631 0 00-.628.64c0 .355.28.64.628.64a.631.631 0 00.628-.64c0-.355-.279-.64-.628-.64zm5.182-9.148a.631.631 0 00-.628.64c0 .354.279.639.628.639a.631.631 0 00.628-.64c0-.355-.28-.64-.628-.64zm-.384-4.992a.24.24 0 00.244-.249.24.24 0 00-.244-.249.24.24 0 00-.244.249c0 .142.122.249.244.249zM11.991.497a.24.24 0 00.245-.248A.24.24 0 0011.99 0a.24.24 0 00-.244.249c0 .133.108.236.223.247l.021.001zM2.011 6.36a.24.24 0 00.245-.249.24.24 0 00-.244-.249.24.24 0 00-.244.249.24.24 0 00.244.249zm0 11.263a.24.24 0 00-.243.248.24.24 0 00.244.249.24.24 0 00.244-.249.252.252 0 00-.244-.248zm19.995-.018a.24.24 0 00-.245.248.24.24 0 00.245.25.24.24 0 00.244-.25.252.252 0 00-.244-.248z"/></svg>',
+    minimax: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M16.278 2c1.156 0 2.093.927 2.093 2.07v12.501a.74.74 0 00.744.709.74.74 0 00.743-.709V9.099a2.06 2.06 0 012.071-2.049A2.06 2.06 0 0124 9.1v6.561a.649.649 0 01-.652.645.649.649 0 01-.653-.645V9.1a.762.762 0 00-.766-.758.762.762 0 00-.766.758v7.472a2.037 2.037 0 01-2.048 2.026 2.037 2.037 0 01-2.048-2.026v-12.5a.785.785 0 00-.788-.753.785.785 0 00-.789.752l-.001 15.904A2.037 2.037 0 0113.441 22a2.037 2.037 0 01-2.048-2.026V18.04c0-.356.292-.645.652-.645.36 0 .652.289.652.645v1.934c0 .263.142.506.372.638.23.131.514.131.744 0a.734.734 0 00.372-.638V4.07c0-1.143.937-2.07 2.093-2.07zm-5.674 0c1.156 0 2.093.927 2.093 2.07v11.523a.648.648 0 01-.652.645.648.648 0 01-.652-.645V4.07a.785.785 0 00-.789-.78.785.785 0 00-.789.78v14.013a2.06 2.06 0 01-2.07 2.048 2.06 2.06 0 01-2.071-2.048V9.1a.762.762 0 00-.766-.758.762.762 0 00-.766.758v3.8a2.06 2.06 0 01-2.071 2.049A2.06 2.06 0 010 12.9v-1.378c0-.357.292-.646.652-.646.36 0 .653.29.653.646V12.9c0 .418.343.757.766.757s.766-.339.766-.757V9.099a2.06 2.06 0 012.07-2.048 2.06 2.06 0 012.071 2.048v8.984c0 .419.343.758.767.758.423 0 .766-.339.766-.758V4.07c0-1.143.937-2.07 2.093-2.07z"/></svg>',
+    proxy: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>'
+  };
+
+  function getModelFamily(id) {
+    const lower = id.toLowerCase();
+    if (lower.startsWith('claude-') || lower.startsWith('anthropic')) return 'claude';
+    if (lower.startsWith('gpt-') || lower === 'o1' || lower.startsWith('o1-') || lower.startsWith('o3-') || lower.startsWith('o4-')) return 'openai';
+    if (lower.startsWith('deepseek')) return 'deepseek';
+    if (lower.startsWith('qwen') || lower.startsWith('qwq') || lower.startsWith('qvq')) return 'qwen';
+    if (lower.startsWith('glm') || lower.startsWith('chatglm') || lower.startsWith('zhipu') || lower.startsWith('codegeex')) return 'zhipu';
+    if (lower.startsWith('minimax') || lower.startsWith('abab')) return 'minimax';
+    if (lower.startsWith('mistral') || lower.startsWith('mixtral') || lower.startsWith('codestral')) return 'mistral';
+    if (lower.startsWith('gemini') || lower.startsWith('gemma')) return 'gemini';
+    if (lower.startsWith('llama') || lower.startsWith('meta-') || lower.startsWith('codellama')) return 'meta';
+    if (lower === 'auto' || lower.startsWith('auto')) return 'proxy';
+    return 'other';
+  }
+
+  function getModelFamilyLabel(family) {
+    const labels = {
+      claude: 'Claude (Anthropic)',
+      openai: 'OpenAI',
+      deepseek: 'DeepSeek',
+      qwen: 'Qwen (Alibaba)',
+      zhipu: 'GLM (Zhipu)',
+      minimax: 'MiniMax',
+      mistral: 'Mistral AI',
+      gemini: 'Gemini (Google)',
+      meta: 'LLaMA (Meta)',
+      proxy: 'Proxy Aliases',
+      other: currentLang === 'zh' ? '其他模型' : 'Other'
+    };
+    return labels[family] || family;
+  }
+
+  function getModelFamilyColor(family) {
+    const colors = {
+      claude: '#d97757',
+      openai: '#10a37f',
+      deepseek: '#4d6bfe',
+      qwen: '#615ced',
+      zhipu: '#3859ff',
+      minimax: '#e1474f',
+      mistral: '#ff7000',
+      gemini: '#4285f4',
+      meta: '#0668e1',
+      proxy: '#888888',
+      other: '#6b7280'
+    };
+    return colors[family] || '#6b7280';
+  }
+
+  function buildModelsGroupedHtml(models, thinkingSuffix) {
+    if (models.length === 0) {
+      return '<div class="api-view-loading">' + escapeHtml(t('api.noModels')) + '</div>';
+    }
+
+    // Group models by family
+    const groups = {};
+    const familyOrder = ['claude', 'openai', 'deepseek', 'qwen', 'zhipu', 'minimax', 'mistral', 'gemini', 'meta', 'proxy', 'other'];
+    for (const m of models) {
+      const family = getModelFamily(m.id || '');
+      if (!groups[family]) groups[family] = [];
+      groups[family].push(m);
+    }
+
+    let html = '';
+    for (const family of familyOrder) {
+      if (!groups[family] || groups[family].length === 0) continue;
+      const familyModels = groups[family];
+      const color = getModelFamilyColor(family);
+      const svg = MODEL_SVGS[family] || MODEL_SVGS.proxy;
+      const label = getModelFamilyLabel(family);
+
+      html += '<div class="model-group">';
+      html += '<div class="model-group-header">';
+      html += '<span class="model-group-icon" style="color:' + color + '">' + svg + '</span>';
+      html += '<span class="model-group-title">' + escapeHtml(label) + '</span>';
+      html += '<span class="model-group-count">' + familyModels.length + '</span>';
+      html += '</div>';
+      html += '<div class="model-group-grid">';
+
+      for (const m of familyModels) {
+        const id = m.id || '';
+        const isThinking = id.endsWith(thinkingSuffix);
+        const supportsImage = m.supports_image || false;
+
+        html += '<div class="model-item">';
+        html += '<div class="model-info">';
+        html += '<div class="model-name">' + escapeHtml(id) + '</div>';
+        html += '<div class="model-badges">';
+        if (isThinking) html += '<span class="model-badge model-badge--thinking"><i class="fa-solid fa-brain"></i> thinking</span>';
+        if (supportsImage) html += '<span class="model-badge model-badge--image"><i class="fa-solid fa-image"></i> vision</span>';
+        html += '</div>';
+        html += '</div>';
+        html += '</div>';
+      }
+
+      html += '</div></div>';
+    }
+    return html;
+  }
+
+  async function showStatsView() {
+    const title = $('apiViewTitle');
+    const body = $('apiViewBody');
+    title.textContent = t('api.viewStatsTitle');
+    body.innerHTML = '<div class="api-view-loading"><i class="fa-solid fa-spinner fa-spin"></i> ' + escapeHtml(t('api.loading')) + '</div>';
+    openDialog('apiViewModal');
+
+    try {
+      const res = await api('/status');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const d = await res.json();
+      renderStatsView(body, d);
+    } catch (e) {
+      body.innerHTML = '<div class="api-view-error"><i class="fa-solid fa-circle-exclamation"></i> ' + escapeHtml(t('api.fetchError') + ': ' + e.message) + '</div>';
+    }
+  }
+
+  function renderStatsView(container, d) {
+    const version = String(d.version || currentVersion || '-').replace(/^v/i, '');
+    let html = '<div class="stats-view-grid">';
+    html += statsCard(t('api.statsVersion'), version, '');
+    html += statsCard(t('api.statsAccounts'), d.accounts || 0, '');
+    html += statsCard(t('api.statsAvailable'), d.available || 0, 'success');
+    html += statsCard(t('api.statsTotalReqs'), formatNum(d.totalRequests || 0), 'info');
+    html += statsCard(t('api.statsSuccessReqs'), formatNum(d.successRequests || 0), 'success');
+    html += statsCard(t('api.statsFailedReqs'), formatNum(d.failedRequests || 0), 'danger');
+    html += statsCard(t('api.statsTotalTokens'), formatNum(d.totalTokens || 0), '');
+    html += statsCard(t('api.statsTotalCredits'), (d.totalCredits || 0).toFixed(2), 'info');
+    html += '</div>';
+    if (d.uptime !== undefined) {
+      html += '<div class="stats-view-uptime"><i class="fa-solid fa-clock"></i> ' + escapeHtml(t('api.statsUptime')) + ': <strong>' + escapeHtml(formatUptime(d.uptime)) + '</strong></div>';
+    }
+    container.innerHTML = html;
+  }
+
+  function statsCard(label, value, variant) {
+    const cls = variant ? ' stats-view-item--' + variant : '';
+    return '<div class="stats-view-item' + cls + '"><div class="stats-view-value">' + escapeHtml(String(value)) + '</div><div class="stats-view-label">' + escapeHtml(label) + '</div></div>';
   }
 
   function wireEvents() {
