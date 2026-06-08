@@ -342,15 +342,18 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
+		// Target the account's region; endpoint URLs are declared for us-east-1.
+		epURL := regionalizeURL(ep.URL, account)
+
 		reqBody, _ := json.Marshal(payload)
-		req, err := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody))
+		req, err := http.NewRequest("POST", epURL, bytes.NewReader(reqBody))
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
 		host := ""
-		if parsedURL, parseErr := url.Parse(ep.URL); parseErr == nil {
+		if parsedURL, parseErr := url.Parse(epURL); parseErr == nil {
 			host = parsedURL.Host
 		}
 		headerValues := buildStreamingHeaderValues(account, host)

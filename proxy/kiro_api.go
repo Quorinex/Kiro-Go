@@ -17,9 +17,41 @@ const (
 	kiroRestAPIBase = "https://codewhisperer.us-east-1.amazonaws.com"
 )
 
+// kiroRegion returns the AWS region the account's Kiro profile lives in,
+// defaulting to us-east-1 when unset. AWS provisions Kiro / Q Developer
+// profiles per region, so a profile such as KiroProfile-eu-central-1 only
+// resolves against its own regional endpoint. Every data-plane call must
+// therefore target the account's region rather than a hardcoded one.
+func kiroRegion(account *config.Account) string {
+	if account != nil {
+		if r := strings.TrimSpace(account.Region); r != "" {
+			return r
+		}
+	}
+	return "us-east-1"
+}
+
+// regionalizeURL points a hardcoded us-east-1 Kiro endpoint at the account's
+// region. Amazon Q is regional (q.{region}.amazonaws.com), but the CodeWhisperer
+// REST host only exists in us-east-1 — non-us-east-1 accounts are served by the
+// regional Amazon Q host instead. So for those accounts both us-east-1 hosts map
+// to q.{region}. It is a no-op for us-east-1 accounts.
+func regionalizeURL(rawURL string, account *config.Account) string {
+	region := kiroRegion(account)
+	if region == "us-east-1" {
+		return rawURL
+	}
+	regionalHost := "q." + region + ".amazonaws.com"
+	return strings.NewReplacer(
+		"q.us-east-1.amazonaws.com", regionalHost,
+		"codewhisperer.us-east-1.amazonaws.com", regionalHost,
+	).Replace(rawURL)
+}
+
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
+	url = regionalizeURL(url, account)
 	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -49,7 +81,7 @@ func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 
 // GetUserInfo 获取用户信息
 func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
-	url := fmt.Sprintf("%s/GetUserInfo", kiroRestAPIBase)
+	url := regionalizeURL(fmt.Sprintf("%s/GetUserInfo", kiroRestAPIBase), account)
 
 	payload := `{"origin":"KIRO_IDE"}`
 	req, err := http.NewRequest("POST", url, strings.NewReader(payload))
@@ -81,6 +113,7 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 // ListAvailableModels 获取可用模型列表
 func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
+	url = regionalizeURL(url, account)
 	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -190,7 +223,7 @@ func isTransientProfileFetchError(err error) bool {
 }
 
 func listAvailableProfiles(account *config.Account) (string, error) {
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), strings.NewReader(`{"maxResults":10}`))
+	req, err := http.NewRequest("POST", regionalizeURL(fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), account), strings.NewReader(`{"maxResults":10}`))
 	if err != nil {
 		return "", err
 	}
