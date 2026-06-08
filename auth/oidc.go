@@ -12,12 +12,18 @@ import (
 
 // oidcTokenURL 构造 idc/builderId 刷新 endpoint。测试可替换以拦截网络调用。
 var oidcTokenURL = func(region string) string {
+	if region == "" {
+		region = "us-east-1"
+	}
 	return fmt.Sprintf("https://oidc.%s.amazonaws.com/token", region)
 }
 
 // socialTokenURL 构造 social 刷新 endpoint。测试可替换以拦截网络调用。
-var socialTokenURL = func() string {
-	return "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
+var socialTokenURL = func(region string) string {
+	if region == "" {
+		region = "us-east-1"
+	}
+	return fmt.Sprintf("https://prod.%s.auth.desktop.kiro.dev/refreshToken", region)
 }
 
 // RefreshToken 刷新 access token
@@ -31,9 +37,9 @@ func RefreshToken(account *config.Account) (string, string, int64, string, error
 	client := GetAuthClientForProxy(proxyURL)
 
 	if account.AuthMethod == "social" {
-		return refreshSocialToken(account.RefreshToken, client)
+		return refreshSocialToken(account.RefreshToken, account.EffectiveAuthRegion(), client)
 	}
-	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
+	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.EffectiveAuthRegion(), client)
 }
 
 // refreshOIDCToken IdC/Builder ID token 刷新
@@ -85,8 +91,8 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, clien
 }
 
 // refreshSocialToken Social (GitHub/Google) token 刷新
-func refreshSocialToken(refreshToken string, client *http.Client) (string, string, int64, string, error) {
-	url := socialTokenURL()
+func refreshSocialToken(refreshToken, region string, client *http.Client) (string, string, int64, string, error) {
+	url := socialTokenURL(region)
 
 	payload := map[string]string{
 		"refreshToken": refreshToken,

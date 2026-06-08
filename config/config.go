@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,9 +46,12 @@ type Account struct {
 	RefreshToken string `json:"refreshToken"`           // OAuth refresh token for token renewal
 	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
 	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
-	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC) or "social" (GitHub/Google)
+	KiroApiKey   string `json:"kiroApiKey,omitempty"`   // API key credential for headless auth (used directly as bearer token)
+	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC), "social" (GitHub/Google), or "api_key"
 	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub")
-	Region       string `json:"region"`                 // AWS region for OIDC endpoints
+	Region       string `json:"region"`                 // AWS region (fallback for both auth and API region)
+	AuthRegion   string `json:"authRegion,omitempty"`   // Region for token refresh endpoints; falls back to region
+	ApiRegion    string `json:"apiRegion,omitempty"`    // Region for API request hosts; falls back to region
 	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
 	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
@@ -179,6 +183,11 @@ type Config struct {
 	//         "http://host:port",  "http://user:pass@host:port"
 	// Leave empty to connect directly.
 	ProxyURL string `json:"proxyURL,omitempty"`
+
+	// Global region configuration (fallback for all accounts)
+	Region       string `json:"region,omitempty"`       // Default region for both auth and API; defaults to us-east-1
+	AuthRegion   string `json:"authRegion,omitempty"`   // Default region for token refresh endpoints
+	ApiRegion    string `json:"apiRegion,omitempty"`    // Default region for API request hosts
 
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
 	// Migrated to FilterClaudeCode on first load. Do not use directly.
@@ -855,6 +864,36 @@ func UpdateLogLevel(level string) error {
 	return Save()
 }
 
+// GetGlobalRegion returns the global default region. Defaults to "us-east-1".
+func GetGlobalRegion() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.Region == "" {
+		return "us-east-1"
+	}
+	return cfg.Region
+}
+
+// GetGlobalAuthRegion returns the global default auth region. Defaults to "us-east-1".
+func GetGlobalAuthRegion() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.AuthRegion == "" {
+		return "us-east-1"
+	}
+	return cfg.AuthRegion
+}
+
+// GetGlobalApiRegion returns the global default API region. Defaults to "us-east-1".
+func GetGlobalApiRegion() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.ApiRegion == "" {
+		return "us-east-1"
+	}
+	return cfg.ApiRegion
+}
+
 type KiroClientConfig struct {
 	KiroVersion   string
 	SystemVersion string
@@ -900,3 +939,59 @@ func defaultSystemVersion() string {
 		return "linux#6.6.87"
 	}
 }
+
+// IsApiKeyCredential returns true if this account is authenticated via API key.
+// An account is an API-key credential if KiroApiKey is non-empty OR if authMethod
+// is "api_key" or "apikey" (case-insensitive).
+func (a *Account) IsApiKeyCredential() bool {
+	if a.KiroApiKey != "" {
+		return true
+	}
+	method := strings.ToLower(a.AuthMethod)
+	return method == "api_key" || method == "apikey"
+}
+
+// EffectiveAuthRegion returns the effective auth region for this account,
+// resolved using the fallback chain:
+// account.authRegion > account.region > global authRegion > global region > "us-east-1"
+func (a *Account) EffectiveAuthRegion() string {
+	if a.AuthRegion != "" {
+		return a.AuthRegion
+	}
+	if a.Region != "" {
+		return a.Region
+	}
+	// Fall back to global config accessors
+	authRegion := GetGlobalAuthRegion()
+	if authRegion != "us-east-1" {
+		return authRegion
+	}
+	globalRegion := GetGlobalRegion()
+	if globalRegion != "us-east-1" {
+		return globalRegion
+	}
+	return "us-east-1"
+}
+
+// EffectiveApiRegion returns the effective API region for this account,
+// resolved using the fallback chain:
+// account.apiRegion > account.region > global apiRegion > global region > "us-east-1"
+func (a *Account) EffectiveApiRegion() string {
+	if a.ApiRegion != "" {
+		return a.ApiRegion
+	}
+	if a.Region != "" {
+		return a.Region
+	}
+	// Fall back to global config accessors
+	apiRegion := GetGlobalApiRegion()
+	if apiRegion != "us-east-1" {
+		return apiRegion
+	}
+	globalRegion := GetGlobalRegion()
+	if globalRegion != "us-east-1" {
+		return globalRegion
+	}
+	return "us-east-1"
+}
+
