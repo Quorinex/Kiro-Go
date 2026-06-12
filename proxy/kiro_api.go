@@ -9,6 +9,7 @@ import (
 	"kiro-go/logger"
 	"net/http"
 	neturl "net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -17,9 +18,24 @@ const (
 	kiroRestAPIBase = "https://codewhisperer.us-east-1.amazonaws.com"
 )
 
+// kiroRestBaseForAccount returns the CodeWhisperer REST base. The CodeWhisperer
+// host only resolves in us-east-1, so this is always us-east-1 (used for endpoints
+// without regional Q equivalents: GetUserInfo, ListAvailableModels).
+func kiroRestBaseForAccount(account *config.Account) string {
+	return kiroRestAPIBase
+}
+
+// kiroUsageBaseForAccount returns the Q Developer base for usage/limit queries,
+// targeted at the account's profile region. The Q host (q.<region>) has regional
+// endpoints (unlike codewhisperer.<region>, which only exists in us-east-1).
+func kiroUsageBaseForAccount(account *config.Account) string {
+	region := regionForKiroAPI(account, nil)
+	return rewriteEndpointRegion(kiroQAPIBase, region)
+}
+
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
-	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
+	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroUsageBaseForAccount(account))
 	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -49,7 +65,7 @@ func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 
 // GetUserInfo 获取用户信息
 func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
-	url := fmt.Sprintf("%s/GetUserInfo", kiroRestAPIBase)
+	url := fmt.Sprintf("%s/GetUserInfo", kiroRestBaseForAccount(account))
 
 	payload := `{"origin":"KIRO_IDE"}`
 	req, err := http.NewRequest("POST", url, strings.NewReader(payload))
@@ -80,7 +96,7 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 
 // ListAvailableModels 获取可用模型列表
 func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
-	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
+	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestBaseForAccount(account))
 	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -111,8 +127,10 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 }
 
 // ResolveProfileArn returns the account profile ARN, fetching and caching it
-// when it is missing. First tries ListAvailableProfiles; if that returns empty,
-// falls back to refreshing the token (which returns profileArn in the response).
+// when it is missing. First tries ListAvailableProfiles (across regions); if that
+// returns empty, falls back to refreshing the token (which returns profileArn in
+// the response). When multiple profiles are discovered, all are recorded in the
+// account's KnownProfileArns so the admin can route across them.
 func ResolveProfileArn(account *config.Account) (string, error) {
 	if account == nil {
 		return "", fmt.Errorf("account is nil")
@@ -121,14 +139,23 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 		return profileArn, nil
 	}
 
-	// Try ListAvailableProfiles first, retrying on transient failures.
-	profileArn, err := listAvailableProfilesWithRetry(account)
-	if err == nil && profileArn != "" {
-		if updateErr := config.UpdateAccountProfileArn(account.ID, profileArn); updateErr != nil {
+	// Discover all profiles (across regions, with pagination), retrying transient errors.
+	profiles, err := discoverProfilesWithRetry(account)
+	if err == nil && len(profiles) > 0 {
+		primary := profiles[0]
+		if updateErr := config.UpdateAccountProfileArn(account.ID, primary); updateErr != nil {
 			logger.Warnf("[ProfileArn] Failed to cache profile ARN for %s: %v", account.Email, updateErr)
 		}
-		account.ProfileArn = profileArn
-		return profileArn, nil
+		if len(profiles) > 1 {
+			// This account exposes multiple Kiro profiles (possibly across regions).
+			// The current config model routes a single profile per account, so we
+			// use the first and surface the rest for visibility. To route across
+			// all of them, add a separate account entry per profileArn.
+			logger.Infof("[ProfileArn] %s has %d profiles; using %s. Others: %s",
+				account.Email, len(profiles), primary, strings.Join(profiles[1:], ", "))
+		}
+		account.ProfileArn = primary
+		return primary, nil
 	}
 
 	// Fallback: refresh token to get profileArn from auth response
@@ -146,29 +173,36 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 	return "", fmt.Errorf("no available Kiro profile")
 }
 
-func listAvailableProfilesWithRetry(account *config.Account) (string, error) {
-	// Retry transient failures (network errors, 5xx, 429) with short backoff.
-	// An empty profile list or 4xx (other than 429) is treated as authoritative
-	// and not retried — they reflect account state, not upstream flakiness.
+// ListAccountProfiles discovers every Kiro profile available to an account across
+// all candidate regions. Returns deduplicated ARNs (any region). Public so the
+// admin "refresh profiles" flow can enumerate routes.
+func ListAccountProfiles(account *config.Account) ([]string, error) {
+	return discoverProfilesWithRetry(account)
+}
+
+func discoverProfilesWithRetry(account *config.Account) ([]string, error) {
 	const maxAttempts = 3
 	backoff := 200 * time.Millisecond
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		profileArn, err := listAvailableProfiles(account)
+		profiles, err := discoverProfiles(account)
+		if err == nil && len(profiles) > 0 {
+			return profiles, nil
+		}
 		if err == nil {
-			return profileArn, nil
+			return nil, fmt.Errorf("empty profile list")
 		}
 		lastErr = err
 		if !isTransientProfileFetchError(err) || attempt == maxAttempts {
-			return "", err
+			return nil, err
 		}
-		logger.Debugf("[ProfileArn] ListAvailableProfiles transient failure for %s (attempt %d/%d): %v",
+		logger.Debugf("[ProfileArn] discoverProfiles transient failure for %s (attempt %d/%d): %v",
 			account.Email, attempt, maxAttempts, err)
 		time.Sleep(backoff)
 		backoff *= 2
 	}
-	return "", lastErr
+	return nil, lastErr
 }
 
 // isTransientProfileFetchError reports whether a ListAvailableProfiles error
@@ -189,39 +223,153 @@ func isTransientProfileFetchError(err error) bool {
 	return true
 }
 
-func listAvailableProfiles(account *config.Account) (string, error) {
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), strings.NewReader(`{"maxResults":10}`))
-	if err != nil {
-		return "", err
-	}
-	setKiroHeaders(req, account)
-	req.Header.Set("Content-Type", "application/json")
+// discoverProfiles enumerates every Kiro profile available to the account across
+// all candidate regions, deduplicated. The Q Developer host (q.<region>) returns
+// the profiles that live in that region, so we probe each candidate region and
+// merge. Pagination (nextToken) is followed per region.
+func discoverProfiles(account *config.Account) ([]string, error) {
+	candidateRegions := profileSearchRegions(account)
 
-	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result struct {
-		Profiles []struct {
-			Arn string `json:"arn"`
-		} `json:"profiles"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	for _, profile := range result.Profiles {
-		if profileArn := strings.TrimSpace(profile.Arn); profileArn != "" {
-			return profileArn, nil
+	seen := map[string]bool{}
+	var all []string
+	var lastErr error
+	for _, region := range candidateRegions {
+		base := rewriteEndpointRegion(kiroQAPIBase, region)
+		arns, err := listProfilesInRegion(account, base)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, arn := range arns {
+			if arn != "" && !seen[arn] {
+				seen[arn] = true
+				all = append(all, arn)
+			}
 		}
 	}
-	return "", fmt.Errorf("empty profile list")
+	if len(all) > 0 {
+		return all, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("empty profile list")
+}
+
+// listProfilesInRegion returns all profile ARNs from one region endpoint,
+// following pagination (nextToken). Caps pages to avoid pathological loops.
+func listProfilesInRegion(account *config.Account, base string) ([]string, error) {
+	const maxPages = 10
+	var arns []string
+	nextToken := ""
+
+	for page := 0; page < maxPages; page++ {
+		body := `{"maxResults":10}`
+		if nextToken != "" {
+			b, _ := json.Marshal(map[string]interface{}{"maxResults": 10, "nextToken": nextToken})
+			body = string(b)
+		}
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/ListAvailableProfiles", base), strings.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		setKiroHeaders(req, account)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
+		if err != nil {
+			return nil, err
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		var result struct {
+			Profiles []struct {
+				Arn string `json:"arn"`
+			} `json:"profiles"`
+			NextToken string `json:"nextToken"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, err
+		}
+		for _, p := range result.Profiles {
+			if a := strings.TrimSpace(p.Arn); a != "" {
+				arns = append(arns, a)
+			}
+		}
+		if strings.TrimSpace(result.NextToken) == "" {
+			break
+		}
+		nextToken = result.NextToken
+	}
+	return arns, nil
+}
+
+// kiroProfileRegions lists every AWS region where Amazon Q Developer / Kiro
+// profiles can live. Used to discover an account's profile region when it is not
+// yet known. Ordered by likelihood. The q.<region> host must resolve in each.
+// Override/extend via env KIRO_PROFILE_REGIONS (comma-separated).
+var kiroProfileRegions = func() []string {
+	defaults := []string{
+		"us-east-1",
+		"eu-central-1",
+		"us-west-2",
+		"ap-southeast-1",
+		"ap-southeast-2",
+		"ap-northeast-1",
+		"eu-west-1",
+	}
+	extra := strings.TrimSpace(os.Getenv("KIRO_PROFILE_REGIONS"))
+	if extra == "" {
+		return defaults
+	}
+	// Env-provided regions take priority (probed first), then defaults.
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range strings.Split(extra, ",") {
+		r = strings.TrimSpace(r)
+		if r != "" && !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	for _, r := range defaults {
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}()
+
+// profileSearchRegions returns the ordered list of regions to probe for the
+// account's Kiro profile. Account-specific regions (profileArn, account.Region)
+// come first, then the full set of known Kiro regions.
+func profileSearchRegions(account *config.Account) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(r string) {
+		r = strings.TrimSpace(r)
+		if r != "" && !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	if account != nil {
+		// If a profileArn is already set, its region is authoritative.
+		if m := profileArnRegionRe.FindStringSubmatch(strings.TrimSpace(account.ProfileArn)); len(m) == 2 {
+			add(m[1])
+		}
+		add(account.Region)
+	}
+	// All known Kiro/Q Developer regions as fallback.
+	for _, r := range kiroProfileRegions {
+		add(r)
+	}
+	return out
 }
 
 func withProfileArnQuery(rawURL string, account *config.Account) string {
@@ -250,6 +398,19 @@ func setKiroHeaders(req *http.Request, account *config.Account) {
 func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	info := &config.AccountInfo{
 		LastRefresh: time.Now().Unix(),
+	}
+
+	// Resolve the profile ARN first. This is region-aware (searches the account
+	// region, then us-east-1/eu-central-1) and locks in the profile's home region
+	// so the subsequent usage/limit call targets the correct endpoint. Without
+	// this, accounts whose Kiro profile lives outside us-east-1 would get a 403
+	// and be wrongly flagged as banned.
+	if strings.TrimSpace(account.ProfileArn) == "" {
+		if profileArn, perr := ResolveProfileArn(account); perr == nil && profileArn != "" {
+			account.ProfileArn = profileArn
+		} else if perr != nil {
+			logger.Debugf("[RefreshAccountInfo] profileArn resolve failed for %s: %v", account.Email, perr)
+		}
 	}
 
 	// 获取使用量和订阅信息

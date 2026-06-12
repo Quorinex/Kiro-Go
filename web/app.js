@@ -771,6 +771,24 @@
     if (normalized === 'google') return t('local.providerGoogle');
     return method;
   }
+  // Extract the AWS region from a CodeWhisperer/Kiro profile ARN, e.g.
+  // "arn:aws:codewhisperer:eu-central-1:...:profile/X" -> "eu-central-1".
+  function regionFromProfileArn(arn) {
+    if (!arn) return '';
+    const m = String(arn).match(/^arn:aws:codewhisperer:([a-z0-9-]+):/);
+    return m ? m[1] : '';
+  }
+  // Show the effective API region. The login/OIDC region (a.region) can differ
+  // from the profile's home region (encoded in profileArn). When they differ,
+  // show both so it's clear where API calls actually go.
+  function formatRegionDisplay(a) {
+    const loginRegion = a.region || 'us-east-1';
+    const profileRegion = regionFromProfileArn(a.profileArn);
+    if (profileRegion && profileRegion !== loginRegion) {
+      return profileRegion + ' (login: ' + loginRegion + ')';
+    }
+    return loginRegion;
+  }
   function getStatusBadge(a) {
     const out = [];
     const isBanned = a.banStatus && a.banStatus !== 'ACTIVE';
@@ -1073,7 +1091,7 @@
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
       detailItem(t('detail.userId'), a.userId || '-') +
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
-      detailItem(t('detail.region'), a.region || 'us-east-1') +
+      detailItem(t('detail.region'), formatRegionDisplay(a)) +
       '</div></div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +

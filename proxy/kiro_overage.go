@@ -17,6 +17,13 @@ import (
 // switch. Distinct from kiroRestAPIBase (CodeWhisperer) which is used elsewhere.
 const kiroQAPIBase = "https://q.us-east-1.amazonaws.com"
 
+// kiroQBaseForAccount returns the Q API base targeted at the account's profile
+// region (from profileArn), falling back to account.Region then us-east-1.
+func kiroQBaseForAccount(account *config.Account) string {
+	region := regionForKiroAPI(account, nil)
+	return rewriteEndpointRegion(kiroQAPIBase, region)
+}
+
 // OverageSnapshot captures the upstream Overages state for an account.
 type OverageSnapshot struct {
 	Status            string  `json:"status"`            // "ENABLED" | "DISABLED" | "UNKNOWN"
@@ -53,7 +60,7 @@ func FetchOverageStatus(account *config.Account) (*OverageSnapshot, error) {
 		return nil, fmt.Errorf("account is nil")
 	}
 
-	rawURL := kiroQAPIBase + "/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true"
+	rawURL := kiroQBaseForAccount(account) + "/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true"
 	if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {
 		rawURL += "&profileArn=" + neturl.QueryEscape(profileArn)
 	}
@@ -132,7 +139,7 @@ func SetOverageStatus(account *config.Account, enabled bool) (*OverageSnapshot, 
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("POST", kiroQAPIBase+"/setUserPreference", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", kiroQBaseForAccount(account)+"/setUserPreference", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

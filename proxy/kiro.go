@@ -54,6 +54,44 @@ var kiroEndpoints = []kiroEndpoint{
 var kiroHttpStore atomic.Pointer[http.Client]
 var kiroRestHttpStore atomic.Pointer[http.Client]
 
+// profileArnRegionRe extracts the region from a CodeWhisperer/Kiro profile ARN, e.g.
+// "arn:aws:codewhisperer:eu-central-1:123:profile/XXX" -> "eu-central-1".
+var profileArnRegionRe = regexp.MustCompile(`^arn:aws:codewhisperer:([a-z0-9-]+):`)
+
+// regionForKiroAPI determines which AWS region the Kiro/CodeWhisperer API call
+// should target. Priority:
+//  1. region embedded in the active profileArn (the profile's home region)
+//  2. account.Region (the IDC/OIDC login region)
+//  3. "us-east-1" default
+func regionForKiroAPI(account *config.Account, payload *KiroPayload) string {
+	// Prefer the profileArn region (where the Kiro app/profile lives).
+	if payload != nil {
+		if m := profileArnRegionRe.FindStringSubmatch(strings.TrimSpace(payload.ProfileArn)); len(m) == 2 {
+			return m[1]
+		}
+	}
+	if account != nil {
+		if m := profileArnRegionRe.FindStringSubmatch(strings.TrimSpace(account.ProfileArn)); len(m) == 2 {
+			return m[1]
+		}
+		if r := strings.TrimSpace(account.Region); r != "" {
+			return r
+		}
+	}
+	return "us-east-1"
+}
+
+// rewriteEndpointRegion replaces the "us-east-1" region segment in a Kiro endpoint
+// URL with the target region. Hosts look like "q.us-east-1.amazonaws.com" or
+// "codewhisperer.us-east-1.amazonaws.com". No-op when region is empty or us-east-1.
+func rewriteEndpointRegion(rawURL, region string) string {
+	region = strings.TrimSpace(region)
+	if region == "" || region == "us-east-1" {
+		return rawURL
+	}
+	return strings.Replace(rawURL, ".us-east-1.amazonaws.com", "."+region+".amazonaws.com", 1)
+}
+
 // proxyClientCache caches http.Client instances keyed by proxy URL for per-account proxy support.
 var proxyClientCache sync.Map
 
@@ -337,20 +375,30 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	// Build endpoint list ordered by configuration.
 	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
 
+	// Determine the AWS region for this account's API calls. Kiro IDE directories
+	// authenticate in one region (account.Region, used for OIDC token refresh) but
+	// the Kiro/CodeWhisperer profile may live in a different region (encoded in the
+	// profileArn). API calls (generateAssistantResponse) must target the profile's
+	// region, otherwise the upstream rejects the request.
+	apiRegion := regionForKiroAPI(account, payload)
+
 	var lastErr error
 	for _, ep := range endpoints {
 		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
+		// Rewrite the endpoint URL/host to the account's API region.
+		epURL := rewriteEndpointRegion(ep.URL, apiRegion)
+
 		reqBody, _ := json.Marshal(payload)
-		req, err := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody))
+		req, err := http.NewRequest("POST", epURL, bytes.NewReader(reqBody))
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
 		host := ""
-		if parsedURL, parseErr := url.Parse(ep.URL); parseErr == nil {
+		if parsedURL, parseErr := url.Parse(epURL); parseErr == nil {
 			host = parsedURL.Host
 		}
 		headerValues := buildStreamingHeaderValues(account, host)
