@@ -9,6 +9,10 @@
 /data/
 *.log
 
+# Local Go cache used by the Nix development shell
+/.go/
+/.cache/
+
 # Editor / OS
 .idea/
 .vscode/

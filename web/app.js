@@ -11,8 +11,10 @@
     localStorage.removeItem('admin_login_time');
   }
   let password = sessionStorage.getItem('admin_password') || localStorage.getItem('admin_password') || '';
+  const supportedLangs = ['zh', 'en', 'ja'];
   let currentLang = localStorage.getItem('kiro_lang') || 'zh';
-  const dict = { en: null, zh: null };
+  if (!supportedLangs.includes(currentLang)) currentLang = 'zh';
+  const dict = { en: null, zh: null, ja: null };
   let accountsData = [];
   const selectedAccounts = new Set();
   let filterKeyword = '';
@@ -122,6 +124,7 @@
     refreshCustomSelects();
   }
   async function setLang(lang) {
+    if (!supportedLangs.includes(lang)) lang = 'zh';
     currentLang = lang;
     localStorage.setItem('kiro_lang', lang);
     await loadLocale(lang);
@@ -134,11 +137,12 @@
     qsa('.lang-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.lang === currentLang));
     qsa('.lang-toggle').forEach(btn => {
       const label = btn.querySelector('.lang-toggle-label');
-      if (label) label.textContent = currentLang === 'zh' ? t('lang.zh') : t('lang.en');
+      if (label) label.textContent = t('lang.' + currentLang);
     });
   }
   function toggleLang() {
-    setLang(currentLang === 'zh' ? 'en' : 'zh');
+    const next = supportedLangs[(supportedLangs.indexOf(currentLang) + 1) % supportedLangs.length];
+    setLang(next);
   }
 
   // Custom select

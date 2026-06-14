@@ -163,6 +163,7 @@ type ImageSource struct {
 }
 
 type ClaudeTool struct {
+	Type        string      `json:"type,omitempty"`
 	Name        string      `json:"name"`
 	Description string      `json:"description"`
 	InputSchema interface{} `json:"input_schema"`
@@ -275,7 +276,8 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// (orphaned tool results, e.g. after context compaction), flatten them into
 	// the current message text so the upstream does not reject the request.
 	currentToolResultIDs := collectToolResultIDs(currentToolResults)
-	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
+	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs) ||
+		(len(currentToolResults) > 0 && len(currentImages) > 0)
 
 	// Flatten structured tool calls/results that live in history; upstream only
 	// accepts a single active tool turn (last assistant toolUses ⟺ current toolResults).
@@ -1222,7 +1224,8 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	// Decide whether current tool results form a valid active tool turn; if not,
 	// flatten them into the current message text (see ClaudeToKiro for rationale).
 	currentToolResultIDs := collectToolResultIDs(currentToolResults)
-	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
+	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs) ||
+		(len(currentToolResults) > 0 && len(currentImages) > 0)
 
 	if keepCurrentToolResults {
 		history = sanitizeKiroHistory(history, currentToolResultIDs)
@@ -1552,7 +1555,7 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 
 		if msg.UserInputMessage != nil && msg.UserInputMessage.UserInputMessageContext != nil {
 			ctx := msg.UserInputMessage.UserInputMessageContext
-			if len(ctx.ToolResults) > 0 {
+			if len(ctx.ToolResults) > 0 && len(msg.UserInputMessage.Images) == 0 {
 				narrated := narrateToolResults(ctx.ToolResults, toolNames)
 				msg.UserInputMessage.Content = joinHistoryText(msg.UserInputMessage.Content, narrated)
 				ctx.ToolResults = nil

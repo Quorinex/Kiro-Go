@@ -51,6 +51,25 @@ go build -o kiro-go .
 ./kiro-go
 ```
 
+### Run with Nix
+
+If Go is not installed locally, use the included Nix flake:
+
+```bash
+git clone https://github.com/Quorinex/Kiro-Go.git
+cd Kiro-Go
+nix develop
+go test ./...
+go build -o kiro-go .
+./kiro-go
+```
+
+If your Nix installation has not enabled flakes yet, add this to `~/.config/nix/nix.conf`:
+
+```conf
+experimental-features = nix-command flakes
+```
+
 ### Deploy on Zeabur
 
 The repo already includes a `Dockerfile`, so it builds and runs on Zeabur out of the box.

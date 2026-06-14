@@ -51,6 +51,25 @@ go build -o kiro-go .
 ./kiro-go
 ```
 
+### 使用 Nix 运行
+
+如果本机没有安装 Go，可以使用仓库内置的 Nix flake：
+
+```bash
+git clone https://github.com/Quorinex/Kiro-Go.git
+cd Kiro-Go
+nix develop
+go test ./...
+go build -o kiro-go .
+./kiro-go
+```
+
+如果你的 Nix 尚未启用 flakes，请在 `~/.config/nix/nix.conf` 中加入：
+
+```conf
+experimental-features = nix-command flakes
+```
+
 ### 部署到 Zeabur
 
 仓库已包含 `Dockerfile`，可直接在 Zeabur 上构建运行。
