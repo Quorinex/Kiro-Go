@@ -53,11 +53,17 @@ func extractProvidedKey(r *http.Request) string {
 // Returns (entry, nil) on success. entry is nil when the legacy single-key path
 // is used or when the master switch is off.
 func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
+	provided := extractProvidedKey(r)
+
 	if !config.IsApiKeyRequired() {
+		// Even when auth is not required, try to identify the caller for affinity/usage tracking.
+		if provided != "" && config.HasApiKeys() {
+			if entry := config.FindApiKeyByValue(provided); entry != nil && entry.Enabled {
+				return entry, nil
+			}
+		}
 		return nil, nil
 	}
-
-	provided := extractProvidedKey(r)
 
 	if config.HasApiKeys() {
 		if provided == "" {

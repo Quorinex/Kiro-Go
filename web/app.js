@@ -2573,6 +2573,7 @@
     qsa('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     qsa('.tab-content').forEach(c => c.classList.add('hidden'));
     $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
+    if (tab === 'logs') loadLogs();
   }
 
   // Event wiring
@@ -2772,6 +2773,7 @@
     bindModalEvents();
     bindDetailEvents();
     bindTestEvents();
+    bindLogsEvents();
   }
 
   // Init
@@ -2790,6 +2792,107 @@
     setInterval(() => {
       if (!$('mainPage').classList.contains('hidden')) loadStats();
     }, 10000);
+
+    // Auto-refresh logs every 5s when logs tab is active
+    setInterval(() => {
+      const logsTab = $('tabLogs');
+      if (logsTab && !logsTab.classList.contains('hidden')) loadLogs();
+    }, 5000);
+  }
+
+  // ==================== Request Logs ====================
+  let logsAutoRefreshActive = false;
+
+  async function loadLogs() {
+    const filter = ($('logsFilterInput') || {}).value || '';
+    const params = new URLSearchParams({ limit: '100' });
+    if (filter) params.set('apiKey', filter);
+    try {
+      const [logsRes, statsRes] = await Promise.all([
+        api('/logs?' + params.toString()),
+        api('/logs/stats')
+      ]);
+      const logs = await logsRes.json();
+      const stats = await statsRes.json();
+      renderLogsStats(stats);
+      renderLogsTable(logs);
+    } catch (e) {
+      console.error('Failed to load logs', e);
+    }
+  }
+
+  function renderLogsStats(stats) {
+    const el = $('logsStats');
+    if (!el) return;
+    el.innerHTML =
+      '<span><b>总计:</b> ' + (stats.total || 0) + '</span>' +
+      '<span style="color:var(--success);"><b>成功:</b> ' + (stats.success || 0) + '</span>' +
+      '<span style="color:var(--danger);"><b>失败:</b> ' + (stats.failed || 0) + '</span>' +
+      '<span><b>输入Token:</b> ' + formatNumber(stats.totalInput || 0) + '</span>' +
+      '<span><b>输出Token:</b> ' + formatNumber(stats.totalOutput || 0) + '</span>' +
+      '<span><b>缓存读:</b> ' + formatNumber(stats.totalCacheRead || 0) + '</span>';
+  }
+
+  function formatNumber(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  function renderLogsTable(logs) {
+    const tbody = $('logsTableBody');
+    const empty = $('logsEmpty');
+    if (!tbody) return;
+    if (!logs || logs.length === 0) {
+      tbody.innerHTML = '';
+      if (empty) empty.style.display = 'block';
+      return;
+    }
+    if (empty) empty.style.display = 'none';
+    // Show newest first
+    const sorted = logs.slice().reverse();
+    tbody.innerHTML = sorted.map(log => {
+      const time = new Date(log.timestamp).toLocaleString('zh-CN', { hour12: false });
+      const statusColor = log.status === 200 ? 'color:#22c55e;font-weight:600;' : 'color:#ef4444;font-weight:600;';
+      const keyDisplay = log.apiKeyName || (log.apiKeyId ? log.apiKeyId.substring(0, 8) + '...' : '-');
+      return '<tr style="border-bottom:1px solid var(--border);">' +
+        '<td style="padding:6px 12px;white-space:nowrap;">' + escapeHtml(time) + '</td>' +
+        '<td style="padding:6px 12px;">' + escapeHtml(log.path) + '</td>' +
+        '<td style="padding:6px 12px;">' + escapeHtml(log.model) + '</td>' +
+        '<td style="padding:6px 12px;' + statusColor + '">' + log.status + '</td>' +
+        '<td style="padding:6px 12px;">' + (log.inputTokens || 0) + '</td>' +
+        '<td style="padding:6px 12px;">' + (log.outputTokens || 0) + '</td>' +
+        '<td style="padding:6px 12px;">' + (log.cacheRead || 0) + '</td>' +
+        '<td style="padding:6px 12px;">' + (log.cacheWrite || 0) + '</td>' +
+        '<td style="padding:6px 12px;">' + (log.credits ? log.credits.toFixed(4) : '-') + '</td>' +
+        '<td style="padding:6px 12px;">' + (log.latencyMs || 0) + 'ms</td>' +
+        '<td style="padding:6px 12px;" title="' + escapeAttr(log.apiKeyId || '') + '">' + escapeHtml(keyDisplay) + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  async function clearLogs() {
+    try {
+      await api('/logs', { method: 'DELETE' });
+      loadLogs();
+    } catch (e) {
+      console.error('Failed to clear logs', e);
+    }
+  }
+
+  function bindLogsEvents() {
+    const refreshBtn = $('logsRefreshBtn');
+    if (refreshBtn) refreshBtn.addEventListener('click', loadLogs);
+    const clearBtn = $('logsClearBtn');
+    if (clearBtn) clearBtn.addEventListener('click', clearLogs);
+    const filterInput = $('logsFilterInput');
+    if (filterInput) {
+      let debounceTimer;
+      filterInput.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(loadLogs, 300);
+      });
+    }
   }
 
   if (document.readyState === 'loading') {

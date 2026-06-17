@@ -107,6 +107,7 @@
                 data-i18n="tabs.settings"></span></button>
             <button type="button" class="tab" data-tab="api"><i class="fa-solid fa-plug tab-icon"></i><span
                 data-i18n="tabs.api"></span></button>
+            <button type="button" class="tab" data-tab="logs"><i class="fa-solid fa-clipboard-list tab-icon"></i><span>日志</span></button>
           </div>
         </nav>
         <div class="topbar-actions flex-wrap justify-end">
@@ -485,6 +486,42 @@
           </div>
           <p class="api-hint"><i class="fa-solid fa-key"></i><span data-i18n="api.statsHint"></span></p>
         </section>
+      </div>
+
+      <!-- Logs tab -->
+      <div id="tabLogs" class="tab-content hidden">
+        <div class="card">
+          <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+            <span class="card-title">请求日志</span>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <input type="text" id="logsFilterInput" placeholder="按 Key 名称搜索..." style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-secondary);color:var(--text-primary);width:180px;" />
+              <button class="btn btn-outline btn-sm" id="logsRefreshBtn" type="button"><i class="fa-solid fa-rotate"></i> 刷新</button>
+              <button class="btn btn-outline btn-sm" id="logsClearBtn" type="button" style="color:var(--danger);border-color:var(--danger);"><i class="fa-solid fa-trash"></i> 清空</button>
+            </div>
+          </div>
+          <div id="logsStats" style="display:flex;gap:16px;padding:8px 16px;font-size:13px;color:var(--text-secondary);flex-wrap:wrap;"></div>
+          <div style="overflow-x:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+              <thead>
+                <tr style="border-bottom:1px solid var(--border);text-align:left;">
+                  <th style="padding:8px 12px;">时间</th>
+                  <th style="padding:8px 12px;">路径</th>
+                  <th style="padding:8px 12px;">模型</th>
+                  <th style="padding:8px 12px;">状态</th>
+                  <th style="padding:8px 12px;">输入</th>
+                  <th style="padding:8px 12px;">输出</th>
+                  <th style="padding:8px 12px;">缓存读</th>
+                  <th style="padding:8px 12px;">缓存写</th>
+                  <th style="padding:8px 12px;">Credits</th>
+                  <th style="padding:8px 12px;">耗时</th>
+                  <th style="padding:8px 12px;">Key</th>
+                </tr>
+              </thead>
+              <tbody id="logsTableBody"></tbody>
+            </table>
+          </div>
+          <div id="logsEmpty" style="text-align:center;padding:32px;color:var(--text-secondary);display:none;">暂无日志</div>
+        </div>
       </div>
     </div>
 
