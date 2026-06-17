@@ -10,12 +10,16 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	kiroRestAPIBase = "https://codewhisperer.us-east-1.amazonaws.com"
+	kiroRestAPIBase               = "https://codewhisperer.us-east-1.amazonaws.com"
+	profileArnUnsupportedCooldown = 24 * time.Hour
 )
+
+var profileArnResolutionCooldowns sync.Map
 
 // kiroRegion returns the AWS region the account's Kiro profile lives in,
 // defaulting to us-east-1 when unset. AWS provisions Kiro / Q Developer
@@ -162,14 +166,22 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 		return profileArn, nil
 	}
 
-	// Try ListAvailableProfiles first, retrying on transient failures.
-	profileArn, err := listAvailableProfilesWithRetry(account)
-	if err == nil && profileArn != "" {
-		if updateErr := config.UpdateAccountProfileArn(account.ID, profileArn); updateErr != nil {
-			logger.Warnf("[ProfileArn] Failed to cache profile ARN for %s: %v", account.Email, updateErr)
+	profileLookupSuppressed := isProfileArnResolutionSuppressed(account)
+	var profileUnsupportedErr error
+	var profileUnsupported bool
+
+	if !profileLookupSuppressed {
+		// Try ListAvailableProfiles first, retrying on transient failures.
+		profileArn, err := listAvailableProfilesWithRetry(account)
+		if err == nil && profileArn != "" {
+			if updateErr := config.UpdateAccountProfileArn(account.ID, profileArn); updateErr != nil {
+				logger.Warnf("[ProfileArn] Failed to cache profile ARN for %s: %v", account.Email, updateErr)
+			}
+			account.ProfileArn = profileArn
+			return profileArn, nil
 		}
-		account.ProfileArn = profileArn
-		return profileArn, nil
+		profileUnsupportedErr = err
+		profileUnsupported = isBuilderIDProfileUnsupportedError(account, err)
 	}
 
 	// Fallback: refresh token to get profileArn from auth response
@@ -183,8 +195,78 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 			return refreshedArn, nil
 		}
 	}
+	if profileLookupSuppressed {
+		return "", fmt.Errorf("profile ARN resolution skipped: previous Builder ID profile lookup was unsupported")
+	}
+	if profileUnsupported {
+		suppressProfileArnResolution(account)
+		logger.Debugf("[ProfileArn] Builder ID profile lookup unsupported for %s: %v", accountEmailForLog(account), profileUnsupportedErr)
+		return "", fmt.Errorf("profile ARN unsupported for Builder ID account")
+	}
 
 	return "", fmt.Errorf("no available Kiro profile")
+}
+
+func isBuilderIDProfileUnsupportedError(account *config.Account, err error) bool {
+	if account == nil || err == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(account.Provider), "BuilderId") {
+		return false
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "HTTP 403") && strings.Contains(msg, "AWS Builder ID is not supported for this operation")
+}
+
+func profileArnCooldownKey(account *config.Account) string {
+	if account == nil {
+		return ""
+	}
+	provider := strings.TrimSpace(account.Provider)
+	if id := strings.TrimSpace(account.ID); id != "" {
+		return provider + "\x00" + id
+	}
+	if userID := strings.TrimSpace(account.UserId); userID != "" {
+		return provider + "\x00" + userID
+	}
+	return provider + "\x00" + strings.TrimSpace(account.Email)
+}
+
+func suppressProfileArnResolution(account *config.Account) {
+	key := profileArnCooldownKey(account)
+	if key == "" {
+		return
+	}
+	profileArnResolutionCooldowns.Store(key, time.Now().Add(profileArnUnsupportedCooldown))
+}
+
+func isProfileArnResolutionSuppressed(account *config.Account) bool {
+	key := profileArnCooldownKey(account)
+	if key == "" {
+		return false
+	}
+	value, ok := profileArnResolutionCooldowns.Load(key)
+	if !ok {
+		return false
+	}
+	until, ok := value.(time.Time)
+	if !ok || time.Now().After(until) {
+		profileArnResolutionCooldowns.Delete(key)
+		return false
+	}
+	return true
+}
+
+func isProfileArnResolutionSkippedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "profile ARN resolution skipped")
+}
+
+func isProfileArnResolutionUnsupportedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "profile ARN unsupported for Builder ID account")
+}
+
+func isProfileArnResolutionSoftError(err error) bool {
+	return isProfileArnResolutionSkippedError(err) || isProfileArnResolutionUnsupportedError(err)
 }
 
 func ensureRestProfileArn(account *config.Account) error {
@@ -193,6 +275,10 @@ func ensureRestProfileArn(account *config.Account) error {
 	}
 	profileArn, err := ResolveProfileArn(account)
 	if err != nil {
+		if isProfileArnResolutionSoftError(err) {
+			logger.Debugf("[ProfileArn] Continuing REST request without profile ARN for %s: %v", accountEmailForLog(account), err)
+			return nil
+		}
 		return err
 	}
 	account.ProfileArn = profileArn

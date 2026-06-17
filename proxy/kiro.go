@@ -325,12 +325,10 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	if payload != nil && strings.TrimSpace(payload.ProfileArn) == "" {
 		if profileArn, err := ResolveProfileArn(account); err == nil {
 			payload.ProfileArn = profileArn
+		} else if isProfileArnResolutionSoftError(err) {
+			logger.Debugf("[ProfileArn] Skipped profile ARN resolution for %s: %v", accountEmailForLog(account), err)
 		} else {
-			accountEmail := "<nil>"
-			if account != nil {
-				accountEmail = account.Email
-			}
-			logger.Warnf("[ProfileArn] Failed to resolve profile ARN for %s: %v", accountEmail, err)
+			logger.Warnf("[ProfileArn] Failed to resolve profile ARN for %s: %v", accountEmailForLog(account), err)
 		}
 	}
 
@@ -404,6 +402,13 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		return lastErr
 	}
 	return fmt.Errorf("all endpoints failed")
+}
+
+func accountEmailForLog(account *config.Account) string {
+	if account == nil {
+		return "<nil>"
+	}
+	return account.Email
 }
 
 // ==================== Event Stream Parsing ====================
