@@ -419,6 +419,22 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		callback = &KiroStreamCallback{}
 	}
 
+	// Tool-call XML leak fix: separate leaked tool-call XML from normal text and
+	// rescue it as structured tool_use. Wrap OnToolUse so every structured tool
+	// emitted by the normal path is recorded for later dedup against leaked copies.
+	leakFilter := newToolLeakFilter()
+	if leakFilter.enabled {
+		inner := callback.OnToolUse
+		cbCopy := *callback
+		cbCopy.OnToolUse = func(toolUse KiroToolUse) {
+			leakFilter.markSeen(toolUse.Name, toolUse.Input)
+			if inner != nil {
+				inner(toolUse)
+			}
+		}
+		callback = &cbCopy
+	}
+
 	// Read directly without bufio to avoid buffering latency in streaming responses.
 	var inputTokens, outputTokens int
 	var totalCredits float64
@@ -474,8 +490,18 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
 				normalized := normalizeChunk(content, &lastAssistantContent)
-				if normalized != "" && callback.OnText != nil {
-					callback.OnText(normalized, false)
+				if normalized != "" {
+					if leakFilter.enabled {
+						// Cross-frame filter: split normal text from leaked tool-call XML.
+						leakFilter.carry += normalized
+						leakFilter.process(false, func(s string) {
+							if callback.OnText != nil {
+								callback.OnText(s, false)
+							}
+						})
+					} else if callback.OnText != nil {
+						callback.OnText(normalized, false)
+					}
 				}
 			}
 		case "reasoningContentEvent":
@@ -502,6 +528,17 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 	if currentToolUse != nil {
 		finishToolUse(currentToolUse, callback)
+	}
+
+	// Tool-call XML leak fix: flush any residual carry as text, then inject the
+	// rescued leaked tools (deduplicated against structured tool_use already seen).
+	if leakFilter.enabled {
+		leakFilter.process(true, func(s string) {
+			if callback.OnText != nil {
+				callback.OnText(s, false)
+			}
+		})
+		leakFilter.injectLeaked(callback)
 	}
 
 	if callback.OnCredits != nil && totalCredits > 0 {

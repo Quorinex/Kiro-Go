@@ -267,6 +267,94 @@ func TestClaudeToKiroDropsLeadingAssistantHistory(t *testing.T) {
 	}
 }
 
+func TestClaudeToKiroToolChoiceAnyInjectsToolDirective(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "continue the edit"},
+		},
+		Tools: []ClaudeTool{
+			{
+				Name:        "Edit",
+				Description: "edit a file",
+				InputSchema: map[string]interface{}{"type": "object"},
+			},
+		},
+		ToolChoice: map[string]interface{}{"type": "any"},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+
+	if !strings.Contains(cur.Content, "continue the edit") {
+		t.Fatalf("expected original user content to be preserved, got %q", cur.Content)
+	}
+	if !strings.Contains(cur.Content, "must call at least one available tool") {
+		t.Fatalf("expected tool_choice:any directive in current content, got %q", cur.Content)
+	}
+	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.Tools) != 1 {
+		t.Fatalf("expected converted tools to remain available")
+	}
+}
+
+func TestClaudeToKiroToolChoiceToolInjectsSanitizedToolDirective(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "check current directory"},
+		},
+		Tools: []ClaudeTool{
+			{
+				Name:        "mcp__filesystem__read_file",
+				Description: "read a file",
+				InputSchema: map[string]interface{}{"type": "object"},
+			},
+		},
+		ToolChoice: map[string]interface{}{"type": "tool", "name": "mcp__filesystem__read_file"},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+
+	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.Tools) != 1 {
+		t.Fatalf("expected converted tools to remain available")
+	}
+	kiroName := cur.UserInputMessageContext.Tools[0].ToolSpecification.Name
+	if kiroName != "mcpFilesystemReadFile" {
+		t.Fatalf("expected sanitized Kiro tool name, got %q", kiroName)
+	}
+	if !strings.Contains(cur.Content, `named "mcpFilesystemReadFile"`) {
+		t.Fatalf("expected directive to target sanitized tool name, got %q", cur.Content)
+	}
+}
+
+func TestClaudeToKiroToolChoiceNoneOmitsTools(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "answer without tools"},
+		},
+		Tools: []ClaudeTool{
+			{
+				Name:        "Read",
+				Description: "read a file",
+				InputSchema: map[string]interface{}{"type": "object"},
+			},
+		},
+		ToolChoice: map[string]interface{}{"type": "none"},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+
+	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.Tools) != 0 {
+		t.Fatalf("expected tool_choice:none to omit available tools")
+	}
+	if strings.Contains(cur.Content, "must call") {
+		t.Fatalf("did not expect a tool directive for tool_choice:none, got %q", cur.Content)
+	}
+}
+
 func TestKiroToClaudeResponseCanEmitEmptyThinkingBlock(t *testing.T) {
 	resp := KiroToClaudeResponse("final answer", "", true, nil, 10, 20, "claude-sonnet-4.6")
 
