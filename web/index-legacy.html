@@ -2851,12 +2851,21 @@
                         const c = a.credentials || {};
                         return {
                             refreshToken: c.refreshToken || a.refreshToken,
+                            // accessToken is REQUIRED for external_idp trust-on-import
+                            // (the JWT's exp becomes ExpiresAt; no live refresh round-trip).
+                            accessToken: c.accessToken || a.accessToken,
                             clientId: c.clientId || a.clientId,
                             clientSecret: c.clientSecret || a.clientSecret,
                             region: c.region || a.region,
-                            // 不传 accessToken，强制后端用 refreshToken 刷新获取新 token
                             authMethod: c.authMethod || a.authMethod,
-                            provider: c.provider || a.provider || a.idp
+                            provider: c.provider || a.provider || a.idp,
+                            tokenEndpoint: c.tokenEndpoint || a.tokenEndpoint,
+                            issuerUrl: c.issuerUrl || a.issuerUrl,
+                            scopes: c.scopes || a.scopes,
+                            id: a.id,
+                            email: c.email || a.email,
+                            profileArn: c.profileArn || a.profileArn,
+                            userId: a.userId
                         };
                     });
                 } else {
@@ -2865,9 +2874,12 @@
                 let success = 0, failed = 0, errors = [], newIds = [];
                 for (const item of items) {
                     if (!item.refreshToken) { failed++; errors.push('missing refreshToken'); continue; }
-                    // 映射 authMethod: IdC/idc -> idc, social -> social
-                    let authMethod = item.authMethod || '';
-                    if (item.clientId && item.clientSecret) {
+                    // 映射 authMethod: external_idp -> external_idp, IdC/idc -> idc, social -> social
+                    const EXTERNAL_IDP = ['external_idp','azuread','azure','entra','entra-id','microsoft','m365','office365','external'];
+                    let authMethod = (item.authMethod || '').toLowerCase();
+                    if (EXTERNAL_IDP.includes(authMethod) || item.tokenEndpoint) {
+                        authMethod = 'external_idp';
+                    } else if (item.clientId && item.clientSecret) {
                         authMethod = 'idc';
                     } else if (!authMethod || authMethod === 'social') {
                         authMethod = 'social';
@@ -2876,9 +2888,10 @@
                     }
                     // 映射 provider
                     let provider = item.provider || '';
+                    if (!provider && authMethod === 'external_idp') provider = 'AzureAD';
                     if (!provider && authMethod === 'social') provider = 'Google';
                     if (!provider && authMethod === 'idc') provider = 'BuilderId';
-                    const payload = { refreshToken: item.refreshToken, accessToken: item.accessToken || '', clientId: item.clientId || '', clientSecret: item.clientSecret || '', authMethod: authMethod, provider: provider, region: item.region || 'us-east-1' };
+                    const payload = { refreshToken: item.refreshToken, accessToken: item.accessToken || '', clientId: item.clientId || '', clientSecret: item.clientSecret || '', authMethod: authMethod, provider: provider, region: item.region || 'us-east-1', tokenEndpoint: item.tokenEndpoint || '', issuerUrl: item.issuerUrl || '', scopes: item.scopes || '', ...(item.id ? { id: item.id } : {}), ...(item.email ? { email: item.email } : {}), ...(item.profileArn ? { profileArn: item.profileArn } : {}) };
                     try {
                         const res = await fetch('/admin/api/auth/credentials', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify(payload) });
                         const d = await res.json();

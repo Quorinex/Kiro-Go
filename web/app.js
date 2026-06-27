@@ -21,6 +21,8 @@
   let promptRules = [];
   let builderIdSession = '';
   let builderIdPollTimer = null;
+  let kiroSsoSession = '';
+  let kiroSsoPollTimer = null;
   let iamSession = '';
   let exportSelectedIds = new Set();
   let currentVersion = '';
@@ -2019,6 +2021,7 @@
   var METHOD_ICONS = {
     builderid: 'fa-solid fa-id-card',
     iam: 'fa-solid fa-key',
+    enterprisesso: 'fa-brands fa-microsoft',
     sso: 'fa-solid fa-shield-halved',
     local: 'fa-solid fa-folder-open',
     credentials: 'fa-solid fa-code',
@@ -2042,6 +2045,7 @@
     if (type === 'add') modalAdd(title, body);
     else if (type === 'builderid') modalBuilderId(title, body);
     else if (type === 'iam') modalIam(title, body);
+    else if (type === 'enterprisesso') modalEnterpriseSso(title, body);
     else if (type === 'sso') modalSso(title, body);
     else if (type === 'local') modalLocal(title, body);
     else if (type === 'credentials') modalCredentials(title, body);
@@ -2054,6 +2058,14 @@
     iamSession = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
+    if (kiroSsoPollTimer) { clearTimeout(kiroSsoPollTimer); kiroSsoPollTimer = null; }
+    // If a hosted-portal sign-in is still in flight (modal closed via X/backdrop
+    // before completion), release the loopback port now. On successful completion
+    // the poller clears kiroSsoSession first, so this no-ops then.
+    if (kiroSsoSession) {
+      api('/auth/kiro-sso/cancel', { method: 'POST', body: JSON.stringify({ sessionId: kiroSsoSession }) }).catch(() => {});
+    }
+    kiroSsoSession = '';
   }
   function modalAdd(title, body) {
     title.textContent = t('modal.addAccount');
@@ -2061,6 +2073,7 @@
       '<div class="method-list">' +
       methodCard('builderid', t('modal.builderIdTitle'), t('modal.builderIdDesc')) +
       methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
+      methodCard('enterprisesso', t('modal.enterpriseSsoTitle'), t('modal.enterpriseSsoDesc')) +
       methodCard('sso', t('modal.ssoTitle'), t('modal.ssoDesc')) +
       methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
@@ -2277,11 +2290,19 @@
           const c = a.credentials || {};
           return {
             refreshToken: c.refreshToken || a.refreshToken,
+            accessToken: c.accessToken || a.accessToken,
             clientId: c.clientId || a.clientId,
             clientSecret: c.clientSecret || a.clientSecret,
             region: c.region || a.region,
             authMethod: c.authMethod || a.authMethod,
-            provider: c.provider || a.provider || a.idp
+            provider: c.provider || a.provider || a.idp,
+            tokenEndpoint: c.tokenEndpoint || a.tokenEndpoint,
+            issuerUrl: c.issuerUrl || a.issuerUrl,
+            scopes: c.scopes || a.scopes,
+            id: a.id,
+            email: c.email || a.email,
+            profileArn: c.profileArn || a.profileArn,
+            userId: a.userId
           };
         });
       } else {
@@ -2303,11 +2324,19 @@
     let ok = 0, fail = 0, newIds = [];
     for (const item of items) {
       if (!item.refreshToken) { fail++; continue; }
-      let authMethod = item.authMethod || '';
-      if (item.clientId && item.clientSecret) authMethod = 'idc';
-      else if (!authMethod || authMethod === 'social') authMethod = 'social';
-      else authMethod = authMethod.toLowerCase() === 'idc' ? 'idc' : 'social';
+      const EXTERNAL_IDP = ['external_idp','azuread','azure','entra','entra-id','microsoft','m365','office365','external'];
+      let authMethod = (item.authMethod || '').toLowerCase();
+      if (EXTERNAL_IDP.includes(authMethod) || item.tokenEndpoint) {
+        authMethod = 'external_idp';
+      } else if (item.clientId && item.clientSecret) {
+        authMethod = 'idc';
+      } else if (!authMethod || authMethod === 'social') {
+        authMethod = 'social';
+      } else {
+        authMethod = authMethod === 'idc' ? 'idc' : 'social';
+      }
       let provider = item.provider || '';
+      if (!provider && authMethod === 'external_idp') provider = 'AzureAD';
       if (!provider && authMethod === 'social') provider = 'Google';
       if (!provider && authMethod === 'idc') provider = 'BuilderId';
       const payload = {
@@ -2316,7 +2345,13 @@
         clientId: item.clientId || '',
         clientSecret: item.clientSecret || '',
         authMethod, provider,
-        region: item.region || 'us-east-1'
+        region: item.region || 'us-east-1',
+        tokenEndpoint: item.tokenEndpoint || '',
+        issuerUrl: item.issuerUrl || '',
+        scopes: item.scopes || '',
+        ...(item.id ? { id: item.id } : {}),
+        ...(item.email ? { email: item.email } : {}),
+        ...(item.profileArn ? { profileArn: item.profileArn } : {})
       };
       try {
         const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
@@ -2427,6 +2462,86 @@
   function cancelBuilderIdLogin() {
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
+    showModal('add');
+  }
+  // Enterprise SSO — Microsoft 365 / Entra ID (Azure AD), via the Kiro hosted sign-in portal.
+  // The backend binds a loopback listener and returns the sign-in URL; the browser is driven
+  // through the external-IdP leg automatically, and we poll until the account is created.
+  function modalEnterpriseSso(title, body) {
+    title.textContent = t('modal.enterpriseSsoTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.enterpriseSsoDesc')) + '</p>' +
+      '<div id="kiroSsoStep1">' +
+      '<div class="message message-info"><p class="text-xs">' + escapeHtml(t('kirosso.hostNote')) + '</p></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="startKiroSsoBtn" type="button">' + escapeHtml(t('builderid.startLogin')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<div id="kiroSsoStep2" class="hidden">' +
+      '<div class="message message-info"><p class="text-xs">' + escapeHtml(t('kirosso.openInstruction')) + '</p></div>' +
+      '<div class="form-group mt-3"><label>' + escapeHtml(t('iam.loginUrl')) + '</label>' +
+      '<div class="endpoint"><span id="kiroSsoSignInUrl" class="font-mono text-xs"></span></div>' +
+      '<div class="flex gap-2 mt-2">' +
+      '<button class="btn btn-sm btn-outline flex-1" id="kiroSsoOpenBtn" type="button">' + escapeHtml(t('builderid.open')) + '</button>' +
+      '<button class="btn btn-sm btn-outline flex-1" id="kiroSsoCopyBtn" type="button">' + escapeHtml(t('common.copy')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<p id="kiroSsoStatus" class="text-center text-sm mt-4 muted-text">' + escapeHtml(t('builderid.waiting')) + '</p>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" id="kiroSsoCancelBtn" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>' +
+      '</div>';
+    $('startKiroSsoBtn').addEventListener('click', startKiroSsoLogin);
+  }
+  async function startKiroSsoLogin() {
+    // No region prompt: the data-plane region is derived from the profile ARN
+    // returned by SSO (social) or discovered via the cross-region profile probe
+    // (external_idp / Azure), so the operator never has to know it up front.
+    const res = await api('/auth/kiro-sso/start', { method: 'POST', body: JSON.stringify({}) });
+    const d = await res.json();
+    if (d.sessionId && d.signInUrl) {
+      kiroSsoSession = d.sessionId;
+      $('kiroSsoSignInUrl').textContent = d.signInUrl;
+      $('kiroSsoStep1').classList.add('hidden');
+      $('kiroSsoStep2').classList.remove('hidden');
+      $('kiroSsoOpenBtn').addEventListener('click', () => window.open($('kiroSsoSignInUrl').textContent, '_blank'));
+      $('kiroSsoCopyBtn').addEventListener('click', async () => {
+        await copyText($('kiroSsoSignInUrl').textContent);
+        toast(t('common.copied'), 'primary');
+      });
+      $('kiroSsoCancelBtn').addEventListener('click', cancelKiroSsoLogin);
+      // Open the sign-in tab immediately (works when the admin panel is viewed on the proxy host).
+      window.open(d.signInUrl, '_blank');
+      pollKiroSso(d.interval || 2);
+    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+  }
+  function pollKiroSso(interval) {
+    kiroSsoPollTimer = setTimeout(async () => {
+      const res = await api('/auth/kiro-sso/poll', { method: 'POST', body: JSON.stringify({ sessionId: kiroSsoSession }) });
+      const d = await res.json();
+      if (d.completed) {
+        // Session is already consumed server-side; clear it so closeModal() does
+        // not fire a redundant cancel for an account that succeeded.
+        kiroSsoSession = '';
+        closeModal(); loadAccounts(); loadStats();
+        toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
+        autoRefreshNewAccount(d.account?.id);
+      } else if (d.success && !d.completed) {
+        $('kiroSsoStatus').textContent = t('builderid.waiting');
+        pollKiroSso(interval);
+      } else {
+        toastError(t('common.failed') + ': ' + (d.error || ''));
+        cancelKiroSsoLogin();
+      }
+    }, interval * 1000);
+  }
+  function cancelKiroSsoLogin() {
+    if (kiroSsoPollTimer) { clearTimeout(kiroSsoPollTimer); kiroSsoPollTimer = null; }
+    // Tell the backend to release the loopback callback port now instead of waiting
+    // for the deadline (fire-and-forget; ignore the result).
+    if (kiroSsoSession) {
+      api('/auth/kiro-sso/cancel', { method: 'POST', body: JSON.stringify({ sessionId: kiroSsoSession }) }).catch(() => {});
+    }
+    kiroSsoSession = '';
     showModal('add');
   }
   async function startIamSso() {

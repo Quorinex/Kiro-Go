@@ -7,6 +7,8 @@ import (
 	"io"
 	"kiro-go/config"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -30,10 +32,89 @@ func RefreshToken(account *config.Account) (string, string, int64, string, error
 	}
 	client := GetAuthClientForProxy(proxyURL)
 
+	// External IdP (enterprise SSO, e.g. Azure AD) tokens are refreshed against the
+	// IdP token endpoint (refresh_token grant, public client), NOT the AWS SSO OIDC
+	// endpoint. Selecting it on AuthMethod (rather than letting it fall through to the
+	// OIDC branch, which requires clientSecret) is what makes these accounts refresh.
+	if account.AuthMethod == "external_idp" {
+		return refreshExternalIdpToken(account.RefreshToken, account.ClientID, account.TokenEndpoint, account.Scopes, client)
+	}
 	if account.AuthMethod == "social" {
 		return refreshSocialToken(account.RefreshToken, client)
 	}
 	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
+}
+
+// refreshExternalIdpToken refreshes an external-IdP (enterprise SSO) access token
+// through the IdP token endpoint using the OAuth2 refresh_token grant for a public
+// client (no client secret). offline_access in the original scopes is what makes a
+// refresh token available. The IdP issues no profileArn (it is resolved separately
+// via ListAvailableProfiles using the EXTERNAL_IDP token type), so "" is returned
+// for the profileArn.
+func refreshExternalIdpToken(refreshToken, clientID, tokenEndpoint, scopes string, client *http.Client) (string, string, int64, string, error) {
+	if clientID == "" || tokenEndpoint == "" {
+		return "", "", 0, "", fmt.Errorf("external IdP refresh requires clientId and tokenEndpoint")
+	}
+	form := url.Values{}
+	form.Set("client_id", clientID)
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+	if scopes != "" {
+		form.Set("scope", scopes)
+	}
+	accessToken, newRefreshToken, expiresIn, err := postExternalIdpToken(client, tokenEndpoint, form)
+	if err != nil {
+		return "", "", 0, "", err
+	}
+	// Some IdPs (Azure AD) rotate refresh tokens; others omit it on refresh. Keep the
+	// existing refresh token when the response does not carry a new one.
+	if newRefreshToken == "" {
+		newRefreshToken = refreshToken
+	}
+	expiresAt := time.Now().Unix() + int64(expiresIn)
+	return accessToken, newRefreshToken, expiresAt, "", nil
+}
+
+// postExternalIdpToken performs a form-encoded POST to an external-IdP token
+// endpoint and maps the snake_case OAuth2 token response onto the standard return
+// shape. Shared by the authorization-code exchange (login) and the refresh_token
+// grant (renewal).
+func postExternalIdpToken(client *http.Client, tokenEndpoint string, form url.Values) (accessToken, refreshToken string, expiresIn int, err error) {
+	if strings.TrimSpace(tokenEndpoint) == "" {
+		return "", "", 0, fmt.Errorf("external IdP token endpoint is empty")
+	}
+	req, err := http.NewRequest("POST", tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", "", 0, fmt.Errorf("failed to build external IdP token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("external IdP token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("failed to read external IdP token response: %w", err)
+	}
+	var out struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+		Error        string `json:"error"`
+		ErrorDesc    string `json:"error_description"`
+	}
+	_ = json.Unmarshal(body, &out)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || out.AccessToken == "" {
+		if out.Error != "" {
+			return "", "", 0, fmt.Errorf("external IdP token exchange failed (status %d): %s: %s", resp.StatusCode, out.Error, out.ErrorDesc)
+		}
+		return "", "", 0, fmt.Errorf("external IdP token exchange failed (status %d): %s", resp.StatusCode, string(body))
+	}
+	return out.AccessToken, out.RefreshToken, out.ExpiresIn, nil
 }
 
 // refreshOIDCToken IdC/Builder ID token 刷新

@@ -28,3 +28,16 @@ func SetGlobalAuthClientForTest(c *http.Client) *http.Client {
 	}
 	return old
 }
+
+// SetExternalIdpValidatorForTest swaps the validator behind ValidateExternalIdpEndpoint
+// and returns the previous one so callers can restore it. Tests POST against httptest
+// servers (http + 127.0.0.1), which the real allow-list validator rejects, so tests
+// install a no-op validator here. Mirrors SetGlobalAuthClientForTest's swap-and-restore
+// shape. Test-only.
+func SetExternalIdpValidatorForTest(fn func(string) error) func(string) error {
+	old := externalIdpEndpointValidator
+	if fn != nil {
+		externalIdpEndpointValidator = fn
+	}
+	return old
+}

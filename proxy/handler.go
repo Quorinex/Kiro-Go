@@ -2211,6 +2211,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiStartBuilderIdLogin(w, r)
 	case path == "/auth/builderid/poll" && r.Method == "POST":
 		h.apiPollBuilderIdAuth(w, r)
+	case path == "/auth/kiro-sso/start" && r.Method == "POST":
+		h.apiStartKiroSso(w, r)
+	case path == "/auth/kiro-sso/poll" && r.Method == "POST":
+		h.apiPollKiroSso(w, r)
+	case path == "/auth/kiro-sso/cancel" && r.Method == "POST":
+		h.apiCancelKiroSso(w, r)
 	case path == "/auth/sso-token" && r.Method == "POST":
 		h.apiImportSsoToken(w, r)
 	case path == "/auth/credentials" && r.Method == "POST":
@@ -2805,6 +2811,119 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// apiStartKiroSso starts the Kiro hosted-portal sign-in (Enterprise SSO — Microsoft 365 /
+// Entra ID, plus Google/GitHub). It binds the loopback callback listener and returns the
+// sign-in URL the operator opens in a browser ON THE SAME HOST as the proxy (the OAuth
+// redirect targets 127.0.0.1:3128). The browser is driven through the enterprise external-IdP
+// leg automatically; the front end polls /auth/kiro-sso/poll until completion.
+func (h *Handler) apiStartKiroSso(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Region string `json:"region"`
+	}
+	// Region is optional (defaults to us-east-1 in StartKiroSsoLogin), so a decode
+	// error (including an empty body) is intentionally tolerated — mirrors
+	// apiStartBuilderIdLogin.
+	json.NewDecoder(r.Body).Decode(&req)
+
+	session, signInURL, err := auth.StartKiroSsoLogin(req.Region)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"sessionId": session.ID,
+		"signInUrl": signInURL,
+		"interval":  2,
+	})
+}
+
+// apiCancelKiroSso tears down an in-flight hosted-portal sign-in (operator closed or
+// cancelled the modal), freeing the loopback callback port immediately instead of
+// waiting for the deadline.
+func (h *Handler) apiCancelKiroSso(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.SessionID != "" {
+		auth.CancelKiroSsoLogin(req.SessionID)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
+// apiPollKiroSso reports the hosted-portal sign-in status. While the user is signing in it
+// returns completed=false; once the listener captures the authorization code it exchanges it,
+// persists the account (AuthMethod "external_idp" for an Azure tenant, "social" otherwise), and
+// returns completed=true. The profileArn is resolved lazily on first use (the EXTERNAL_IDP
+// token type header is now sent on CodeWhisperer calls), so it is not required here.
+func (h *Handler) apiPollKiroSso(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	result, status, err := auth.PollKiroSsoAuth(req.SessionID)
+	if err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	if status == "pending" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"completed": false,
+			"status":    "pending",
+		})
+		return
+	}
+
+	// 授权完成，创建账号
+	account := config.Account{
+		ID:            auth.GenerateAccountID(),
+		Email:         result.Email,
+		AccessToken:   result.AccessToken,
+		RefreshToken:  result.RefreshToken,
+		ClientID:      result.ClientID,
+		AuthMethod:    result.AuthMethod,
+		Provider:      result.Provider,
+		Region:        result.Region,
+		ProfileArn:    result.ProfileArn,
+		TokenEndpoint: result.TokenEndpoint,
+		IssuerURL:     result.IssuerURL,
+		Scopes:        result.Scopes,
+		ExpiresAt:     time.Now().Unix() + int64(result.ExpiresIn),
+		Enabled:       true,
+		MachineId:     config.GenerateMachineId(),
+	}
+
+	if err := config.AddAccount(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	h.pool.Reload()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"completed": true,
+		"account": map[string]interface{}{
+			"id":         account.ID,
+			"email":      account.Email,
+			"authMethod": account.AuthMethod,
+		},
+	})
+}
+
 func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BearerToken string `json:"bearerToken"`
@@ -2895,6 +3014,17 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		AuthMethod   string `json:"authMethod"`
 		Provider     string `json:"provider"`
 		Region       string `json:"region"`
+		// external_idp (enterprise SSO / Azure AD) refresh material.
+		TokenEndpoint string `json:"tokenEndpoint"`
+		IssuerURL     string `json:"issuerUrl"`
+		Scopes        string `json:"scopes"`
+		// Optional identity preservation when pasting a full account record.
+		ID         string `json:"id"`
+		Email      string `json:"email"`
+		ProfileArn string `json:"profileArn"`
+		// userId (account-level in Kiro Account Manager exports) embeds the Azure
+		// tenant, from which tokenEndpoint/issuerUrl/scopes are derived when missing.
+		UserID string `json:"userId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -2912,65 +3042,134 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	if req.Region == "" {
 		req.Region = "us-east-1"
 	}
-	if req.AuthMethod == "" {
-		if req.ClientID != "" {
-			req.AuthMethod = "idc"
-		} else {
-			req.AuthMethod = "social"
-		}
+	// 标准化 authMethod。external_idp 必须先于 clientId+clientSecret→idc 的推断被识别
+	//（external_idp 带 clientId 但没有 clientSecret），否则会被误判成 social 而 refresh 到错误端点。
+	req.AuthMethod = normalizeImportAuthMethod(req.AuthMethod, req.ClientID, req.ClientSecret, req.TokenEndpoint)
+
+	// Resolve Azure endpoints from userId (Kiro export, account level) or the
+	// accessToken JWT issuer (bare blobs: clientId + token only). A derivation that
+	// also clears the allow-list is itself proof the credential is external_idp —
+	// IdC/social access tokens are not microsoftonline JWTs, so a bare IdC blob (its
+	// iss is an AWS host) won't clear the list and won't be misclassified.
+	derivedTE, derivedIss, derivedSc := auth.DeriveExternalIdpEndpoints(req.UserID, req.ClientID, req.AccessToken)
+	if derivedTE != "" && auth.ValidateExternalIdpEndpoint(derivedTE) == nil && req.AuthMethod != "external_idp" {
+		req.AuthMethod = "external_idp"
 	}
-	// 标准化 authMethod
-	switch strings.ToLower(req.AuthMethod) {
-	case "idc", "builderid", "enterprise":
-		req.AuthMethod = "idc"
-	case "social", "google", "github":
-		req.AuthMethod = "social"
-	default:
-		if req.ClientID != "" && req.ClientSecret != "" {
-			req.AuthMethod = "idc"
-		} else {
-			req.AuthMethod = "social"
+
+	// external_idp 的 tokenEndpoint 是用户可填的新信任边界：必须经 allow-list 校验，
+	// 否则一份不信任的 credential JSON 可指向内网/攻击者主机，导致 refresh token 被外泄。
+	if req.AuthMethod == "external_idp" {
+		// Kiro Account Manager exports and bare blobs omit tokenEndpoint/issuerUrl/
+		// scopes; fill them from the derived (userId or accessToken-JWT) tenant.
+		if req.TokenEndpoint == "" {
+			req.TokenEndpoint = derivedTE
+		}
+		if req.IssuerURL == "" {
+			req.IssuerURL = derivedIss
+		}
+		if req.Scopes == "" {
+			req.Scopes = derivedSc
+		}
+		if req.ClientID == "" || req.TokenEndpoint == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "external_idp requires clientId and tokenEndpoint (or userId/accessToken to derive it)"})
+			return
+		}
+		if err := auth.ValidateExternalIdpEndpoint(req.TokenEndpoint); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "external IdP endpoint rejected: " + err.Error()})
+			return
+		}
+		if req.IssuerURL != "" {
+			if err := auth.ValidateExternalIdpEndpoint(req.IssuerURL); err != nil {
+				w.WriteHeader(400)
+				json.NewEncoder(w).Encode(map[string]string{"error": "external IdP issuer rejected: " + err.Error()})
+				return
+			}
 		}
 	}
 
-	// 用 refreshToken 刷新获取新的 accessToken。导入必须以一次成功的刷新为前提：
-	// 本地缓存里的 accessToken 不携带可信的过期时间，盲猜短 TTL 会让账号在选号时
-	// 永远被跳过，导致后台/按需刷新都无法触发（详见 ensureValidToken 与 Pick 的过期判定）。
-	tempAccount := &config.Account{
-		RefreshToken: req.RefreshToken,
-		ClientID:     req.ClientID,
-		ClientSecret: req.ClientSecret,
-		AuthMethod:   req.AuthMethod,
-		Region:       req.Region,
+	// Resolve the access token to persist. For external_idp we prefer TRUST-ON-IMPORT:
+	// when the pasted JSON carries an Azure AD access token (a JWT with a real exp),
+	// persist it directly WITHOUT a live refresh round-trip. The JSON can then be
+	// imported repeatedly / into multiple instances without each import consuming
+	// (rotating) the refresh token, and without requiring egress to Microsoft at
+	// import time. The runtime background refresh (backgroundRefresh /
+	// ensureValidToken) renews it later when the account is actually used. Falls
+	// back to refresh-at-import for idc/social and for external_idp credentials
+	// carrying only a refreshToken (so the regression gate — reject when refresh
+	// fails — still holds there).
+	var (
+		accessToken string
+		expiresAt   int64
+		profileArn  string
+	)
+	email := req.Email
+	if req.AuthMethod == "external_idp" && req.AccessToken != "" {
+		if exp := auth.ExpFromAccessTokenJWT(req.AccessToken); exp > 0 {
+			accessToken = req.AccessToken
+			expiresAt = exp
+			profileArn = req.ProfileArn
+		}
 	}
-	accessToken, newRefreshToken, expiresAt, newProfileArn, err := auth.RefreshToken(tempAccount)
-	if err != nil {
-		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
-		return
+	if accessToken == "" {
+		tempAccount := &config.Account{
+			RefreshToken:  req.RefreshToken,
+			ClientID:      req.ClientID,
+			ClientSecret:  req.ClientSecret,
+			AuthMethod:    req.AuthMethod,
+			Region:        req.Region,
+			TokenEndpoint: req.TokenEndpoint,
+			Scopes:        req.Scopes,
+		}
+		a, newRT, ea, newPA, err := auth.RefreshToken(tempAccount)
+		if err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
+			return
+		}
+		accessToken = a
+		expiresAt = ea
+		profileArn = newPA
+		if newRT != "" {
+			req.RefreshToken = newRT
+		}
+		if fetchedEmail, _, _ := auth.GetUserInfo(accessToken); fetchedEmail != "" {
+			email = fetchedEmail
+		}
 	}
-	if newRefreshToken != "" {
-		req.RefreshToken = newRefreshToken
+	if profileArn == "" {
+		profileArn = req.ProfileArn // external_idp refresh returns no profileArn
 	}
-
-	// 获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
 
 	// 创建账号
+	provider := req.Provider
+	if provider == "" && req.AuthMethod == "external_idp" {
+		provider = "AzureAD"
+	}
+	// Reuse a pasted record's id when it does not collide; otherwise mint a fresh
+	// one so re-importing a backup never creates a duplicate entry.
+	id := req.ID
+	if id == "" || config.AccountIDExists(id) {
+		id = auth.GenerateAccountID()
+	}
 	account := config.Account{
-		ID:           auth.GenerateAccountID(),
-		Email:        email,
-		AccessToken:  accessToken,
-		RefreshToken: req.RefreshToken,
-		ClientID:     req.ClientID,
-		ClientSecret: req.ClientSecret,
-		AuthMethod:   req.AuthMethod,
-		Provider:     req.Provider,
-		Region:       req.Region,
-		ExpiresAt:    expiresAt,
-		Enabled:      true,
-		MachineId:    config.GenerateMachineId(),
-		ProfileArn:   newProfileArn,
+		ID:            id,
+		Email:         email,
+		AccessToken:   accessToken,
+		RefreshToken:  req.RefreshToken,
+		ClientID:      req.ClientID,
+		ClientSecret:  req.ClientSecret,
+		AuthMethod:    req.AuthMethod,
+		Provider:      provider,
+		Region:        req.Region,
+		ExpiresAt:     expiresAt,
+		Enabled:       true,
+		MachineId:     config.GenerateMachineId(),
+		ProfileArn:    profileArn,
+		TokenEndpoint: req.TokenEndpoint,
+		IssuerURL:     req.IssuerURL,
+		Scopes:        req.Scopes,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -2987,6 +3186,58 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			"email": account.Email,
 		},
 	})
+}
+
+// externalIdpAuthMethodAliases are lower-cased authMethod values (or Kiro Account
+// Manager provider labels) that mean "external IdP / enterprise SSO" and must
+// normalize to "external_idp".
+var externalIdpAuthMethodAliases = map[string]bool{
+	"external_idp": true,
+	"azuread":      true,
+	"azure":        true,
+	"entra":        true,
+	"entra-id":     true,
+	"entra_id":     true,
+	"microsoft":    true,
+	"m365":         true,
+	"office365":    true,
+	"external":     true,
+}
+
+// normalizeImportAuthMethod maps a pasted credential JSON's authMethod (plus its
+// clientId/clientSecret/tokenEndpoint) onto one of the three canonical methods
+// ("external_idp" | "idc" | "social"). external_idp MUST be detected before the
+// clientId+clientSecret→idc inference, because external_idp accounts carry clientId
+// but NO clientSecret, so the old default branch misclassified them as "social" and
+// refresh hit the wrong endpoint.
+//
+// It preserves the pre-existing idc/social heuristics:
+//   - empty authMethod + clientId present             -> idc
+//   - empty authMethod, no clientId                   -> social
+//   - "enterprise" (Kiro Account Manager IdC label)   -> idc
+//   - unrecognized non-empty + clientId+clientSecret  -> idc, else social
+func normalizeImportAuthMethod(authMethod, clientID, clientSecret, tokenEndpoint string) string {
+	am := strings.ToLower(strings.TrimSpace(authMethod))
+	switch {
+	case externalIdpAuthMethodAliases[am]:
+		return "external_idp"
+	case tokenEndpoint != "": // infer when not declared explicitly
+		return "external_idp"
+	case am == "social" || am == "google" || am == "github":
+		return "social"
+	case am == "idc" || am == "builderid" || am == "enterprise":
+		return "idc"
+	}
+	if am == "" {
+		if clientID != "" {
+			return "idc"
+		}
+		return "social"
+	}
+	if clientID != "" && clientSecret != "" {
+		return "idc"
+	}
+	return "social"
 }
 
 func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {

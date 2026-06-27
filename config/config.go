@@ -45,13 +45,21 @@ type Account struct {
 	RefreshToken string `json:"refreshToken"`           // OAuth refresh token for token renewal
 	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
 	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
-	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC) or "social" (GitHub/Google)
-	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub")
+	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC), "social" (GitHub/Google), or "external_idp" (enterprise SSO, e.g. Azure AD)
+	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub", "AzureAD")
 	Region       string `json:"region"`                 // AWS region for OIDC endpoints
 	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
 	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
 	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
+
+	// External IdP (enterprise SSO, e.g. Microsoft 365 / Entra ID / Azure AD) refresh material.
+	// When AuthMethod == "external_idp" the credential is an IdP-issued OAuth token refreshed
+	// against TokenEndpoint using ClientID and Scopes (refresh_token grant), NOT the AWS SSO
+	// OIDC endpoint. IssuerURL is the OIDC issuer the endpoints were discovered from.
+	TokenEndpoint string `json:"tokenEndpoint,omitempty"` // External IdP OAuth2 token endpoint (refresh)
+	IssuerURL     string `json:"issuerUrl,omitempty"`     // External IdP OIDC issuer URL
+	Scopes        string `json:"scopes,omitempty"`        // Space-separated scopes granted by the external IdP
 
 	// Per-account outbound proxy (falls back to global ProxyURL if empty)
 	ProxyURL string `json:"proxyURL,omitempty"`
@@ -403,6 +411,23 @@ func GetAccounts() []Account {
 	accounts := make([]Account, len(cfg.Accounts))
 	copy(accounts, cfg.Accounts)
 	return accounts
+}
+
+// AccountIDExists reports whether an account with the given ID is already stored.
+// Used by the credential-import path to reuse a pasted record's id when it does
+// not collide, so re-importing a backup never creates a duplicate entry.
+func AccountIDExists(id string) bool {
+	if id == "" {
+		return false
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	for _, a := range cfg.Accounts {
+		if a.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func GetEnabledAccounts() []Account {

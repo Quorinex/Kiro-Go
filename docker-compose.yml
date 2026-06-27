@@ -5,8 +5,23 @@ services:
     build: .
     ports:
       - "8080:8080"
+      # Enterprise SSO (Microsoft 365) callback. The hosted-portal sign-in
+      # redirects the browser to localhost:3128, so the operator must run that
+      # browser ON THE DOCKER HOST. Publishing host-side to 127.0.0.1 only keeps
+      # the callback off the host's external interfaces while still letting the
+      # host browser's localhost:3128 reach the container listener below.
+      - "127.0.0.1:3128:3128"
     volumes:
       - ./data:/app/data
     environment:
       - CONFIG_PATH=/app/data/config.json
+      # Bind host for the Enterprise SSO callback listener INSIDE the container.
+      # Default (unset) is loopback-only (127.0.0.1/::1), which the published port
+      # above cannot reach; 0.0.0.0 lets the forwarded connection land. The callback
+      # is transient (~10-minute login window) and anti-CSRF state-matched, and the
+      # host-side publish is pinned to loopback above, so it is not reachable off the
+      # host. Note 0.0.0.0 does expose 3128 to peer containers on the same Docker
+      # network during that window; on a shared/untrusted Docker network, pin
+      # KIRO_SSO_CALLBACK_BIND to a specific interface or isolate the network.
+      - KIRO_SSO_CALLBACK_BIND=0.0.0.0
     restart: unless-stopped
