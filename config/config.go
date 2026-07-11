@@ -45,13 +45,21 @@ type Account struct {
 	RefreshToken string `json:"refreshToken"`           // OAuth refresh token for token renewal
 	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
 	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
-	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC) or "social" (GitHub/Google)
-	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub")
+	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC), "social" (GitHub/Google), or "external_idp" (enterprise SSO, e.g. Azure AD)
+	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub", "AzureAD")
 	Region       string `json:"region"`                 // AWS region for OIDC endpoints
 	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
 	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
 	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
+
+	// External IdP (enterprise SSO, e.g. Microsoft 365 / Entra ID / Azure AD) refresh material.
+	// When AuthMethod == "external_idp" the credential is an IdP-issued OAuth token refreshed
+	// against TokenEndpoint using ClientID and Scopes (refresh_token grant), NOT the AWS SSO
+	// OIDC endpoint. IssuerURL is the OIDC issuer the endpoints were discovered from.
+	TokenEndpoint string `json:"tokenEndpoint,omitempty"` // External IdP OAuth2 token endpoint (refresh)
+	IssuerURL     string `json:"issuerUrl,omitempty"`     // External IdP OIDC issuer URL
+	Scopes        string `json:"scopes,omitempty"`        // Space-separated scopes granted by the external IdP
 
 	// Per-account outbound proxy (falls back to global ProxyURL if empty)
 	ProxyURL string `json:"proxyURL,omitempty"`
@@ -405,6 +413,23 @@ func GetAccounts() []Account {
 	return accounts
 }
 
+// AccountIDExists reports whether an account with the given ID is already stored.
+// Used by the credential-import path to reuse a pasted record's id when it does
+// not collide, so re-importing a backup never creates a duplicate entry.
+func AccountIDExists(id string) bool {
+	if id == "" {
+		return false
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	for _, a := range cfg.Accounts {
+		if a.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func GetEnabledAccounts() []Account {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
@@ -420,6 +445,17 @@ func GetEnabledAccounts() []Account {
 func AddAccount(account Account) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	// Reject a duplicate id under the write lock. The import path pre-checks with
+	// AccountIDExists (RLock) and mints a fresh id on collision, but that check and this
+	// append are not atomic; two concurrent imports of the same pasted id could both
+	// pass the pre-check. This makes "add if id absent" the atomic invariant.
+	if account.ID != "" {
+		for _, a := range cfg.Accounts {
+			if a.ID == account.ID {
+				return fmt.Errorf("account with id %s already exists", account.ID)
+			}
+		}
+	}
 	cfg.Accounts = append(cfg.Accounts, account)
 	return Save()
 }
@@ -499,6 +535,9 @@ func SetAccountBanStatus(id, status, reason string) error {
 	return nil
 }
 
+// UpdateAccountProfileArn pins an account's profile ARN and persists it. A
+// missing id is an error (the account may have been deleted concurrently) so
+// callers cannot mistake a no-op for a successful write.
 func UpdateAccountProfileArn(id, profileArn string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -508,7 +547,7 @@ func UpdateAccountProfileArn(id, profileArn string) error {
 			return Save()
 		}
 	}
-	return nil
+	return fmt.Errorf("account not found: %s", id)
 }
 
 func DeleteAccount(id string) error {

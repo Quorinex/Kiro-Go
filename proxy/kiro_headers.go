@@ -62,6 +62,13 @@ func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kir
 	req.Header.Set("User-Agent", values.UserAgent)
 	req.Header.Set("x-amz-user-agent", values.AmzUserAgent)
 	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	// External IdP (enterprise SSO, e.g. Azure AD) tokens MUST carry this header or
+	// CodeWhisperer does not recognize the token type and silently returns an empty
+	// profile list (and rejects data-plane calls). With it, a provisioned account
+	// resolves its profile; an unprovisioned one gets a clear 403.
+	if account != nil && account.AuthMethod == "external_idp" {
+		req.Header.Set("TokenType", "EXTERNAL_IDP")
+	}
 	if values.Host != "" {
 		req.Host = values.Host
 	}
