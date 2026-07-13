@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"kiro-go/config"
+	"kiro-go/logger"
 	"net/http"
 	"strings"
 	"time"
@@ -42,11 +43,16 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var historyMessages []OpenAIMessage
+	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.PreviousResponseID != "" {
-		prev, loadErr := loadResponse(req.PreviousResponseID)
+		prev, loadErr := loadResponseForOwner(req.PreviousResponseID, apiKeyID)
 		if loadErr != nil {
-			h.sendOpenAIError(w, 404, "invalid_request_error",
-				fmt.Sprintf("previous_response_id not found: %v", loadErr))
+			// Log the real reason server-side for ops, but return a single fixed
+			// generic message to the client so a bad id never leaks the server's
+			// filesystem path (the raw os.PathError) nor distinguishes missing vs
+			// expired vs not-owner.
+			logger.Warnf("[Responses] previous_response_id %q load failed: %v", req.PreviousResponseID, loadErr)
+			h.sendOpenAIError(w, 404, "invalid_request_error", "previous_response_id not found")
 			return
 		}
 		historyMessages = expandPreviousResponseHistory(prev)
@@ -97,7 +103,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		Tools:    req.Tools,
 	}
 	if req.Temperature != nil {
-		openaiReq.Temperature = *req.Temperature
+		openaiReq.Temperature = req.Temperature
 	}
 	if req.MaxOutputTokens != nil {
 		openaiReq.MaxTokens = *req.MaxOutputTokens
@@ -110,7 +116,6 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 
-	apiKeyID := apiKeyIDFromContext(r.Context())
 	respID := generateResponseID()
 
 	if req.Stream {
@@ -132,7 +137,11 @@ func (h *Handler) handleResponsesNonStream(
 	var lastErr error
 	reqStart := time.Now()
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	retryBudget := resolveAccountRetryBudget(h.pool.Count())
+	for attempt := 0; attempt < retryBudget; attempt++ {
+		if attempt > 0 {
+			time.Sleep(accountRetryBackoff(attempt - 1))
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
@@ -171,6 +180,9 @@ func (h *Handler) handleResponsesNonStream(
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			if isUpstreamPermanentError(err) {
+				break
+			}
 			continue
 		}
 
@@ -194,6 +206,7 @@ func (h *Handler) handleResponsesNonStream(
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
+		respObj.OwnerKeyID = apiKeyID
 
 		if storeResponse {
 			if saveErr := saveResponse(respObj); saveErr != nil {
@@ -211,7 +224,7 @@ func (h *Handler) handleResponsesNonStream(
 		return
 	}
 	h.recordFailureWithDetails("responses", model, "", lastErr)
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	h.sendOpenAIError(w, 500, "server_error", improperlyFormedClientMessage(lastErr))
 }
 
 func buildResponsesObject(
@@ -317,7 +330,11 @@ func (h *Handler) handleResponsesStream(
 	responseStarted := false
 	reqStart := time.Now()
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	retryBudget := resolveAccountRetryBudget(h.pool.Count())
+	for attempt := 0; attempt < retryBudget; attempt++ {
+		if attempt > 0 {
+			time.Sleep(accountRetryBackoff(attempt - 1))
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
@@ -472,10 +489,13 @@ func (h *Handler) handleResponsesStream(
 
 		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
+			lastErr = err
+			excluded[account.ID] = true
+			h.handleAccountFailure(account, err)
+			if isUpstreamPermanentError(err) {
+				break
+			}
 			if !responseStarted {
-				lastErr = err
-				excluded[account.ID] = true
-				h.handleAccountFailure(account, err)
 				continue
 			}
 			send("response.failed", map[string]interface{}{
@@ -485,7 +505,7 @@ func (h *Handler) handleResponsesStream(
 					"status": "failed",
 					"error": map[string]string{
 						"type":    "server_error",
-						"message": err.Error(),
+						"message": improperlyFormedClientMessage(err),
 					},
 				},
 			})
@@ -542,6 +562,7 @@ func (h *Handler) handleResponsesStream(
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
+		respObj.OwnerKeyID = apiKeyID
 
 		if storeResponse {
 			if saveErr := saveResponse(respObj); saveErr != nil {
@@ -580,7 +601,7 @@ func (h *Handler) handleResponsesStream(
 			"status": "failed",
 			"error": map[string]string{
 				"type":    "server_error",
-				"message": lastErr.Error(),
+				"message": improperlyFormedClientMessage(lastErr),
 			},
 		},
 	})

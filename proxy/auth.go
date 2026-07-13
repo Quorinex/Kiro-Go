@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/subtle"
 	"kiro-go/config"
 	"net/http"
 	"strings"
@@ -85,7 +86,11 @@ func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
 		// Auth required but nothing configured → fail closed.
 		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key authentication is required but no keys are configured")
 	}
-	if provided == "" || provided != expected {
+	// Constant-time compare so a network observer cannot time-attack the key
+	// (byte-by-byte early-exit of `provided != expected` would leak the length of
+	// the correct prefix). Matches the constant-time check already used for the
+	// admin password (handler.go) and audit-log password (prod_middleware.go).
+	if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "Invalid or missing API key")
 	}
 	return nil, nil

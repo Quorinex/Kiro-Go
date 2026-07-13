@@ -62,6 +62,7 @@ func saveResponse(resp *ResponsesObject) error {
 		Metadata:           resp.Metadata,
 		Instructions:       resp.Instructions,
 		StoredInput:        resp.StoredInput,
+		OwnerKeyID:         resp.OwnerKeyID,
 		StoredAt:           resp.StoredAt,
 	}
 
@@ -110,8 +111,26 @@ func loadResponse(id string) (*ResponsesObject, error) {
 		Metadata:           doc.Metadata,
 		Instructions:       doc.Instructions,
 		StoredInput:        doc.StoredInput,
+		OwnerKeyID:         doc.OwnerKeyID,
 		StoredAt:           doc.StoredAt,
 	}, nil
+}
+
+// loadResponseForOwner loads a stored response and verifies ownership.
+// If the stored response has an OwnerKeyID set and it doesn't match the
+// given apiKeyID, a generic "not found" error is returned (identical to
+// a missing ID) to prevent response-ID enumeration. Responses created
+// before the ownership field was added (OwnerKeyID=="") are accessible
+// by anyone for backward compatibility.
+func loadResponseForOwner(id, apiKeyID string) (*ResponsesObject, error) {
+	resp, err := loadResponse(id)
+	if err != nil {
+		return nil, err
+	}
+	if resp.OwnerKeyID != "" && apiKeyID != "" && resp.OwnerKeyID != apiKeyID {
+		return nil, fmt.Errorf("stored response not found")
+	}
+	return resp, nil
 }
 
 func purgeExpiredResponses(ttl time.Duration) {
@@ -178,5 +197,6 @@ type storedResponseDoc struct {
 	Metadata           map[string]string    `json:"metadata,omitempty"`
 	Instructions       string               `json:"instructions,omitempty"`
 	StoredInput        json.RawMessage      `json:"stored_input,omitempty"`
+	OwnerKeyID         string               `json:"owner_key_id,omitempty"`
 	StoredAt           int64                `json:"stored_at"`
 }

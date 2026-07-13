@@ -127,3 +127,75 @@ func TestAccountAllowOverageMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestIsApiKeyCredential(t *testing.T) {
+	cases := []struct {
+		name string
+		a    Account
+		want bool
+	}{
+		{"key present", Account{KiroApiKey: "k"}, true},
+		{"api_key lower", Account{AuthMethod: "api_key"}, true},
+		{"apikey lower", Account{AuthMethod: "apikey"}, true},
+		{"API_KEY upper", Account{AuthMethod: "API_KEY"}, true},
+		{"key wins over idc", Account{KiroApiKey: "k", AuthMethod: "idc"}, true},
+		{"idc not api key", Account{AuthMethod: "idc"}, false},
+		{"external_idp not api key", Account{AuthMethod: "external_idp"}, false},
+		{"empty", Account{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.IsApiKeyCredential(); got != tc.want {
+				t.Fatalf("IsApiKeyCredential() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveRegionsFallbackChain(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// account-level wins
+	a := &Account{AuthRegion: "eu-west-1", ApiRegion: "ap-southeast-1", Region: "us-west-2"}
+	if got := a.EffectiveAuthRegion(); got != "eu-west-1" {
+		t.Fatalf("auth: want eu-west-1, got %q", got)
+	}
+	if got := a.EffectiveApiRegion(); got != "ap-southeast-1" {
+		t.Fatalf("api: want ap-southeast-1, got %q", got)
+	}
+
+	// falls back to Region
+	b := &Account{Region: "us-west-2"}
+	if got := b.EffectiveAuthRegion(); got != "us-west-2" {
+		t.Fatalf("auth fallback: want us-west-2, got %q", got)
+	}
+	if got := b.EffectiveApiRegion(); got != "us-west-2" {
+		t.Fatalf("api fallback: want us-west-2, got %q", got)
+	}
+
+	// empty account → default us-east-1
+	c := &Account{}
+	if got := c.EffectiveAuthRegion(); got != "us-east-1" {
+		t.Fatalf("auth default: want us-east-1, got %q", got)
+	}
+	if got := c.EffectiveApiRegion(); got != "us-east-1" {
+		t.Fatalf("api default: want us-east-1, got %q", got)
+	}
+}
+
+func TestMaxPayloadBytesDefaultFallbackAndPersist(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if got := GetMaxPayloadBytes(); got != DefaultMaxPayloadBytes {
+		t.Fatalf("default: want %d, got %d", DefaultMaxPayloadBytes, got)
+	}
+	if err := UpdateMaxPayloadBytes(2100000); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := GetMaxPayloadBytes(); got != 2100000 {
+		t.Fatalf("after set: want 2100000, got %d", got)
+	}
+}

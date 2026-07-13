@@ -257,6 +257,44 @@ func TestResponsesContinuationKeepsNewInstructions(t *testing.T) {
 	}
 }
 
+// TestResponsesPreviousResponseIDNotFoundIsGeneric verifies that a bad
+// previous_response_id does NOT leak the server's filesystem path (the raw
+// os.PathError from os.ReadFile, e.g. "open C:\...\responses\resp_xxx.json: ...")
+// and does not distinguish missing vs expired vs not-owner — all must surface
+// the same fixed generic message to the client.
+func TestResponsesPreviousResponseIDNotFoundIsGeneric(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	body := strings.NewReader(`{"model":"claude-sonnet-4.5","input":"hi","previous_response_id":"resp_does_not_exist_xyz","store":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	rec := httptest.NewRecorder()
+	h.handleOpenAIResponses(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for a bad previous_response_id, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var errResp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decode error body: %v body=%s", err, rec.Body.String())
+	}
+	msg := errResp.Error.Message
+
+	// The client-facing message must be a fixed generic string — no filesystem
+	// path, no file extension, no OS error text, no per-case detail. ".json" is
+	// the cross-platform marker that the raw os.PathError was surfaced verbatim.
+	for _, leak := range []string{".json", "no such file", `responses\`, "responses/", "stored response expired", "stored response not found"} {
+		if strings.Contains(msg, leak) {
+			t.Fatalf("previous_response_id error leaks server detail (%q): %q", leak, msg)
+		}
+	}
+}
+
 func setupResponsesTestHandler(t *testing.T) (*Handler, func()) {
 	t.Helper()
 	cfgFile := filepath.Join(t.TempDir(), "config.json")

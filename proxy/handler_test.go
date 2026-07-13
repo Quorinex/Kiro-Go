@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
 	"net/http"
@@ -478,5 +479,144 @@ func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
 	}
 	if supportsImage, ok := models[0]["supports_image"].(bool); !ok || !supportsImage {
 		t.Fatalf("expected image capability to be preserved, got %#v", models[0]["supports_image"])
+	}
+}
+
+// TestStatsIncludesCacheMetrics verifies /v1/stats surfaces a "cache" object
+// populated from the prompt-cache tracker's atomic counters (hits/misses).
+func TestStatsIncludesCacheMetrics(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+
+	tr := newPromptCacheTracker(defaultPromptCacheTTL)
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4-6",
+		TotalInputTokens: 2000,
+		Breakpoints:      []promptCacheBreakpoint{{Fingerprint: [32]byte{9}, CumulativeTokens: 2000, TTL: time.Hour}},
+	}
+	tr.Compute("acct", profile) // miss (empty cache)
+	tr.Update("acct", profile)
+	tr.Compute("acct", profile) // hit
+
+	h := &Handler{
+		pool:        p,
+		promptCache: tr,
+		startTime:   time.Now().Unix(),
+	}
+
+	rec := httptest.NewRecorder()
+	h.handleStats(rec, httptest.NewRequest(http.MethodGet, "/v1/stats", nil))
+
+	var got map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	cache, ok := got["cache"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected a cache object in stats, got %#v", got)
+	}
+	if cache["hits"].(float64) != 1 {
+		t.Fatalf("expected 1 hit, got %v", cache["hits"])
+	}
+	if cache["misses"].(float64) != 1 {
+		t.Fatalf("expected 1 miss, got %v", cache["misses"])
+	}
+}
+
+// TestApiAddAccountApiKeyBranch verifies POST /admin/api/accounts with an
+// api_key account normalizes AuthMethod, zeroes ExpiresAt, mirrors AccessToken,
+// and skips the OAuth refresh requirement.
+func TestApiAddAccountApiKeyBranch(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	// Stub the REST store so the background model-cache fetch fails fast without
+	// real network egress.
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("test: no network")
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	h := &Handler{pool: accountpool.GetPool()}
+	body := `{"kiroApiKey":"key-123","authMethod":"api_key","region":"eu-central-1","enabled":true}`
+	req := httptest.NewRequest("POST", "/admin/api/accounts", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.apiAddAccount(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	accs := config.GetAccounts()
+	if len(accs) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(accs))
+	}
+	got := accs[0]
+	if got.AuthMethod != "api_key" {
+		t.Fatalf("AuthMethod: want api_key, got %q", got.AuthMethod)
+	}
+	if got.AccessToken != "key-123" {
+		t.Fatalf("AccessToken mirror: want key-123, got %q", got.AccessToken)
+	}
+	if got.ExpiresAt != 0 {
+		t.Fatalf("ExpiresAt: want 0, got %d", got.ExpiresAt)
+	}
+	if got.KiroApiKey != "key-123" {
+		t.Fatalf("KiroApiKey: want key-123, got %q", got.KiroApiKey)
+	}
+	if got.RefreshToken != "" {
+		t.Fatalf("RefreshToken: want empty, got %q", got.RefreshToken)
+	}
+}
+
+// TestApiAddAccountApiKeyRequiresKey verifies a missing key on an api_key
+// request is rejected with 400.
+func TestApiAddAccountApiKeyRequiresKey(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	body := `{"authMethod":"api_key"}`
+	req := httptest.NewRequest("POST", "/admin/api/accounts", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.apiAddAccount(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for api_key without key, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSettingsRoundTripMaxPayloadBytes verifies GET /settings reports
+// maxPayloadBytes and POST /settings persists it.
+func TestSettingsRoundTripMaxPayloadBytes(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+
+	// GET reports the default.
+	getRec := httptest.NewRecorder()
+	h.apiGetSettings(getRec, httptest.NewRequest("GET", "/settings", nil))
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(getRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode GET: %v", err)
+	}
+	if _, ok := got["maxPayloadBytes"]; !ok {
+		t.Fatalf("expected maxPayloadBytes in GET /settings, got %v", got)
+	}
+
+	// POST sets it.
+	postBody := `{"maxPayloadBytes":2100000}`
+	postRec := httptest.NewRecorder()
+	h.apiUpdateSettings(postRec, httptest.NewRequest("POST", "/settings", strings.NewReader(postBody)))
+	if postRec.Code != 200 {
+		t.Fatalf("POST /settings: expected 200, got %d body=%s", postRec.Code, postRec.Body.String())
+	}
+	if config.GetMaxPayloadBytes() != 2100000 {
+		t.Fatalf("maxPayloadBytes not persisted: want 2100000, got %d", config.GetMaxPayloadBytes())
 	}
 }

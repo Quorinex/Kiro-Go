@@ -554,12 +554,42 @@ func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
 	if len(cur.Images) != 1 {
 		t.Fatalf("expected one image extracted, got %d", len(cur.Images))
 	}
-	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
-		t.Fatalf("expected one tool result")
+	// The tool_result is orphaned: it is the only message, with no preceding
+	// assistant tool_use to answer. It therefore cannot stay structured (upstream
+	// rejects a dangling tool_result), so its text must be folded into the message
+	// content rather than dropped — alongside the extracted image.
+	if !strings.Contains(cur.Content, "here is the screenshot") {
+		t.Fatalf("expected orphaned tool_result text folded into content, got %q", cur.Content)
 	}
-	gotText := cur.UserInputMessageContext.ToolResults[0].Content[0].Text
-	if gotText != "here is the screenshot" {
-		t.Fatalf("expected original tool text preserved, got %q", gotText)
+}
+
+func TestOpenAIToolResultMixedTextAndImageOrphaned(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "look at the file"},
+			{
+				Role:       "tool",
+				ToolCallID: "call_orph",
+				Content: []interface{}{
+					map[string]interface{}{"type": "text", "text": "here is the screenshot"},
+					map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": dataURL}},
+				},
+			},
+		},
+	}
+
+	payload := OpenAIToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	if len(cur.Images) != 1 {
+		t.Fatalf("expected one image extracted, got %d", len(cur.Images))
+	}
+	// The trailing tool message is orphaned (no matching assistant tool_call in
+	// history), so its text must be folded into the message content alongside the
+	// extracted image rather than dropped. Mirrors TestClaudeToolResultMixedTextAndImage.
+	if !strings.Contains(cur.Content, "here is the screenshot") {
+		t.Fatalf("expected orphaned tool_result text folded into content, got %q", cur.Content)
 	}
 }
 
@@ -624,15 +654,18 @@ func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
 
 	payload := OpenAIToKiro(req, false)
 
-	var toolHistImages int
+	// The flushed tool-result entry keeps its image: sanitizeKiroHistory narrates
+	// the structured ToolResults into text and clears UserInputMessageContext, but
+	// leaves the attached Images in place. So count the image on the history
+	// entry directly (the "look at the file" user turn carries none).
+	var histImages int
 	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil &&
-			len(h.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
-			toolHistImages += len(h.UserInputMessage.Images)
+		if h.UserInputMessage != nil {
+			histImages += len(h.UserInputMessage.Images)
 		}
 	}
-	if toolHistImages != 1 {
-		t.Fatalf("expected tool image carried on the flushed tool-result history entry, got %d", toolHistImages)
+	if histImages != 1 {
+		t.Fatalf("expected tool image carried on the flushed tool-result history entry, got %d", histImages)
 	}
 
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage

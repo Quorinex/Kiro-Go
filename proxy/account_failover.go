@@ -3,11 +3,56 @@ package proxy
 import (
 	"kiro-go/config"
 	"kiro-go/logger"
+	"math/rand"
 	"strings"
 	"time"
 )
 
-const maxAccountRetryAttempts = 3
+// absoluteMaxAccountRetryAttempts is a defensive ceiling on per-request account
+// retries. The budget otherwise means "iterate every selectable account" (see
+// resolveAccountRetryBudget): each retry excludes already-tried accounts and
+// must pick a different one, so the real retry count converges to the number of
+// accounts and never runs away. This only guards pathological cases.
+const absoluteMaxAccountRetryAttempts = 64
+
+// resolveAccountRetryBudget returns how many account attempts one request may
+// make. Previously this was a fixed 3, so with >3 accounts a request only tried
+// the first 3 and gave up while the rest sat idle — under a 429 storm that meant
+// an outright failure. Now it scales with the account count so every account
+// can be tried. totalAccounts<=0 falls back to 1 (try at least once).
+func resolveAccountRetryBudget(totalAccounts int) int {
+	if totalAccounts <= 0 {
+		return 1
+	}
+	if totalAccounts > absoluteMaxAccountRetryAttempts {
+		return absoluteMaxAccountRetryAttempts
+	}
+	return totalAccounts
+}
+
+// accountRetryBackoff returns the wait before the next retry attempt:
+// exponential 200ms→2s cap + jitter, so a transient upstream blip isn't
+// amplified by back-to-back retries against the next account. attempt is 0-based.
+func accountRetryBackoff(attempt int) time.Duration {
+	const baseMS = 200
+	const maxMS = 2000
+	if attempt < 0 {
+		attempt = 0
+	}
+	shift := attempt
+	if shift > 4 {
+		shift = 4
+	}
+	backoff := baseMS << shift
+	if backoff > maxMS {
+		backoff = maxMS
+	}
+	jitter := 0
+	if j := backoff / 4; j > 0 {
+		jitter = rand.Intn(j)
+	}
+	return time.Duration(backoff+jitter) * time.Millisecond
+}
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
@@ -95,6 +140,15 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 
 	errMsg := err.Error()
 	switch {
+	case isUpstreamPermanentError(err):
+		// The request itself is malformed/rejected by the upstream regardless of
+		// which account relays it. Penalising the account's health, cooling it
+		// down, or rotating to another account would be wrong (the account is
+		// healthy) and harmful (scatters cache affinity, wastes upstream hits).
+		// Neutral: release the in-flight slot the selection took (RecordPermanentRejection)
+		// without recording any success or failure, then return.
+		h.pool.RecordPermanentRejection(account.ID)
+		return
 	case isOverageErrorMessage(errMsg):
 		h.disableAccountOverage(account)
 		h.pool.RecordError(account.ID, false)

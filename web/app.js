@@ -21,6 +21,8 @@
   let promptRules = [];
   let builderIdSession = '';
   let builderIdPollTimer = null;
+  let kiroSsoSession = '';
+  let kiroSsoPollTimer = null;
   let iamSession = '';
   let exportSelectedIds = new Set();
   let currentVersion = '';
@@ -1535,6 +1537,8 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
+    const maxPayloadEl = document.getElementById('maxPayloadBytes');
+    if (maxPayloadEl) maxPayloadEl.value = String(d.maxPayloadBytes || 2000000);
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
@@ -1640,7 +1644,9 @@
   }
   async function saveOverUsageConfig() {
     const allowOverUsage = $('allowOverUsage').checked;
-    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage }) });
+    const maxPayloadEl = document.getElementById('maxPayloadBytes');
+    const maxPayloadBytes = maxPayloadEl ? parseInt(maxPayloadEl.value || '0', 10) : 0;
+    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage, maxPayloadBytes }) });
     toast(t('settings.overUsageSaved'), 'success');
   }
   async function changePassword() {
@@ -2019,10 +2025,13 @@
   var METHOD_ICONS = {
     builderid: 'fa-solid fa-id-card',
     iam: 'fa-solid fa-key',
+    enterprisesso: 'fa-brands fa-microsoft',
     sso: 'fa-solid fa-shield-halved',
     local: 'fa-solid fa-folder-open',
     credentials: 'fa-solid fa-code',
-    cookie: 'fa-solid fa-cookie-bite'
+    cookie: 'fa-solid fa-cookie-bite',
+    apikey: 'fa-solid fa-key',
+    apikeybatch: 'fa-solid fa-layer-group'
   };
   function methodCard(type, title, desc) {
     var icon = METHOD_ICONS[type] || 'fa-solid fa-circle-plus';
@@ -2042,10 +2051,13 @@
     if (type === 'add') modalAdd(title, body);
     else if (type === 'builderid') modalBuilderId(title, body);
     else if (type === 'iam') modalIam(title, body);
+    else if (type === 'enterprisesso') modalEnterpriseSso(title, body);
     else if (type === 'sso') modalSso(title, body);
     else if (type === 'local') modalLocal(title, body);
     else if (type === 'credentials') modalCredentials(title, body);
     else if (type === 'cookie') modalCookie(title, body);
+    else if (type === 'apikey') modalApiKey(title, body);
+    else if (type === 'apikeybatch') modalApiKeyBatch(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
@@ -2054,6 +2066,14 @@
     iamSession = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
+    if (kiroSsoPollTimer) { clearTimeout(kiroSsoPollTimer); kiroSsoPollTimer = null; }
+    // If a hosted-portal sign-in is still in flight (modal closed via X/backdrop
+    // before completion), release the loopback port now. On successful completion
+    // the poller clears kiroSsoSession first, so this no-ops then.
+    if (kiroSsoSession) {
+      api('/auth/kiro-sso/cancel', { method: 'POST', body: JSON.stringify({ sessionId: kiroSsoSession }) }).catch(() => {});
+    }
+    kiroSsoSession = '';
   }
   function modalAdd(title, body) {
     title.textContent = t('modal.addAccount');
@@ -2061,10 +2081,13 @@
       '<div class="method-list">' +
       methodCard('builderid', t('modal.builderIdTitle'), t('modal.builderIdDesc')) +
       methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
+      methodCard('enterprisesso', t('modal.enterpriseSsoTitle'), t('modal.enterpriseSsoDesc')) +
       methodCard('sso', t('modal.ssoTitle'), t('modal.ssoDesc')) +
       methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
       methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
+      methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
+      methodCard('apikeybatch', t('modal.apikeyBatchTitle'), t('modal.apikeyBatchDesc')) +
       '</div>' +
       '<div class="modal-footer"><button class="btn btn-secondary" data-close-add="1" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>';
   }
@@ -2221,6 +2244,35 @@
       '</div>';
     $('importCookieBtn').addEventListener('click', importFromCookie);
   }
+  function modalApiKey(title, body) {
+    title.textContent = t('modal.apikeyTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('apikey.hint')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.key')) + '</label>' +
+      '<textarea id="apiKeyValue" class="font-mono" placeholder="' + escapeAttr(t('apikey.keyPlaceholder')) + '"></textarea>' +
+      '</div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="apiKeyRegion" value="us-east-1" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importApiKeyBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importApiKeyBtn').addEventListener('click', importApiKey);
+  }
+  function modalApiKeyBatch(title, body) {
+    title.textContent = t('modal.apikeyBatchTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('apikeyBatch.hint')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikeyBatch.keys')) + '</label>' +
+      '<textarea id="apiKeyBatchValue" class="font-mono" rows="8" placeholder="' + escapeAttr(t('apikeyBatch.keysPlaceholder')) + '"></textarea>' +
+      '<small>' + escapeHtml(t('apikeyBatch.onePerLine')) + '</small>' +
+      '</div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="apiKeyBatchRegion" value="us-east-1" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importApiKeyBatchBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importApiKeyBatchBtn').addEventListener('click', importApiKeysBatch);
+  }
   function updateLocalFields() {
     const p = $('localProvider').value;
     $('localClientGroup').classList.toggle('hidden', p === 'Google' || p === 'Github');
@@ -2277,11 +2329,19 @@
           const c = a.credentials || {};
           return {
             refreshToken: c.refreshToken || a.refreshToken,
+            accessToken: c.accessToken || a.accessToken,
             clientId: c.clientId || a.clientId,
             clientSecret: c.clientSecret || a.clientSecret,
             region: c.region || a.region,
             authMethod: c.authMethod || a.authMethod,
-            provider: c.provider || a.provider || a.idp
+            provider: c.provider || a.provider || a.idp,
+            tokenEndpoint: c.tokenEndpoint || a.tokenEndpoint,
+            issuerUrl: c.issuerUrl || a.issuerUrl,
+            scopes: c.scopes || a.scopes,
+            id: a.id,
+            email: c.email || a.email,
+            profileArn: c.profileArn || a.profileArn,
+            userId: a.userId
           };
         });
       } else {
@@ -2303,11 +2363,19 @@
     let ok = 0, fail = 0, newIds = [];
     for (const item of items) {
       if (!item.refreshToken) { fail++; continue; }
-      let authMethod = item.authMethod || '';
-      if (item.clientId && item.clientSecret) authMethod = 'idc';
-      else if (!authMethod || authMethod === 'social') authMethod = 'social';
-      else authMethod = authMethod.toLowerCase() === 'idc' ? 'idc' : 'social';
+      const EXTERNAL_IDP = ['external_idp','azuread','azure','entra','entra-id','microsoft','m365','office365','external'];
+      let authMethod = (item.authMethod || '').toLowerCase();
+      if (EXTERNAL_IDP.includes(authMethod) || item.tokenEndpoint) {
+        authMethod = 'external_idp';
+      } else if (item.clientId && item.clientSecret) {
+        authMethod = 'idc';
+      } else if (!authMethod || authMethod === 'social') {
+        authMethod = 'social';
+      } else {
+        authMethod = authMethod === 'idc' ? 'idc' : 'social';
+      }
       let provider = item.provider || '';
+      if (!provider && authMethod === 'external_idp') provider = 'AzureAD';
       if (!provider && authMethod === 'social') provider = 'Google';
       if (!provider && authMethod === 'idc') provider = 'BuilderId';
       const payload = {
@@ -2316,7 +2384,13 @@
         clientId: item.clientId || '',
         clientSecret: item.clientSecret || '',
         authMethod, provider,
-        region: item.region || 'us-east-1'
+        region: item.region || 'us-east-1',
+        tokenEndpoint: item.tokenEndpoint || '',
+        issuerUrl: item.issuerUrl || '',
+        scopes: item.scopes || '',
+        ...(item.id ? { id: item.id } : {}),
+        ...(item.email ? { email: item.email } : {}),
+        ...(item.profileArn ? { profileArn: item.profileArn } : {})
       };
       try {
         const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
@@ -2369,6 +2443,39 @@
       toastPrimary(t('cookie.importSuccess') + ': ' + (d.account?.email || d.account?.id));
       autoRefreshNewAccount(d.account?.id);
     } else toastError(t('common.failed') + ': ' + (d.error || ''));
+  }
+  async function importApiKey() {
+    const kiroApiKey = $('apiKeyValue').value.trim();
+    if (!kiroApiKey) return toastWarning(t('apikey.keyMissing'));
+    const region = $('apiKeyRegion').value || 'us-east-1';
+    const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify({ kiroApiKey, authMethod: 'api_key', region }) });
+    const d = await res.json();
+    if (d.success) {
+      closeModal(); loadAccounts(); loadStats();
+      toastPrimary(t('apikey.importSuccess') + ': ' + (d.account?.email || d.account?.id));
+      autoRefreshNewAccount(d.account?.id);
+    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+  }
+  async function importApiKeysBatch() {
+    const keys = $('apiKeyBatchValue').value.trim();
+    if (!keys) return toastWarning(t('apikeyBatch.keysMissing'));
+    const region = $('apiKeyBatchRegion').value || 'us-east-1';
+    const res = await api('/auth/apikeys-batch', { method: 'POST', body: JSON.stringify({ keys, region }) });
+    const d = await res.json();
+    if (d.success) {
+      closeModal(); loadAccounts(); loadStats();
+      let msg = t('apikeyBatch.summary', d.imported || 0, d.total || 0, d.skipped || 0);
+      if (d.infoFailed > 0) msg += t('apikeyBatch.infoFailed', d.infoFailed);
+      toastPrimary(msg, { duration: 6000 });
+      renderApiKeyBatchResults(d.results || []);
+    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+  }
+  function renderApiKeyBatchResults(results) {
+    // Per-key detail surfaces via the toast summary above; log masked failures
+    // for the operator so a full per-key panel can be built later if needed.
+    results.forEach(r => {
+      if (r.error) console.warn('[ApiKeyBatch]', r.maskedKey, r.error);
+    });
   }
   async function importSsoToken() {
     const res = await api('/auth/sso-token', {
@@ -2427,6 +2534,146 @@
   function cancelBuilderIdLogin() {
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
+    showModal('add');
+  }
+  // Enterprise SSO — Microsoft 365 / Entra ID (Azure AD), via the Kiro hosted sign-in portal.
+  // The backend binds a loopback listener and returns the sign-in URL; the browser is driven
+  // through the external-IdP leg automatically, and we poll until the account is created.
+  function modalEnterpriseSso(title, body) {
+    title.textContent = t('modal.enterpriseSsoTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.enterpriseSsoDesc')) + '</p>' +
+      '<div id="kiroSsoStep1">' +
+      '<div class="message message-info"><p class="text-xs">' + escapeHtml(t('kirosso.hostNote')) + '</p></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="startKiroSsoBtn" type="button">' + escapeHtml(t('builderid.startLogin')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<div id="kiroSsoStep2" class="hidden">' +
+      '<div class="message message-info"><p class="text-xs">' + escapeHtml(t('kirosso.openInstruction')) + '</p></div>' +
+      '<div class="form-group mt-3"><label>' + escapeHtml(t('iam.loginUrl')) + '</label>' +
+      '<div class="endpoint"><span id="kiroSsoSignInUrl" class="font-mono text-xs"></span></div>' +
+      '<div class="flex gap-2 mt-2">' +
+      '<button class="btn btn-sm btn-outline flex-1" id="kiroSsoOpenBtn" type="button">' + escapeHtml(t('builderid.open')) + '</button>' +
+      '<button class="btn btn-sm btn-outline flex-1" id="kiroSsoCopyBtn" type="button">' + escapeHtml(t('common.copy')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<div class="mt-3 p-3 border rounded" style="border-color:var(--border);background:var(--surface-secondary)">' +
+      '<div class="flex items-center gap-2 mb-2">' +
+      '<span id="kiroSsoStepBadge" class="badge badge-primary" style="font-size:11px">Step 1</span>' +
+      '<span id="kiroSsoStepLabel" style="font-size:13px;font-weight:500">Paste the redirect URL from your browser address bar</span>' +
+      '</div>' +
+      '<p id="kiroSsoStepHint" class="help-block" style="margin-bottom:6px;font-size:12px">After signing in, your browser will redirect to <code>localhost:3128</code>. Copy the full URL (Ctrl+L, Ctrl+C) and paste it here.</p>' +
+      '<div class="flex gap-2">' +
+      '<input id="kiroSsoCallbackUrl" class="flex-1" style="font-size:12px;font-family:monospace" placeholder="http://localhost:3128/signin/callback?..." autocomplete="off">' +
+      '<button class="btn btn-sm btn-primary" id="kiroSsoSubmitCallbackBtn" type="button">' + escapeHtml(t('common.submit') || 'Submit') + '</button>' +
+      '</div>' +
+      '<div id="kiroSsoRedirectArea" class="hidden mt-2 p-2 rounded" style="background:var(--surface)">' +
+      '<p class="help-block" style="margin-bottom:4px;font-size:12px">Now open this Microsoft 365 login link, complete authentication, then come back and paste the next redirect URL:</p>' +
+      '<a id="kiroSsoRedirectLink" class="btn btn-sm btn-primary" target="_blank" href="#" style="word-break:break-all">Open Microsoft Login ↗</a>' +
+      '</div>' +
+      '</div>' +
+      '<p id="kiroSsoStatus" class="text-center text-sm mt-3" style="color:var(--warning)">Waiting for callback URL — paste the redirect from your browser above</p>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" id="kiroSsoCancelBtn" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>' +
+      '</div>';
+    $('startKiroSsoBtn').addEventListener('click', startKiroSsoLogin);
+    $('kiroSsoSubmitCallbackBtn').addEventListener('click', submitKiroSsoCallback);
+    $('kiroSsoCallbackUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitKiroSsoCallback(); });
+  }
+  async function startKiroSsoLogin() {
+    // No region prompt: the data-plane region is derived from the profile ARN
+    // returned by SSO (social) or discovered via the cross-region profile probe
+    // (external_idp / Azure), so the operator never has to know it up front.
+    const res = await api('/auth/kiro-sso/start', { method: 'POST', body: JSON.stringify({}) });
+    const d = await res.json();
+    if (d.sessionId && d.signInUrl) {
+      kiroSsoSession = d.sessionId;
+      $('kiroSsoSignInUrl').textContent = d.signInUrl;
+      $('kiroSsoStep1').classList.add('hidden');
+      $('kiroSsoStep2').classList.remove('hidden');
+      $('kiroSsoOpenBtn').addEventListener('click', () => window.open($('kiroSsoSignInUrl').textContent, '_blank'));
+      $('kiroSsoCopyBtn').addEventListener('click', async () => {
+        await copyText($('kiroSsoSignInUrl').textContent);
+        toast(t('common.copied'), 'primary');
+      });
+      $('kiroSsoCancelBtn').addEventListener('click', cancelKiroSsoLogin);
+      // Open the sign-in tab immediately (works when the admin panel is viewed on the proxy host).
+      window.open(d.signInUrl, '_blank');
+      pollKiroSso(d.interval || 2);
+    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+  }
+  async function submitKiroSsoCallback() {
+    const url = $('kiroSsoCallbackUrl').value.trim();
+    if (!url) return;
+    if (!kiroSsoSession) { toastError('No active SSO session'); return; }
+    $('kiroSsoSubmitCallbackBtn').disabled = true;
+    $('kiroSsoStatus').textContent = 'Processing callback...';
+    $('kiroSsoStatus').style.color = 'var(--muted)';
+    try {
+      const res = await api('/auth/kiro-sso/callback', {
+        method: 'POST', body: JSON.stringify({ sessionId: kiroSsoSession, callbackUrl: url })
+      });
+      const d = await res.json();
+      if (d.success && d.redirectUrl) {
+        // Enterprise SSO leg-1: show Microsoft login, advance to step 2
+        $('kiroSsoStepBadge').textContent = 'Step 2';
+        $('kiroSsoStepLabel').textContent = 'Paste the final redirect URL after Microsoft login';
+        $('kiroSsoStepHint').innerHTML = 'After Microsoft 365 authentication, your browser will again redirect to <code>localhost:3128</code>. Copy and paste that final URL.';
+        $('kiroSsoRedirectLink').href = d.redirectUrl;
+        $('kiroSsoRedirectArea').classList.remove('hidden');
+        $('kiroSsoCallbackUrl').placeholder = 'http://localhost:3128/oauth/callback?code=...';
+        $('kiroSsoStatus').textContent = '↑ Open the Microsoft login link above, then paste the next redirect URL';
+        $('kiroSsoStatus').style.color = 'var(--warning)';
+        $('kiroSsoCallbackUrl').value = '';
+        // Auto-open the Microsoft login link
+        window.open(d.redirectUrl, '_blank');
+      } else if (d.success) {
+        // Leg-2 or social: polling will pick up the result
+        $('kiroSsoStatus').textContent = 'Callback accepted — completing login...';
+        $('kiroSsoStatus').style.color = 'var(--success)';
+        $('kiroSsoCallbackUrl').value = '';
+      } else {
+        toastError(t('common.failed') + ': ' + (d.error || ''));
+      }
+    } catch (e) {
+      toastError('Failed to submit callback: ' + e.message);
+    } finally {
+      $('kiroSsoSubmitCallbackBtn').disabled = false;
+    }
+  }
+  function pollKiroSso(interval) {
+    kiroSsoPollTimer = setTimeout(async () => {
+      const res = await api('/auth/kiro-sso/poll', { method: 'POST', body: JSON.stringify({ sessionId: kiroSsoSession }) });
+      const d = await res.json();
+      if (d.completed) {
+        // Session is already consumed server-side; clear it so closeModal() does
+        // not fire a redundant cancel for an account that succeeded.
+        kiroSsoSession = '';
+        closeModal(); loadAccounts(); loadStats();
+        toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
+        autoRefreshNewAccount(d.account?.id);
+      } else if (d.success && !d.completed) {
+        // Don't overwrite a manual-instruction status message
+        if (!$('kiroSsoStatus').textContent.includes('↑') && !$('kiroSsoStatus').textContent.includes('Step')) {
+          $('kiroSsoStatus').textContent = 'Waiting for callback URL — paste the redirect from your browser above';
+          $('kiroSsoStatus').style.color = 'var(--warning)';
+        }
+        pollKiroSso(interval);
+      } else {
+        toastError(t('common.failed') + ': ' + (d.error || ''));
+        cancelKiroSsoLogin();
+      }
+    }, interval * 1000);
+  }
+  function cancelKiroSsoLogin() {
+    if (kiroSsoPollTimer) { clearTimeout(kiroSsoPollTimer); kiroSsoPollTimer = null; }
+    // Tell the backend to release the loopback callback port now instead of waiting
+    // for the deadline (fire-and-forget; ignore the result).
+    if (kiroSsoSession) {
+      api('/auth/kiro-sso/cancel', { method: 'POST', body: JSON.stringify({ sessionId: kiroSsoSession }) }).catch(() => {});
+    }
+    kiroSsoSession = '';
     showModal('add');
   }
   async function startIamSso() {

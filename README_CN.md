@@ -117,6 +117,10 @@ curl http://localhost:8080/v1/chat/completions \
 
 欢迎友好交流。遇到问题时，建议先让 Claude Code、Codex 等工具帮忙排查一下，大部分问题都能自己解决。如果能直接提个 PR 就更好了。
 
+## 联系方式
+
+Telegram：[@tutua16888](https://t.me/tutua16888)
+
 ## 友情链接
 
 - [LINUX DO](https://linux.do)

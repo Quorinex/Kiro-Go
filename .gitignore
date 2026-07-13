@@ -22,3 +22,9 @@ Thumbs.db
 # Local backups / scratch
 backup*/
 PR-*.md
+# /test.py: local scratch script holding a live API key (never commit)
+/test.py
+# editor backup files (e.g. kiro-go.exe~)
+*~
+# local smoke-test output (dispatch runs, cached prompts, r-*.out)
+.smoke/

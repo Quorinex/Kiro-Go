@@ -117,6 +117,10 @@ The setting takes effect immediately without restarting.
 
 Friendly discussion is welcome. If you run into issues, try asking Claude Code, Codex, or similar tools for help first — most problems can be solved that way. PRs are even better.
 
+## Contact
+
+Telegram: [@tutua16888](https://t.me/tutua16888)
+
 ## Friend Links
 
 - [LINUX DO](https://linux.do)

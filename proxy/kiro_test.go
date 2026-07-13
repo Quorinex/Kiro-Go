@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"kiro-go/config"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -268,4 +270,55 @@ func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]inte
 	frame = append(frame, payloadBytes...)
 	frame = append(frame, 0, 0, 0, 0)
 	return frame
+}
+
+// TestCallKiroAPIRebuildsRegionForApiKeyAccount asserts an api_key account's
+// endpoint host is rebuilt from EffectiveApiRegion (q.<region> for non-us-east-1
+// endpoints), since it has no profile ARN to derive the region from.
+func TestCallKiroAPIRebuildsRegionForApiKeyAccount(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	var gotHost string
+	// CallKiroAPI uses the streaming store (kiroHttpStore), not the REST store.
+	kiroHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotHost = req.URL.Host
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	apiKeyAcct := &config.Account{
+		AuthMethod:  "api_key",
+		KiroApiKey:  "k",
+		AccessToken: "k",
+		ApiRegion:   "eu-central-1",
+	}
+	payload := &KiroPayload{}
+	_ = CallKiroAPI(apiKeyAcct, payload, nil)
+	if gotHost != "q.eu-central-1.amazonaws.com" {
+		t.Fatalf("api_key host: want q.eu-central-1.amazonaws.com, got %q", gotHost)
+	}
+}
+
+// TestAccountEmailForLogMasksApiKey ensures api_key accounts (which have no email
+// until their first successful refresh) are not blind in logs: fall back to the masked
+// key. When an email is present it wins.
+func TestAccountEmailForLogMasksApiKey(t *testing.T) {
+	acct := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_abcdefghijklmnop"}
+	if got := accountEmailForLog(acct); got != "ksk_ab…mnop" {
+		t.Fatalf("api_key no-email: want masked key %q, got %q", "ksk_ab…mnop", got)
+	}
+	acct.Email = "user@example.com"
+	if got := accountEmailForLog(acct); got != "user@example.com" {
+		t.Fatalf("email present: want %q, got %q", "user@example.com", got)
+	}
+	if got := accountEmailForLog(nil); got != "<nil>" {
+		t.Fatalf("nil account: want %q, got %q", "<nil>", got)
+	}
 }

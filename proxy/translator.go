@@ -46,15 +46,15 @@ const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
 const toolResultImagePlaceholder = "[Tool returned an image; the image is attached to this message.]"
 
-// maxPayloadBytes is the upper bound for the serialized Kiro request body.
-// Kiro's upstream rejects oversized requests with HTTP 400
-// "Input is too long." (CONTENT_LENGTH_EXCEEDS_THRESHOLD). When a converted
-// payload exceeds this size we drop the oldest history turns (keeping the
-// system priming, the most recent turns, the active tool turn, and the current
-// message) and insert a placeholder note so the model knows context was elided.
-// The limit is kept conservatively below the observed upstream threshold to
-// leave room for headers and minor serialization overhead.
-const maxPayloadBytes = 900 * 1024
+// The payload size cap is runtime-configurable via config.GetMaxPayloadBytes()
+// (default 2 MB, see config.DefaultMaxPayloadBytes). Kiro's upstream rejects
+// oversized requests with HTTP 400 "Input is too long."
+// (CONTENT_LENGTH_EXCEEDS_THRESHOLD), observed near ~2.15 MB. When a converted
+// payload exceeds the cap we drop the oldest history turns (keeping the system
+// priming, the most recent turns, the active tool turn, and the current message)
+// and insert a placeholder note so the model knows context was elided. The cap
+// is kept conservatively below the upstream threshold to leave room for headers
+// and serialization overhead.
 
 // truncationPlaceholder is inserted in history where older turns were dropped to
 // fit within maxPayloadBytes.
@@ -123,7 +123,7 @@ type ClaudeRequest struct {
 	Model       string                `json:"model"`
 	Messages    []ClaudeMessage       `json:"messages"`
 	MaxTokens   int                   `json:"max_tokens"`
-	Temperature float64               `json:"temperature,omitempty"`
+	Temperature *float64              `json:"temperature,omitempty"`
 	TopP        float64               `json:"top_p,omitempty"`
 	Stream      bool                  `json:"stream,omitempty"`
 	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
@@ -287,14 +287,24 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	// 构建最终内容
 	finalContent := ""
+	toolResultsFolded := false
 	if currentContent != "" {
 		finalContent = currentContent
 	} else if len(currentImages) > 0 {
 		finalContent = normalizeUserContent("", true)
 	} else if len(currentToolResults) > 0 {
 		finalContent = buildToolResultsContinuation(currentToolResults)
+		toolResultsFolded = true
 	} else {
 		finalContent = minimalFallbackUserContent
+	}
+
+	// Orphaned current tool results (no matching assistant tool turn in history)
+	// cannot stay structured — upstream accepts only a single active tool turn and
+	// these have none to answer — so fold their text into the message instead of
+	// losing it (e.g. a tool's textual output alongside an extracted image).
+	if !keepCurrentToolResults && len(currentToolResults) > 0 && !toolResultsFolded {
+		finalContent = joinHistoryText(finalContent, buildToolResultsContinuation(currentToolResults))
 	}
 
 	// 转换工具
@@ -331,7 +341,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		payload.ConversationState.History = history
 	}
 
-	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 {
+	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 {
 		payload.InferenceConfig = &InferenceConfig{
 			MaxTokens:   req.MaxTokens,
 			Temperature: req.Temperature,
@@ -797,6 +807,7 @@ func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]strin
 		w.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.InputSchema)}
 		result = append(result, w)
 	}
+	result = compressToolsIfNeeded(result)
 	return result, nameMap
 }
 
@@ -980,7 +991,7 @@ type OpenAIRequest struct {
 	Model       string          `json:"model"`
 	Messages    []OpenAIMessage `json:"messages"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
 	TopP        float64         `json:"top_p,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
 	Tools       []OpenAITool    `json:"tools,omitempty"`
@@ -1232,14 +1243,21 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	// 构建最终内容
 	finalContent := currentContent
+	toolResultsFolded := false
 	if finalContent == "" {
 		if len(currentImages) > 0 {
 			finalContent = normalizeUserContent("", true)
 		} else if len(currentToolResults) > 0 {
 			finalContent = buildToolResultsContinuation(currentToolResults)
+			toolResultsFolded = true
 		} else {
 			finalContent = minimalFallbackUserContent
 		}
+	}
+	// Orphaned current tool results: see ClaudeToKiro — fold them into the message
+	// text instead of dropping them when an image placeholder or user text was chosen.
+	if !keepCurrentToolResults && len(currentToolResults) > 0 && !toolResultsFolded {
+		finalContent = joinHistoryText(finalContent, buildToolResultsContinuation(currentToolResults))
 	}
 
 	// 转换工具
@@ -1271,7 +1289,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		payload.ConversationState.History = history
 	}
 
-	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 {
+	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 {
 		payload.InferenceConfig = &InferenceConfig{
 			MaxTokens:   req.MaxTokens,
 			Temperature: req.Temperature,
@@ -1625,7 +1643,8 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	if payload == nil {
 		return
 	}
-	if payloadByteSize(payload) <= maxPayloadBytes {
+	limit := config.GetMaxPayloadBytes()
+	if payloadByteSize(payload) <= limit {
 		return
 	}
 
@@ -1667,7 +1686,7 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	for i := len(conversation) - 1; i >= 0; i-- {
 		running += entrySizes[i]
 		kept := len(conversation) - i
-		if running > maxPayloadBytes && kept > minRecentHistoryTurns {
+		if running > limit && kept > minRecentHistoryTurns {
 			break
 		}
 		keepFrom = i
@@ -1686,7 +1705,7 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 
 	// If still too large (current message or retained tail alone exceeds the
 	// limit), shrink the current message content as a last resort.
-	if payloadByteSize(payload) > maxPayloadBytes {
+	if payloadByteSize(payload) > limit {
 		truncateCurrentMessage(payload)
 	}
 }
@@ -1729,7 +1748,7 @@ func currentMessageModelID(payload *KiroPayload) string {
 func truncateCurrentMessage(payload *KiroPayload) {
 	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
 	overhead := payloadByteSize(payload) - len(cur.Content)
-	budget := maxPayloadBytes - overhead
+	budget := config.GetMaxPayloadBytes() - overhead
 	if budget < 0 {
 		budget = 0
 	}
@@ -2016,6 +2035,7 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
 		result = append(result, wrapper)
 	}
+	result = compressToolsIfNeeded(result)
 	return result
 }
 

@@ -274,8 +274,17 @@ func pollForToken(oidcBase, clientID, clientSecret, deviceCode string, interval 
 					RefreshToken string `json:"refreshToken"`
 					ExpiresIn    int    `json:"expiresIn"`
 				}
-				json.NewDecoder(resp.Body).Decode(&result)
+				if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+					resp.Body.Close()
+					return "", "", 0, fmt.Errorf("parse token response failed: %w", err)
+				}
 				resp.Body.Close()
+				// A corporate filtering proxy that substitutes an HTML block-page
+				// (HTTP 200, non-JSON body) would decode into empty fields. Refuse
+				// it rather than silently creating an account with empty tokens.
+				if result.AccessToken == "" {
+					return "", "", 0, fmt.Errorf("token response missing accessToken")
+				}
 				return result.AccessToken, result.RefreshToken, result.ExpiresIn, nil
 			}
 

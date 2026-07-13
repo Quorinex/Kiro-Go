@@ -30,6 +30,7 @@ type ResponsesObject struct {
 	Instructions       string               `json:"instructions,omitempty"`
 	StoredInput        json.RawMessage      `json:"-"`
 	StoredInstr        string               `json:"-"`
+	OwnerKeyID         string               `json:"-"`  // API key that created this response (not exposed in API)
 	StoredAt           int64                `json:"stored_at,omitempty"`
 }
 
