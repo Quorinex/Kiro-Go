@@ -11,37 +11,69 @@ import (
 	"time"
 )
 
-func TestNormalizeChunkBasicProgression(t *testing.T) {
-	prev := ""
+// Regression: an assistant stream whose chunks legitimately repeat must be reassembled
+// verbatim. The previous content-based de-duplication turned these exact inputs into
+// "666" and "abab" respectively, silently corrupting model output.
+func TestParseEventStreamAssistantRepeatedContentIsNotDropped(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+		want   string
+	}{
+		{"repeated equal chunks", []string{"666", "666", "666", "6"}, "6666666666"},
+		{"repeated period", []string{"abab", "abab"}, "abababab"},
+		{"chunk equal to previous", []string{"ha", "ha", "ha"}, "hahaha"},
+		{"prefix shaped chunks", []string{"6", "66"}, "666"},
+		{"non repeating control", []string{"123", "4567890"}, "1234567890"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stream bytes.Buffer
+			for _, c := range tc.chunks {
+				stream.Write(awsEventStreamFrame(t, "assistantResponseEvent",
+					map[string]interface{}{"content": c}))
+			}
 
-	if got := normalizeChunk("abc", &prev); got != "abc" {
-		t.Fatalf("expected first chunk to pass through, got %q", got)
-	}
-	if got := normalizeChunk("abcde", &prev); got != "de" {
-		t.Fatalf("expected appended delta, got %q", got)
+			var got string
+			err := parseEventStream(bytes.NewReader(stream.Bytes()), &KiroStreamCallback{
+				OnText: func(text string, reasoning bool) {
+					if !reasoning {
+						got += text
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("assistant text corrupted: got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestNormalizeChunkPrefixRewindDoesNotReplay(t *testing.T) {
-	prev := ""
-
-	_ = normalizeChunk("abcde", &prev)
-	if got := normalizeChunk("abc", &prev); got != "" {
-		t.Fatalf("expected rewind chunk to be ignored, got %q", got)
+// The reasoning stream is passed through verbatim too: it carries the same pure
+// incremental deltas as the assistant stream, and de-duplicating it dropped
+// legitimate repeated text in exactly the same way.
+func TestParseEventStreamReasoningRepeatedContentIsNotDropped(t *testing.T) {
+	var stream bytes.Buffer
+	for _, c := range []string{"666", "666", "666", "6"} {
+		stream.Write(awsEventStreamFrame(t, "reasoningContentEvent",
+			map[string]interface{}{"text": c}))
 	}
-	if prev != "abcde" {
-		t.Fatalf("expected previous snapshot to remain longest version, got %q", prev)
-	}
-	if got := normalizeChunk("abcdef", &prev); got != "f" {
-		t.Fatalf("expected only unseen suffix after rewind, got %q", got)
-	}
-}
 
-func TestNormalizeChunkOverlapDelta(t *testing.T) {
-	prev := "hello world"
-
-	if got := normalizeChunk("world!!!", &prev); got != "!!!" {
-		t.Fatalf("expected overlap suffix delta, got %q", got)
+	var got string
+	err := parseEventStream(bytes.NewReader(stream.Bytes()), &KiroStreamCallback{
+		OnText: func(text string, reasoning bool) {
+			if reasoning {
+				got += text
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if got != "6666666666" {
+		t.Fatalf("reasoning text corrupted: got %q, want %q", got, "6666666666")
 	}
 }
 

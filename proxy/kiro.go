@@ -423,8 +423,6 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	var inputTokens, outputTokens int
 	var totalCredits float64
 	var currentToolUse *toolUseState
-	var lastAssistantContent string
-	var lastReasoningContent string
 
 	for {
 		// Prelude: 12 bytes (total_len + headers_len + crc)
@@ -471,18 +469,30 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 		// Dispatch by event type.
 		switch eventType {
+		// Both text streams are passed through verbatim. Kiro sends
+		// assistantResponseEvent and reasoningContentEvent as pure incremental deltas
+		// (verified against real upstream traffic), never as cumulative snapshots, and
+		// never replays a chunk: ordering and at-most-once delivery are already
+		// guaranteed by TCP, and a dropped stream is retried as a whole new request
+		// rather than resumed.
+		//
+		// Do NOT reintroduce content-based de-duplication here. At the string level a
+		// replayed chunk is indistinguishable from text that simply repeats itself, and
+		// the wire protocol carries no sequence number or message id to tell them apart
+		// (the AWS event-stream base spec defines none), so such a heuristic can only
+		// guess -- and when it guesses wrong it silently eats real output. The previous
+		// implementation turned "6666666666" into "666", "abababab" into "abab" and
+		// "1833" into "183", on both streams.
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
-				normalized := normalizeChunk(content, &lastAssistantContent)
-				if normalized != "" && callback.OnText != nil {
-					callback.OnText(normalized, false)
+				if callback.OnText != nil {
+					callback.OnText(content, false)
 				}
 			}
 		case "reasoningContentEvent":
 			if text, ok := event["text"].(string); ok && text != "" {
-				normalized := normalizeChunk(text, &lastReasoningContent)
-				if normalized != "" && callback.OnText != nil {
-					callback.OnText(normalized, true)
+				if callback.OnText != nil {
+					callback.OnText(text, true)
 				}
 			}
 		case "toolUseEvent":
@@ -631,50 +641,6 @@ func collectUsageMaps(v interface{}, out *[]map[string]interface{}) {
 	}
 }
 
-func normalizeChunk(chunk string, previous *string) string {
-	if chunk == "" {
-		return ""
-	}
-
-	prev := *previous
-	if prev == "" {
-		*previous = chunk
-		return chunk
-	}
-
-	if chunk == prev {
-		return ""
-	}
-
-	if strings.HasPrefix(chunk, prev) {
-		delta := chunk[len(prev):]
-		*previous = chunk
-		return delta
-	}
-
-	if strings.HasPrefix(prev, chunk) {
-		return ""
-	}
-
-	maxOverlap := 0
-	maxLen := len(prev)
-	if len(chunk) < maxLen {
-		maxLen = len(chunk)
-	}
-	for i := maxLen; i > 0; i-- {
-		if strings.HasSuffix(prev, chunk[:i]) {
-			maxOverlap = i
-			break
-		}
-	}
-
-	*previous = chunk
-	if maxOverlap > 0 {
-		return chunk[maxOverlap:]
-	}
-
-	return chunk
-}
 
 func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 	for _, k := range keys {
