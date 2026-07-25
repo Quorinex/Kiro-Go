@@ -635,24 +635,32 @@ func getContextWindowSize(model string) int {
 	return 200_000
 }
 
-// largeContextMinor matches "claude-<family>-<major>.<minor>" (dot or dash form)
-// and is used to classify 1M-window models by version.
-var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)[.-](\d+)`)
+// claudeVersionExtractor matches "claude-<family>-<major>[.<minor>]" (dot or
+// dash form) and is used to classify 1M-window models by version. The minor
+// component is optional so major-only identifiers such as "claude-opus-5"
+// classify correctly instead of falling through to the 200K default.
+var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[.-](\d+))?`)
 
 func isLargeContextModel(model string) bool {
 	m := strings.ToLower(model)
 	if match := claudeVersionExtractor.FindStringSubmatch(m); match != nil {
 		major, errMaj := strconv.Atoi(match[1])
-		minor, errMin := strconv.Atoi(match[2])
-		if errMaj == nil && errMin == nil {
-			// 1M window for Claude >= 4.6 (4.6, 4.7, 4.8, ...) and any major >= 5.
+		if errMaj == nil {
+			// 1M window for any major >= 5 (claude-opus-5, claude-opus-5.1, ...).
 			if major > 4 {
 				return true
 			}
-			if major == 4 && minor >= 6 {
-				return true
+			// Within Claude 4.x the window depends on the minor version, so an
+			// absent minor (claude-sonnet-4) is treated as 4.0 -> 200K.
+			minor := 0
+			if match[2] != "" {
+				parsed, errMin := strconv.Atoi(match[2])
+				if errMin != nil {
+					return false
+				}
+				minor = parsed
 			}
-			return false
+			return major == 4 && minor >= 6
 		}
 	}
 	// Fallback substring checks for non-standard identifiers.
