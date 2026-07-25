@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"kiro-go/config"
 	"net/http"
 	"net/url"
@@ -325,4 +326,101 @@ func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]inte
 	frame = append(frame, payloadBytes...)
 	frame = append(frame, 0, 0, 0, 0)
 	return frame
+}
+
+// --- stream EOF retry safety -------------------------------------------------
+
+// truncatedReader yields the given bytes then fails, simulating an upstream
+// connection that dies mid-stream.
+type truncatedReader struct {
+	data []byte
+	pos  int
+	err  error
+}
+
+func (r *truncatedReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, r.err
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+func TestParseEventStreamTrackedReportsNoEmissionOnEarlyFailure(t *testing.T) {
+	// Stream dies before any frame completes: nothing reached the client.
+	stream := &truncatedReader{data: []byte{0, 0, 1}, err: io.ErrUnexpectedEOF}
+
+	var emittedText int
+	emitted, err := parseEventStreamTracked(stream, &KiroStreamCallback{
+		OnText:    func(string, bool) { emittedText++ },
+		OnToolUse: func(KiroToolUse) { emittedText++ },
+	})
+	if err == nil {
+		t.Fatalf("expected a truncation error")
+	}
+	if emitted {
+		t.Fatalf("expected emitted=false when the stream died before any output")
+	}
+	if emittedText != 0 {
+		t.Fatalf("expected no callbacks, got %d", emittedText)
+	}
+}
+
+func TestParseEventStreamTrackedReportsEmissionAfterText(t *testing.T) {
+	// One complete text frame, then the connection dies.
+	frame := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "partial answer",
+	})
+	stream := &truncatedReader{
+		data: append(frame, 0, 0, 1),
+		err:  io.ErrUnexpectedEOF,
+	}
+
+	var got string
+	emitted, err := parseEventStreamTracked(stream, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { got += text },
+	})
+	if err == nil {
+		t.Fatalf("expected a truncation error")
+	}
+	if !emitted {
+		t.Fatalf("expected emitted=true once text reached the client")
+	}
+	if got != "partial answer" {
+		t.Fatalf("expected the partial text to have been delivered, got %q", got)
+	}
+}
+
+func TestParseEventStreamTrackedReportsEmissionOnCleanStream(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "done",
+	}))
+
+	emitted, err := parseEventStreamTracked(stream, &KiroStreamCallback{
+		OnText: func(string, bool) {},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !emitted {
+		t.Fatalf("expected emitted=true for a clean stream")
+	}
+}
+
+func TestParseEventStreamTrackedThinkingCountsAsEmission(t *testing.T) {
+	frame := awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+		"text": "let me think",
+	})
+	stream := &truncatedReader{data: append(frame, 0, 0, 1), err: io.ErrUnexpectedEOF}
+
+	emitted, err := parseEventStreamTracked(stream, &KiroStreamCallback{
+		OnText: func(string, bool) {},
+	})
+	if err == nil {
+		t.Fatalf("expected a truncation error")
+	}
+	if !emitted {
+		t.Fatalf("thinking text is client-visible, so it must count as emitted")
+	}
 }

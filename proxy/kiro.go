@@ -21,6 +21,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// streamRetryBackoff spaces out a retry of a stream that died before emitting
+// anything. Upstream drops cluster in time, so retrying immediately tends to
+// hit the same blip; a short pause is what makes the retry worth attempting.
+const streamRetryBackoff = 700 * time.Millisecond
+
 // Endpoint configuration (auto-fallback on quota exhaustion).
 type kiroEndpoint struct {
 	URL       string
@@ -445,9 +450,22 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			continue
 		}
 
-		err = parseEventStream(resp.Body, callback)
+		emitted, err := parseEventStreamTracked(resp.Body, callback)
 		resp.Body.Close()
-		return err
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// A stream that died before emitting anything is safe to retry: the
+		// client has seen no bytes, so a fresh attempt cannot duplicate output.
+		// Once content is out, retrying would concatenate two partial answers,
+		// so surface the error and let the client decide.
+		if emitted {
+			return err
+		}
+		logger.Warnf("[KiroAPI] Endpoint %s stream failed before any output: %v", ep.Name, err)
+		time.Sleep(streamRetryBackoff)
+		continue
 	}
 
 	if lastErr != nil {
@@ -467,6 +485,15 @@ func accountEmailForLog(account *config.Account) string {
 
 // parseEventStream decodes an AWS binary Event Stream response body.
 func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
+	_, err := parseEventStreamTracked(body, callback)
+	return err
+}
+
+// parseEventStreamTracked is parseEventStream plus a report of whether any
+// content already reached the client. A failure before the first emission is
+// safe to retry, because a fresh attempt cannot duplicate output that was
+// never sent.
+func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emitted bool, err error) {
 	if callback == nil {
 		callback = &KiroStreamCallback{}
 	}
@@ -479,12 +506,12 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	for {
 		// Prelude: 12 bytes (total_len + headers_len + crc)
 		prelude := make([]byte, 12)
-		_, err := io.ReadFull(body, prelude)
-		if err == io.EOF {
+		_, readErr := io.ReadFull(body, prelude)
+		if readErr == io.EOF {
 			break
 		}
-		if err != nil {
-			return err
+		if readErr != nil {
+			return emitted, readErr
 		}
 
 		totalLength := int(prelude[0])<<24 | int(prelude[1])<<16 | int(prelude[2])<<8 | int(prelude[3])
@@ -499,7 +526,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		msgBuf := make([]byte, remaining)
 		_, err = io.ReadFull(body, msgBuf)
 		if err != nil {
-			return err
+			return emitted, err
 		}
 
 		if headersLength > len(msgBuf)-4 {
@@ -538,16 +565,19 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
 				if callback.OnText != nil {
+					emitted = true
 					callback.OnText(content, false)
 				}
 			}
 		case "reasoningContentEvent":
 			if text, ok := event["text"].(string); ok && text != "" {
 				if callback.OnText != nil {
+					emitted = true
 					callback.OnText(text, true)
 				}
 			}
 		case "toolUseEvent":
+			emitted = true
 			currentToolUse = handleToolUseEvent(event, currentToolUse, callback)
 		case "meteringEvent":
 			if usage, ok := event["usage"].(float64); ok {
@@ -573,7 +603,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	if callback.OnComplete != nil {
 		callback.OnComplete(inputTokens, outputTokens)
 	}
-	return nil
+	return true, nil
 }
 
 func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int) {
