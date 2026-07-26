@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -68,6 +69,9 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "retried successfully",
 		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "end_turn",
+		}))
 	}))
 	defer server.Close()
 
@@ -98,7 +102,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 
 	rec := httptest.NewRecorder()
-	h.handleClaudeNonStream(rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	h.handleClaudeNonStream(rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "", nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected retry to succeed, status=%d body=%s", rec.Code, rec.Body.String())
@@ -478,5 +482,213 @@ func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
 	}
 	if supportsImage, ok := models[0]["supports_image"].(bool); !ok || !supportsImage {
 		t.Fatalf("expected image capability to be preserved, got %#v", models[0]["supports_image"])
+	}
+}
+
+func TestClaudeStreamRetryDiscardsBufferedPartialText(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID:          "only",
+		Enabled:     true,
+		AccessToken: "token",
+		ProfileArn:  "arn:aws:codewhisperer:profile/only",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable fallback: %v", err)
+	}
+
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "stale"}))
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "fresh"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "MAX_TOKENS"}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{URL: server.URL, Origin: "AI_EDITOR", Name: "test"}}
+	defer func() { kiroEndpoints = oldEndpoints }()
+	oldClient := kiroHttpStore.Load()
+	kiroHttpStore.Store(&http.Client{Timeout: time.Second, Transport: &http.Transport{}})
+	defer kiroHttpStore.Store(oldClient)
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "hello", ModelID: "claude-sonnet-4.5", Origin: "AI_EDITOR",
+	}
+
+	rec := httptest.NewRecorder()
+	h.handleClaudeStream(rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "", []ClaudeMessage{{Role: "user", Content: "hello"}})
+	body := rec.Body.String()
+	if hits.Load() != 2 {
+		t.Fatalf("upstream hits = %d, want one retry", hits.Load())
+	}
+	if strings.Contains(body, "stale") {
+		t.Fatalf("retry leaked first attempt text into SSE: %s", body)
+	}
+	if !strings.Contains(body, "fresh") {
+		t.Fatalf("retry response missing fresh text: %s", body)
+	}
+	if !strings.Contains(body, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("Claude stop reason was not normalized: %s", body)
+	}
+}
+
+func TestOpenAIStreamRetryDiscardsBufferedPartialText(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID:          "only",
+		Enabled:     true,
+		AccessToken: "token",
+		ProfileArn:  "arn:aws:codewhisperer:profile/only",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable fallback: %v", err)
+	}
+
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "stale"}))
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "fresh"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "MAX_TOKENS"}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{URL: server.URL, Origin: "AI_EDITOR", Name: "test"}}
+	defer func() { kiroEndpoints = oldEndpoints }()
+	oldClient := kiroHttpStore.Load()
+	kiroHttpStore.Store(&http.Client{Timeout: time.Second, Transport: &http.Transport{}})
+	defer kiroHttpStore.Store(oldClient)
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "hello", ModelID: "claude-sonnet-4.5", Origin: "AI_EDITOR",
+	}
+
+	rec := httptest.NewRecorder()
+	h.handleOpenAIStream(rec, payload, "claude-sonnet-4.5", false, 1, "")
+	body := rec.Body.String()
+	if hits.Load() != 2 {
+		t.Fatalf("upstream hits = %d, want one retry", hits.Load())
+	}
+	if strings.Contains(body, "stale") {
+		t.Fatalf("retry leaked first attempt text into SSE: %s", body)
+	}
+	if !strings.Contains(body, "fresh") {
+		t.Fatalf("retry response missing fresh text: %s", body)
+	}
+	if !strings.Contains(body, `"finish_reason":"length"`) {
+		t.Fatalf("OpenAI finish reason was not mapped: %s", body)
+	}
+}
+
+func TestOpenAIStreamSignalsErrorAfterPartialFlush(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID: "only", Enabled: true, AccessToken: "token",
+		ProfileArn: "arn:aws:codewhisperer:profile/only",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable fallback: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": strings.Repeat("partial ", 8)}))
+		// No metadataEvent: output has already flushed, so retry is unsafe.
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "hello", ModelID: "claude-sonnet-4.5", Origin: "AI_EDITOR",
+	}
+	rec := httptest.NewRecorder()
+	h.handleOpenAIStream(rec, payload, "claude-sonnet-4.5", false, 1, "")
+	body := rec.Body.String()
+	if !strings.Contains(body, `"error":{"message":`) || !strings.Contains(body, `"type":"server_error"`) {
+		t.Fatalf("post-flush stream missing explicit error event: %s", body)
+	}
+	if strings.Contains(body, "data: [DONE]") || strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Fatalf("failed stream must not emit a success terminator: %s", body)
+	}
+}
+
+func TestClaudeNonStreamIntegrityExhaustionExcludesAccount(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID: "only", Enabled: true, AccessToken: "token",
+		ProfileArn: "arn:aws:codewhisperer:profile/only",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable fallback: %v", err)
+	}
+
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "hello", ModelID: "claude-sonnet-4.5", Origin: "AI_EDITOR",
+	}
+	h.handleClaudeNonStream(httptest.NewRecorder(), payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "", nil)
+
+	want := int32(maxSameAccountStreamRetries + 1)
+	if hits.Load() != want {
+		t.Fatalf("empty account called %d times, want one same-account retry budget (%d)", hits.Load(), want)
 	}
 }

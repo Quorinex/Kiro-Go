@@ -150,27 +150,42 @@ func (h *Handler) handleResponsesNonStream(
 		var credits float64
 		var realInputTokens int
 
-		callback := &KiroStreamCallback{
-			OnText: func(text string, isThinking bool) {
-				if isThinking {
-					reasoningContent += text
-				} else {
-					content += text
+		var integrity streamIntegrityState
+
+		err := runKiroWithIntegrityRetry(account, payload,
+			&integrity,
+			func() *KiroStreamCallback {
+				return &KiroStreamCallback{
+					OnText: func(text string, isThinking bool) {
+						integrity.observeText(text, isThinking)
+						if isThinking {
+							reasoningContent += text
+						} else {
+							content += text
+						}
+					},
+					OnToolUse:  func(tu KiroToolUse) { integrity.observeToolUse(); toolUses = append(toolUses, tu) },
+					OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+					OnCredits:  func(c float64) { credits = c },
+					OnContextUsage: func(pct float64) {
+						realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+					},
+					OnStopReason: func(reason string) { integrity.observeStopReason(reason) },
 				}
 			},
-			OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
-			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-			OnCredits:  func(c float64) { credits = c },
-			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+			func() {
+				content, reasoningContent = "", ""
+				toolUses = nil
+				inputTokens, outputTokens, credits, realInputTokens = 0, 0, 0, 0
 			},
-		}
-
-		err := CallKiroAPI(account, payload, callback)
+			nil,
+		)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailure(account, err)
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailure(account, err)
+			}
 			continue
 		}
 
@@ -191,7 +206,7 @@ func (h *Handler) handleResponsesNonStream(
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, integrity.StopReason, req)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
 
@@ -216,16 +231,17 @@ func (h *Handler) handleResponsesNonStream(
 
 func buildResponsesObject(
 	id, model, content string, toolUses []KiroToolUse,
-	inputTokens, outputTokens int, req *ResponsesRequest,
+	inputTokens, outputTokens int, stopReason string, req *ResponsesRequest,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
+	status, incompleteReason := mapResponsesCompletion(stopReason)
 
 	if strings.TrimSpace(content) != "" {
 		output = append(output, ResponseOutputItem{
 			ID:     generateOutputItemID("msg"),
 			Type:   "message",
 			Role:   "assistant",
-			Status: "completed",
+			Status: status,
 			Content: []ResponseContentPart{{
 				Type: "output_text",
 				Text: content,
@@ -250,7 +266,7 @@ func buildResponsesObject(
 			ID:     generateOutputItemID("msg"),
 			Type:   "message",
 			Role:   "assistant",
-			Status: "completed",
+			Status: status,
 			Content: []ResponseContentPart{{
 				Type: "output_text",
 				Text: "",
@@ -258,16 +274,22 @@ func buildResponsesObject(
 		})
 	}
 
+	var incompleteDetails *ResponsesIncompleteDetails
+	if incompleteReason != "" {
+		incompleteDetails = &ResponsesIncompleteDetails{Reason: incompleteReason}
+	}
+
 	return &ResponsesObject{
 		ID:                 id,
 		Object:             "response",
 		CreatedAt:          time.Now().Unix(),
-		Status:             "completed",
+		Status:             status,
 		Model:              model,
 		Output:             output,
 		Usage:              ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens},
 		PreviousResponseID: req.PreviousResponseID,
 		Metadata:           req.Metadata,
+		IncompleteDetails:  incompleteDetails,
 	}
 }
 
@@ -316,6 +338,10 @@ func (h *Handler) handleResponsesStream(
 	var lastErr error
 	responseStarted := false
 	reqStart := time.Now()
+	send("response.in_progress", map[string]interface{}{
+		"type":     "response.in_progress",
+		"response": initial,
+	})
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
@@ -328,11 +354,6 @@ func (h *Handler) handleResponsesStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
-
-		send("response.in_progress", map[string]interface{}{
-			"type":     "response.in_progress",
-			"response": initial,
-		})
 
 		var (
 			fullText        strings.Builder
@@ -377,101 +398,138 @@ func (h *Handler) handleResponsesStream(
 			})
 		}
 
-		callback := &KiroStreamCallback{
-			OnText: func(text string, isThinking bool) {
-				if text == "" {
-					return
-				}
-				if isThinking {
-					reasoningText.WriteString(text)
-					return
-				}
-				fullText.WriteString(text)
-				ensureMessageStarted()
-				send("response.output_text.delta", map[string]interface{}{
-					"type":          "response.output_text.delta",
-					"item_id":       messageItemID,
-					"output_index":  outputIndex,
-					"content_index": contentIndex,
-					"delta":         text,
-				})
-				responseStarted = true
-			},
-			OnToolUse: func(tu KiroToolUse) {
-				if messageStarted {
-					send("response.content_part.done", map[string]interface{}{
-						"type":          "response.content_part.done",
-						"item_id":       messageItemID,
-						"output_index":  outputIndex,
-						"content_index": contentIndex,
-						"part": map[string]interface{}{
-							"type": "output_text",
-							"text": fullText.String(),
-						},
-					})
-					send("response.output_item.done", map[string]interface{}{
-						"type":         "response.output_item.done",
-						"output_index": outputIndex,
-						"item": map[string]interface{}{
-							"id":     messageItemID,
-							"type":   "message",
-							"role":   "assistant",
-							"status": "completed",
-							"content": []map[string]interface{}{{
-								"type": "output_text",
-								"text": fullText.String(),
-							}},
-						},
-					})
-					messageStarted = false
-					outputIndex++
-				}
+		var integrity streamIntegrityState
 
-				toolUses = append(toolUses, tu)
-				args, _ := json.Marshal(tu.Input)
-				fcID := generateOutputItemID("fc")
-				send("response.output_item.added", map[string]interface{}{
-					"type":         "response.output_item.added",
-					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "in_progress",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": "",
+		err := runKiroWithIntegrityRetry(account, payload,
+			&integrity,
+			func() *KiroStreamCallback {
+				return &KiroStreamCallback{
+					OnText: func(text string, isThinking bool) {
+						if text == "" {
+							return
+						}
+						integrity.observeText(text, isThinking)
+						if isThinking {
+							reasoningText.WriteString(text)
+							return
+						}
+						fullText.WriteString(text)
+						ensureMessageStarted()
+						send("response.output_text.delta", map[string]interface{}{
+							"type":          "response.output_text.delta",
+							"item_id":       messageItemID,
+							"output_index":  outputIndex,
+							"content_index": contentIndex,
+							"delta":         text,
+						})
+						responseStarted = true
 					},
-				})
-				send("response.function_call_arguments.delta", map[string]interface{}{
-					"type":         "response.function_call_arguments.delta",
-					"item_id":      fcID,
-					"output_index": outputIndex,
-					"delta":        string(args),
-				})
-				send("response.output_item.done", map[string]interface{}{
-					"type":         "response.output_item.done",
-					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "completed",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": string(args),
-					},
-				})
-				outputIndex++
-				responseStarted = true
-			},
-			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-			OnCredits:  func(c float64) { credits = c },
-			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
-			},
-		}
+					OnToolUse: func(tu KiroToolUse) {
+						integrity.observeToolUse()
+						if messageStarted {
+							messageStatus, _ := mapResponsesCompletion(integrity.StopReason)
+							send("response.content_part.done", map[string]interface{}{
+								"type":          "response.content_part.done",
+								"item_id":       messageItemID,
+								"output_index":  outputIndex,
+								"content_index": contentIndex,
+								"part": map[string]interface{}{
+									"type": "output_text",
+									"text": fullText.String(),
+								},
+							})
+							send("response.output_item.done", map[string]interface{}{
+								"type":         "response.output_item.done",
+								"output_index": outputIndex,
+								"item": map[string]interface{}{
+									"id":     messageItemID,
+									"type":   "message",
+									"role":   "assistant",
+									"status": messageStatus,
+									"content": []map[string]interface{}{{
+										"type": "output_text",
+										"text": fullText.String(),
+									}},
+								},
+							})
+							messageStarted = false
+							outputIndex++
+						}
 
-		err := CallKiroAPI(account, payload, callback)
+						toolUses = append(toolUses, tu)
+						args, _ := json.Marshal(tu.Input)
+						fcID := generateOutputItemID("fc")
+						send("response.output_item.added", map[string]interface{}{
+							"type":         "response.output_item.added",
+							"output_index": outputIndex,
+							"item": map[string]interface{}{
+								"id":        fcID,
+								"type":      "function_call",
+								"status":    "in_progress",
+								"call_id":   tu.ToolUseID,
+								"name":      tu.Name,
+								"arguments": "",
+							},
+						})
+						send("response.function_call_arguments.delta", map[string]interface{}{
+							"type":         "response.function_call_arguments.delta",
+							"item_id":      fcID,
+							"output_index": outputIndex,
+							"delta":        string(args),
+						})
+						send("response.output_item.done", map[string]interface{}{
+							"type":         "response.output_item.done",
+							"output_index": outputIndex,
+							"item": map[string]interface{}{
+								"id":        fcID,
+								"type":      "function_call",
+								"status":    "completed",
+								"call_id":   tu.ToolUseID,
+								"name":      tu.Name,
+								"arguments": string(args),
+							},
+						})
+						outputIndex++
+						responseStarted = true
+					},
+					OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+					OnCredits:  func(c float64) { credits = c },
+					OnContextUsage: func(pct float64) {
+						realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+					},
+					OnStopReason: func(reason string) { integrity.observeStopReason(reason) },
+				}
+			},
+			func() {
+				fullText.Reset()
+				reasoningText.Reset()
+				toolUses = nil
+				inputTokens, outputTokens, credits, realInputTokens = 0, 0, 0, 0
+			},
+			func() bool { return !responseStarted },
+		)
 		if err != nil {
+			if isStreamIntegrityError(err) {
+				if !responseStarted {
+					lastErr = err
+					excluded[account.ID] = true
+					continue
+				}
+				// Partial content already reached the client — do not forge completed.
+				send("response.failed", map[string]interface{}{
+					"type": "response.failed",
+					"response": map[string]interface{}{
+						"id":     respID,
+						"status": "failed",
+						"error": map[string]string{
+							"type":    "server_error",
+							"message": err.Error(),
+						},
+					},
+				})
+				h.recordFailureWithDetails("responses", model, account.ID, err)
+				return
+			}
 			if !responseStarted {
 				lastErr = err
 				excluded[account.ID] = true
@@ -499,6 +557,8 @@ func (h *Handler) handleResponsesStream(
 			reasoning = ""
 		}
 
+		responseStatus, _ := mapResponsesCompletion(integrity.StopReason)
+
 		if messageStarted {
 			send("response.content_part.done", map[string]interface{}{
 				"type":          "response.content_part.done",
@@ -517,7 +577,7 @@ func (h *Handler) handleResponsesStream(
 					"id":     messageItemID,
 					"type":   "message",
 					"role":   "assistant",
-					"status": "completed",
+					"status": responseStatus,
 					"content": []map[string]interface{}{{
 						"type": "output_text",
 						"text": finalContent,
@@ -538,7 +598,7 @@ func (h *Handler) handleResponsesStream(
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, integrity.StopReason, req)
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
@@ -549,8 +609,9 @@ func (h *Handler) handleResponsesStream(
 			}
 		}
 
-		send("response.completed", map[string]interface{}{
-			"type":     "response.completed",
+		completionEvent := "response." + respObj.Status
+		send(completionEvent, map[string]interface{}{
+			"type":     completionEvent,
 			"response": respObj,
 		})
 		fmt.Fprintf(w, "data: [DONE]\n\n")

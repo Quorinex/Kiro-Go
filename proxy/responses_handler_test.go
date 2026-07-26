@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -234,6 +235,9 @@ func TestResponsesContinuationKeepsNewInstructions(t *testing.T) {
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "second reply",
 		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "end_turn",
+		}))
 	}))
 	defer server.Close()
 	defer swapKiroEndpointsForTest(t, server)()
@@ -312,6 +316,9 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "responses non-stream OK",
 		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "end_turn",
+		}))
 	}))
 	defer server.Close()
 	defer swapKiroEndpointsForTest(t, server)()
@@ -365,6 +372,9 @@ func TestResponsesStreamSSE(t *testing.T) {
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "stream chunk",
 		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "end_turn",
+		}))
 	}))
 	defer server.Close()
 	defer swapKiroEndpointsForTest(t, server)()
@@ -389,5 +399,105 @@ func TestResponsesStreamSSE(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "stream chunk") {
 		t.Fatalf("expected stream content delta, got:\n%s", bodyStr)
+	}
+}
+
+func TestResponsesStreamMaxTokensIsIncomplete(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "partial output"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "MAX_TOKENS"}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"claude-sonnet-4.5","input":"write a lot","stream":true,"store":false}`,
+	))
+	rec := httptest.NewRecorder()
+	h.handleOpenAIResponses(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "event: response.incomplete") {
+		t.Fatalf("missing response.incomplete event:\n%s", body)
+	}
+	if !strings.Contains(body, `"status":"incomplete"`) ||
+		!strings.Contains(body, `"incomplete_details":{"reason":"max_output_tokens"}`) {
+		t.Fatalf("missing incomplete status details:\n%s", body)
+	}
+}
+
+func TestResponsesStreamMaxTokensMarksPreToolMessageIncomplete(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "partial text"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "call_1", "name": "read_file", "input": `{"path":"a.go"}`, "stop": true,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "MAX_TOKENS"}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"claude-sonnet-4.5","input":"write a lot","stream":true,"store":false}`,
+	))
+	rec := httptest.NewRecorder()
+	h.handleOpenAIResponses(rec, req)
+
+	foundMessage := false
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "data: {") {
+			continue
+		}
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+			continue
+		}
+		if event["type"] != "response.output_item.done" {
+			continue
+		}
+		item, _ := event["item"].(map[string]interface{})
+		if item["type"] != "message" {
+			continue
+		}
+		foundMessage = true
+		if item["status"] != "incomplete" {
+			t.Fatalf("pre-tool message status = %v, body:\n%s", item["status"], rec.Body.String())
+		}
+	}
+	if !foundMessage {
+		t.Fatalf("missing pre-tool message completion event:\n%s", rec.Body.String())
+	}
+}
+
+func TestResponsesIntegrityExhaustionRotatesOnce(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"claude-sonnet-4.5","input":"hello","stream":true,"store":false}`,
+	))
+	rec := httptest.NewRecorder()
+	h.handleOpenAIResponses(rec, req)
+
+	want := int32(maxSameAccountStreamRetries + 1)
+	if hits.Load() != want {
+		t.Fatalf("empty account called %d times, want one same-account retry budget (%d)", hits.Load(), want)
+	}
+	if count := strings.Count(rec.Body.String(), "event: response.in_progress"); count != 1 {
+		t.Fatalf("response.in_progress emitted %d times:\n%s", count, rec.Body.String())
 	}
 }

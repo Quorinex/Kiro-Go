@@ -17,20 +17,21 @@ type ResponsesRequest struct {
 }
 
 type ResponsesObject struct {
-	ID                 string               `json:"id"`
-	Object             string               `json:"object"`
-	CreatedAt          int64                `json:"created_at"`
-	Status             string               `json:"status"`
-	Model              string               `json:"model"`
-	Output             []ResponseOutputItem `json:"output"`
-	Usage              ResponsesUsage       `json:"usage"`
-	PreviousResponseID string               `json:"previous_response_id,omitempty"`
-	Metadata           map[string]string    `json:"metadata,omitempty"`
-	Error              *ResponsesError      `json:"error,omitempty"`
-	Instructions       string               `json:"instructions,omitempty"`
-	StoredInput        json.RawMessage      `json:"-"`
-	StoredInstr        string               `json:"-"`
-	StoredAt           int64                `json:"stored_at,omitempty"`
+	ID                 string                      `json:"id"`
+	Object             string                      `json:"object"`
+	CreatedAt          int64                       `json:"created_at"`
+	Status             string                      `json:"status"`
+	Model              string                      `json:"model"`
+	Output             []ResponseOutputItem        `json:"output"`
+	Usage              ResponsesUsage              `json:"usage"`
+	PreviousResponseID string                      `json:"previous_response_id,omitempty"`
+	Metadata           map[string]string           `json:"metadata,omitempty"`
+	Error              *ResponsesError             `json:"error,omitempty"`
+	IncompleteDetails  *ResponsesIncompleteDetails `json:"incomplete_details,omitempty"`
+	Instructions       string                      `json:"instructions,omitempty"`
+	StoredInput        json.RawMessage             `json:"-"`
+	StoredInstr        string                      `json:"-"`
+	StoredAt           int64                       `json:"stored_at,omitempty"`
 }
 
 type ResponseOutputItem struct {
@@ -59,4 +60,8 @@ type ResponsesError struct {
 	Type    string `json:"type"`
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
+}
+
+type ResponsesIncompleteDetails struct {
+	Reason string `json:"reason"`
 }

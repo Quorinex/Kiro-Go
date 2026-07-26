@@ -490,7 +490,10 @@ func TestAppendSearchRound_ContentSurvivesClaudeToKiro(t *testing.T) {
 	if aText != "Looking it up." || len(aUses) != 1 || aUses[0].ToolUseID != "toolu_ws_1" {
 		t.Fatalf("assistant extract failed: text=%q uses=%+v", aText, aUses)
 	}
-	_, _, uResults := extractClaudeUserContent(req.Messages[2].Content)
+	_, _, _, uResults, errMsg := extractClaudeUserContent(req.Messages[2].Content)
+	if errMsg != "" {
+		t.Fatalf("unexpected document error: %s", errMsg)
+	}
 	if len(uResults) != 1 || uResults[0].ToolUseID != "toolu_ws_1" {
 		t.Fatalf("user tool_result extract failed: %+v", uResults)
 	}
@@ -529,7 +532,10 @@ func TestExtractClaudeContent_MapSliceShape(t *testing.T) {
 	user := []map[string]interface{}{
 		{"type": "tool_result", "tool_use_id": "id1", "content": "ok"},
 	}
-	_, _, results := extractClaudeUserContent(user)
+	_, _, _, results, errMsg := extractClaudeUserContent(user)
+	if errMsg != "" {
+		t.Fatalf("unexpected document error: %s", errMsg)
+	}
 	if len(results) != 1 || results[0].ToolUseID != "id1" {
 		t.Fatalf("map-slice user content: %+v", results)
 	}
@@ -557,5 +563,236 @@ func TestParseSearchResults_EmptyResultsArrayIsValid(t *testing.T) {
 	}
 	if len(results.Results) != 0 {
 		t.Fatalf("results len = %d", len(results.Results))
+	}
+}
+
+func TestClaudeToKiroFoldsServerWebSearchResultsIntoHistory(t *testing.T) {
+	snippet := "Go 1.18 introduced generics"
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "search and then run bash"},
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": "I searched first."},
+				map[string]interface{}{
+					"type":  "server_tool_use",
+					"id":    "srvtoolu_1",
+					"name":  "web_search",
+					"input": map[string]interface{}{"query": "golang generics"},
+				},
+				map[string]interface{}{
+					"type": "web_search_tool_result",
+					"content": []interface{}{
+						map[string]interface{}{
+							"type":              "web_search_result",
+							"title":             "Generics",
+							"url":               "https://go.dev",
+							"encrypted_content": snippet,
+						},
+					},
+				},
+				map[string]interface{}{
+					"type":  "tool_use",
+					"id":    "toolu_bash",
+					"name":  "Bash",
+					"input": map[string]interface{}{"command": "ls"},
+				},
+			}},
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "toolu_bash", "content": "a.go"},
+			}},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	if payload == nil {
+		t.Fatal("nil payload")
+	}
+	history := payload.ConversationState.History
+	if len(history) == 0 {
+		t.Fatal("expected history")
+	}
+	last := history[len(history)-1]
+	if last.AssistantResponseMessage == nil {
+		t.Fatal("expected assistant history entry")
+	}
+	if !strings.Contains(last.AssistantResponseMessage.Content, "golang generics") {
+		t.Fatalf("assistant history missing folded search summary: %q", last.AssistantResponseMessage.Content)
+	}
+	if !strings.Contains(last.AssistantResponseMessage.Content, "https://go.dev") {
+		t.Fatalf("assistant history missing search source: %q", last.AssistantResponseMessage.Content)
+	}
+	if len(last.AssistantResponseMessage.ToolUses) != 1 || last.AssistantResponseMessage.ToolUses[0].ToolUseID != "toolu_bash" {
+		t.Fatalf("client tool uses = %+v, want only Bash", last.AssistantResponseMessage.ToolUses)
+	}
+}
+
+func TestClaudeToKiroFoldsEmptyServerWebSearchResults(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "search and then run bash"},
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": "I searched first."},
+				map[string]interface{}{
+					"type":  "server_tool_use",
+					"id":    "srvtoolu_empty",
+					"name":  "web_search",
+					"input": map[string]interface{}{"query": "unlikely query"},
+				},
+				map[string]interface{}{
+					"type":    "web_search_tool_result",
+					"content": []interface{}{},
+				},
+				map[string]interface{}{
+					"type":  "tool_use",
+					"id":    "toolu_bash",
+					"name":  "Bash",
+					"input": map[string]interface{}{"command": "ls"},
+				},
+			}},
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "toolu_bash", "content": "a.go"},
+			}},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	last := payload.ConversationState.History[len(payload.ConversationState.History)-1]
+	if last.AssistantResponseMessage == nil {
+		t.Fatal("expected assistant history entry")
+	}
+	if !strings.Contains(last.AssistantResponseMessage.Content, "unlikely query") {
+		t.Fatalf("empty search missing query in folded summary: %q", last.AssistantResponseMessage.Content)
+	}
+	if !strings.Contains(last.AssistantResponseMessage.Content, "No results found.") {
+		t.Fatalf("empty search missing No results found text: %q", last.AssistantResponseMessage.Content)
+	}
+	if len(last.AssistantResponseMessage.ToolUses) != 1 || last.AssistantResponseMessage.ToolUses[0].ToolUseID != "toolu_bash" {
+		t.Fatalf("client tool uses = %+v, want only Bash", last.AssistantResponseMessage.ToolUses)
+	}
+}
+
+func TestSealClientVisibleWebSearchContentMatchesContinuation(t *testing.T) {
+	globalSessionStore = newSessionStore()
+	const api = "key-ws-mixed"
+	const model = "claude-sonnet-4.5"
+	inbound := []ClaudeMessage{{Role: "user", Content: "search and then run bash"}}
+	conv, cont, _ := resolveSessionIDs(api, MapModel(model), inbound)
+
+	content := []map[string]interface{}{
+		{"type": "text", "text": "I searched first."},
+		{
+			"type":  "server_tool_use",
+			"id":    "srvtoolu_1",
+			"name":  "web_search",
+			"input": map[string]interface{}{"query": "golang generics"},
+		},
+		{
+			"type": "web_search_tool_result",
+			"content": []interface{}{
+				map[string]interface{}{
+					"type":              "web_search_result",
+					"title":             "Generics",
+					"url":               "https://go.dev",
+					"encrypted_content": "Go 1.18 introduced generics",
+				},
+			},
+		},
+		{
+			"type":  "tool_use",
+			"id":    "toolu_bash",
+			"name":  "Bash",
+			"input": map[string]interface{}{"command": "ls"},
+		},
+	}
+	// Old path: seal the raw upstream tool_use shape. That must not match the
+	// client-visible continuation that stores server_tool_use blocks.
+	sealClaudeSession(api, model, conv, cont, inbound, "I searched first.", "",
+		[]KiroToolUse{
+			{ToolUseID: "toolu_ws", Name: "web_search", Input: map[string]interface{}{"query": "golang generics"}},
+			{ToolUseID: "toolu_bash", Name: "Bash", Input: map[string]interface{}{"command": "ls"}},
+		}, "", true)
+	turn2 := []ClaudeMessage{
+		inbound[0],
+		{Role: "assistant", Content: content},
+		{Role: "user", Content: []interface{}{
+			map[string]interface{}{"type": "tool_result", "tool_use_id": "toolu_bash", "content": "a.go"},
+		}},
+	}
+	if _, _, reused := resolveSessionIDs(api, MapModel(model), turn2); reused {
+		t.Fatal("raw upstream tool shape must not match client-visible server_tool_use continuation")
+	}
+
+	// Target path: seal the exact client-visible content. Continuation must reuse.
+	globalSessionStore = newSessionStore()
+	conv, cont, _ = resolveSessionIDs(api, MapModel(model), inbound)
+	sealClaudeSessionFromContent(api, model, conv, cont, inbound, content)
+	gotConv, gotCont, reused := resolveSessionIDs(api, MapModel(model), turn2)
+	if !reused {
+		t.Fatal("client-visible flush content must seal the continuation chain")
+	}
+	if gotConv != conv || gotCont != cont {
+		t.Fatalf("ids = %s/%s, want %s/%s", gotConv, gotCont, conv, cont)
+	}
+}
+
+// Intermediate search-only rounds seal the raw upstream tool shape so the next
+// loop iteration can reuse the same conversation / continuation IDs. The final
+// client-facing flush still seals server_tool_use content separately.
+func TestIntermediateWebSearchRoundSealReusesNextLoopIDs(t *testing.T) {
+	globalSessionStore = newSessionStore()
+	globalReasoningStore = newReasoningStore()
+
+	const api = "key-ws-intermediate"
+	const model = "claude-sonnet-4.5"
+	inbound := []ClaudeMessage{{Role: "user", Content: "search golang generics"}}
+	conv, cont, reused := resolveSessionIDs(api, MapModel(model), inbound)
+	if reused {
+		t.Fatal("first web-search round must mint fresh ids")
+	}
+
+	round := &webSearchRoundOutcome{
+		text: "Looking it up.",
+		toolUses: []KiroToolUse{{
+			ToolUseID: "toolu_ws_1",
+			Name:      webSearchToolName,
+			Input:     map[string]interface{}{"query": "golang generics"},
+		}},
+		convID: conv,
+		contID: cont,
+	}
+	// Same seal the production intermediate path performs after a successful
+	// upstream round, before appendSearchRound mutates the working transcript.
+	stamp := &reasoningCapture{sig: "sig-ws-1"}
+	stamp.sealIfPresent(api, MapModel(model), conv, "search golang generics", round.text, round.toolUses, "hidden search plan")
+	sealClaudeSession(api, model, conv, cont, inbound, round.text, "", round.toolUses, "", true)
+
+	working := &ClaudeRequest{Model: model, Messages: append([]ClaudeMessage(nil), inbound...)}
+	presentation := make([]map[string]interface{}, 0)
+	snippet := "Go 1.18 introduced generics"
+	searched := []*WebSearchResults{{
+		Results: []WebSearchResult{{Title: "Generics", URL: "https://go.dev", Snippet: &snippet}},
+	}}
+	appendSearchRound(working, round, searched, &presentation)
+
+	gotConv, gotCont, reusedNext := resolveSessionIDs(api, MapModel(model), working.Messages)
+	if !reusedNext {
+		t.Fatal("next loop iteration must reuse ids after intermediate raw-tool seal")
+	}
+	if gotConv != conv || gotCont != cont {
+		t.Fatalf("next-loop ids = %s/%s, want %s/%s", gotConv, gotCont, conv, cont)
+	}
+
+	// Final client-visible flush still needs its own seal; raw intermediate seal
+	// must not accidentally match a server_tool_use continuation from the client.
+	content := buildFlushContent(presentation, "done", nil, nil)
+	clientTurn := []ClaudeMessage{
+		inbound[0],
+		{Role: "assistant", Content: content},
+		{Role: "user", Content: "thanks"},
+	}
+	if _, _, reusedClient := resolveSessionIDs(api, MapModel(model), clientTurn); reusedClient {
+		t.Fatal("intermediate raw-tool seal must not match client-visible server_tool_use chain")
 	}
 }

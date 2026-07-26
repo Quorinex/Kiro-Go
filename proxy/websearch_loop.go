@@ -25,11 +25,13 @@ const maxWebSearchRounds = 5
 
 // webSearchRoundOutcome is one buffered generateAssistantResponse round.
 type webSearchRoundOutcome struct {
-	text               string
-	toolUses           []KiroToolUse
-	inputTokens        int
-	credits            float64
-	stopReasonOverride string
+	text        string
+	toolUses    []KiroToolUse
+	inputTokens int
+	credits     float64
+	stopReason  string
+	convID      string
+	contID      string
 }
 
 // runWebSearchLoop is the mixed-tools entry point.
@@ -50,7 +52,7 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 	// Allow one extra iteration so a terminal flush can run after the last
 	// search-only round (same pattern as 0..=MAX_WEB_SEARCH_ROUNDS in kiro-rs).
 	for roundIdx := 0; roundIdx <= maxUses; roundIdx++ {
-		round, account, err := h.callUpstreamForWebSearch(&working, thinking, fallbackInput)
+		round, account, err := h.callUpstreamForWebSearch(&working, thinking, fallbackInput, apiKeyID)
 		if err != nil {
 			logger.Warnf("[WebSearchLoop] upstream round %d failed: %v", roundIdx, err)
 			accountID := ""
@@ -115,7 +117,7 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 		}
 
 		content := buildFlushContent(presentation, round.text, round.toolUses, searched)
-		stopReason := resolveFlushStopReason(round.stopReasonOverride, round.toolUses, content)
+		stopReason := resolveFlushStopReason(round.stopReason, round.toolUses, content)
 		outputTokens := estimateContentBlocksTokens(content)
 		inputTokens := round.inputTokens
 		if inputTokens <= 0 {
@@ -128,6 +130,11 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 		}
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, totalCredits)
 		h.recordSuccessLog("claude", req.Model, lastAccountID, inputTokens+outputTokens, totalCredits, time.Since(reqStart).Milliseconds())
+		// Seal the exact assistant content the client receives so the next
+		// client-side tool_result continuation reuses the same IDs.
+		if round.convID != "" && round.contID != "" {
+			sealClaudeSessionFromContent(apiKeyID, req.Model, round.convID, round.contID, req.Messages, content)
+		}
 
 		if req.Stream {
 			h.renderWebSearchLoopSSE(w, req.Model, content, stopReason, inputTokens, outputTokens)
@@ -141,8 +148,14 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 }
 
 // callUpstreamForWebSearch converts the Claude request and buffers one Kiro stream.
-func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, estimatedInputTokens int) (*webSearchRoundOutcome, *config.Account, error) {
+func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, estimatedInputTokens int, apiKeyID string) (*webSearchRoundOutcome, *config.Account, error) {
 	payload := ClaudeToKiro(req, thinking)
+	modelID := MapModel(req.Model)
+	convID, contID, _ := resolveSessionIDs(apiKeyID, modelID, req.Messages)
+	payload.ConversationState.ConversationID = convID
+	payload.ConversationState.AgentContinuationId = contID
+	attachStoredReasoning(payload.ConversationState.History, apiKeyID, modelID, convID)
+
 	excluded := make(map[string]bool)
 	var lastErr error
 
@@ -158,48 +171,71 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 			continue
 		}
 
-		var text string
+		var text, thinkingText string
 		var toolUses []KiroToolUse
 		var inputTokens int
 		var credits float64
 		var realInputTokens int
-		var stopOverride string
+		var integrity streamIntegrityState
+		var stamp reasoningCapture
 
-		callback := &KiroStreamCallback{
-			OnText: func(t string, isThinking bool) {
-				if isThinking {
-					return
+		err := runKiroWithIntegrityRetry(
+			account,
+			payload,
+			&integrity,
+			func() *KiroStreamCallback {
+				onReasoningMeta := stamp.meta()
+				return &KiroStreamCallback{
+					OnText: func(t string, isThinking bool) {
+						integrity.observeText(t, isThinking)
+						if isThinking {
+							thinkingText += t
+							return
+						}
+						text += t
+					},
+					OnToolUse: func(tu KiroToolUse) {
+						toolUses = append(toolUses, tu)
+						integrity.observeToolUse()
+					},
+					OnComplete: func(inTok, _ int) {
+						inputTokens = inTok
+					},
+					OnCredits: func(c float64) {
+						credits = c
+					},
+					OnContextUsage: func(pct float64) {
+						realInputTokens = int(pct * float64(getContextWindowSize(req.Model)) / 100.0)
+						if pct >= 100.0 {
+							integrity.observeStopReason("model_context_window_exceeded")
+						}
+					},
+					OnStopReason: func(reason string) {
+						if integrity.StopReason == "" {
+							integrity.observeStopReason(reason)
+						}
+					},
+					OnReasoningMeta: func(signature, redacted string) {
+						integrity.SawReasoning = true
+						onReasoningMeta(signature, redacted)
+					},
 				}
-				text += t
 			},
-			OnToolUse: func(tu KiroToolUse) {
-				toolUses = append(toolUses, tu)
+			func() {
+				text, thinkingText = "", ""
+				toolUses = nil
+				inputTokens, realInputTokens = 0, 0
+				credits = 0
+				stamp.reset()
 			},
-			OnComplete: func(inTok, outTok int) {
-				inputTokens = inTok
-				_ = outTok
-			},
-			OnCredits: func(c float64) {
-				credits = c
-			},
-			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(req.Model)) / 100.0)
-				if pct >= 100.0 {
-					stopOverride = "model_context_window_exceeded"
-				}
-			},
-			OnError: func(err error) {
-				if err != nil {
-					lastErr = err
-				}
-			},
-		}
-
-		err := CallKiroAPI(account, payload, callback)
+			nil,
+		)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailure(account, err)
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailure(account, err)
+			}
 			continue
 		}
 
@@ -209,12 +245,20 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 			inputTokens = estimatedInputTokens
 		}
 
+		// Intermediate search-only rounds still seal the raw upstream shape so
+		// the next loop iteration reuses the same IDs. The final client-facing
+		// flush seals the visible server_tool_use content separately.
+		stamp.sealIfPresent(apiKeyID, modelID, convID, currentTurnParentUser(payload), text, toolUses, thinkingText)
+		sealClaudeSession(apiKeyID, req.Model, convID, contID, req.Messages, text, "", toolUses, "", true)
+
 		return &webSearchRoundOutcome{
-			text:               text,
-			toolUses:           toolUses,
-			inputTokens:        inputTokens,
-			credits:            credits,
-			stopReasonOverride: stopOverride,
+			text:        text,
+			toolUses:    toolUses,
+			inputTokens: inputTokens,
+			credits:     credits,
+			stopReason:  integrity.StopReason,
+			convID:      convID,
+			contID:      contID,
 		}, account, nil
 	}
 
@@ -386,23 +430,20 @@ func buildFlushContent(
 
 // resolveFlushStopReason picks stop_reason for the flushed response.
 // web_search-only rounds end as end_turn; client tool_use yields tool_use.
-func resolveFlushStopReason(override string, toolUses []KiroToolUse, content []map[string]interface{}) string {
-	if override != "" {
-		return override
-	}
-	for _, c := range content {
-		if c["type"] == "tool_use" {
-			if name, _ := c["name"].(string); name != webSearchToolName {
-				return "tool_use"
+func resolveFlushStopReason(reason string, toolUses []KiroToolUse, content []map[string]interface{}) string {
+	for _, block := range content {
+		if block["type"] == "tool_use" {
+			if name, _ := block["name"].(string); name != webSearchToolName {
+				return mapClaudeStopReason(reason, 1)
 			}
 		}
 	}
-	for _, tu := range toolUses {
-		if tu.Name != webSearchToolName {
-			return "tool_use"
+	for _, toolUse := range toolUses {
+		if toolUse.Name != webSearchToolName {
+			return mapClaudeStopReason(reason, 1)
 		}
 	}
-	return "end_turn"
+	return mapClaudeStopReason(reason, 0)
 }
 
 func estimateContentBlocksTokens(content []map[string]interface{}) int {
