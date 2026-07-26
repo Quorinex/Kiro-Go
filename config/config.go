@@ -270,7 +270,9 @@ var (
 // Init initializes the configuration system with the specified file path.
 // If the file doesn't exist, a default configuration is created.
 func Init(path string) error {
+	cfgLock.Lock()
 	cfgPath = path
+	cfgLock.Unlock()
 	return Load()
 }
 
@@ -1206,7 +1208,9 @@ func GetKiroClientConfig() KiroClientConfig {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 
-	kiroVersion := "0.11.107"
+	// OAuth/SSO requests retain the author's IDE compatibility fingerprint;
+	// advertise the current official desktop version by default.
+	kiroVersion := "1.0.212"
 	if cfg != nil && cfg.KiroVersion != "" {
 		kiroVersion = cfg.KiroVersion
 	}

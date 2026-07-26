@@ -7,24 +7,63 @@ import (
 	"testing"
 )
 
-func TestBuildStreamingHeaderValuesAlignsWithKiroIDEFormat(t *testing.T) {
+func TestBuildStreamingHeaderValuesAlignsWithKiroRuntimeIDE(t *testing.T) {
 	account := &config.Account{MachineId: "machine-123"}
-	values := buildStreamingHeaderValues(account, "q.us-east-1.amazonaws.com")
+	values := buildKiroRuntimeHeaderValues(account, "runtime.us-east-1.kiro.dev")
 
-	if values.Host != "q.us-east-1.amazonaws.com" {
+	if values.Host != "runtime.us-east-1.kiro.dev" {
 		t.Fatalf("expected host to be preserved, got %q", values.Host)
 	}
-	if !strings.Contains(values.UserAgent, "aws-sdk-js/1.0.34") {
-		t.Fatalf("expected streaming sdk version in user agent, got %q", values.UserAgent)
+	for _, want := range []string{
+		"aws-sdk-js/1.0.0",
+		"api/kiroruntime#1.0.0",
+		"KiroIDE-1.0.212-machine-123",
+	} {
+		if !strings.Contains(values.UserAgent, want) {
+			t.Fatalf("official KiroRuntime user agent %q missing %q", values.UserAgent, want)
+		}
 	}
-	if !strings.Contains(values.UserAgent, "api/codewhispererstreaming#1.0.34") {
-		t.Fatalf("expected streaming API marker in user agent, got %q", values.UserAgent)
+	if !strings.Contains(values.AmzUserAgent, "aws-sdk-js/1.0.0 KiroIDE-1.0.212-machine-123") {
+		t.Fatalf("x-amz-user-agent does not match KiroRuntime IDE format: %q", values.AmzUserAgent)
 	}
-	if !strings.Contains(values.UserAgent, "KiroIDE-0.11.107-machine-123") {
-		t.Fatalf("expected kiro version and machine id in user agent, got %q", values.UserAgent)
+}
+
+func TestBuildLegacyStreamingHeaderValuesRetainsEndpointSDK(t *testing.T) {
+	account := &config.Account{MachineId: "machine-123"}
+	values := buildLegacyStreamingHeaderValues(account, "q.us-east-1.amazonaws.com")
+
+	for _, want := range []string{
+		"aws-sdk-js/1.0.39",
+		"api/codewhispererstreaming#1.0.39",
+		"KiroIDE-1.0.212-machine-123",
+	} {
+		if !strings.Contains(values.UserAgent, want) {
+			t.Fatalf("legacy fallback user agent %q missing %q", values.UserAgent, want)
+		}
 	}
-	if !strings.Contains(values.AmzUserAgent, "aws-sdk-js/1.0.34 KiroIDE-0.11.107-machine-123") {
-		t.Fatalf("expected x-amz-user-agent to include version and machine id, got %q", values.AmzUserAgent)
+}
+
+func TestResolveKiroCLIEndpointUsesCLIIdentity(t *testing.T) {
+	account := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_test", Region: "eu-central-1"}
+	resolved, err := resolveKiroEndpoint(kiroCLIEndpoint, account, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.URL != "https://runtime.eu-central-1.kiro.dev/" || resolved.ContentType != "application/x-amz-json-1.0" || resolved.AgentMode {
+		t.Fatalf("resolved CLI endpoint = %+v", resolved)
+	}
+	for _, want := range []string{
+		"KiroCLI/2.14.2",
+		"md/appVersion-2.14.2",
+		"app/AmazonQ-For-CLI",
+		"api/codewhispererstreaming#0.1.17975",
+	} {
+		if !strings.Contains(resolved.HeaderValues.UserAgent, want) {
+			t.Fatalf("CLI user agent %q missing %q", resolved.HeaderValues.UserAgent, want)
+		}
+	}
+	if strings.Contains(resolved.HeaderValues.UserAgent, "KiroIDE") || strings.Contains(resolved.HeaderValues.UserAgent, "aws-sdk-js") {
+		t.Fatalf("API key path must not mix IDE/JS identity into CLI UA: %q", resolved.HeaderValues.UserAgent)
 	}
 }
 
@@ -89,7 +128,7 @@ func TestApplyKiroBaseHeadersMarksAPIKeyCredentials(t *testing.T) {
 		AuthMethod:  "api_key",
 	}
 
-	applyKiroBaseHeaders(req, account, buildStreamingHeaderValues(account, req.URL.Host))
+	applyKiroBaseHeaders(req, account, buildKiroCLIHeaderValues(req.URL.Host, "codewhispererstreaming"))
 
 	if got := req.Header.Get("Authorization"); got != "Bearer ksk_test_key" {
 		t.Fatalf("expected API key bearer, got %q", got)
@@ -100,5 +139,8 @@ func TestApplyKiroBaseHeadersMarksAPIKeyCredentials(t *testing.T) {
 	}
 	if got := req.Header.Get("TokenType"); got != "API_KEY" {
 		t.Fatalf("expected TokenType/tokentype API_KEY, got %q", got)
+	}
+	if got := req.Header.Get("x-amzn-codewhisperer-optout"); got != "false" {
+		t.Fatalf("expected CLI optout=false, got %q", got)
 	}
 }

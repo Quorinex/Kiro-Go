@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	kiroStreamingSDKVersion = "1.0.34"
-	kiroRuntimeSDKVersion   = "1.0.0"
+	kiroLegacyStreamingSDKVersion = "1.0.39"
+	kiroRuntimeSDKVersion         = "1.0.0"
+	kiroCLIVersion                = "2.14.2"
+	kiroCLIServiceClientVersion   = "0.1.17975"
 )
 
 type kiroHeaderValues struct {
@@ -18,12 +20,34 @@ type kiroHeaderValues struct {
 	Host         string
 }
 
-func buildStreamingHeaderValues(account *config.Account, host string) kiroHeaderValues {
-	return buildKiroHeaderValues(account, host, "codewhispererstreaming", kiroStreamingSDKVersion, "m/E")
+func buildKiroRuntimeHeaderValues(account *config.Account, host string) kiroHeaderValues {
+	return buildKiroHeaderValues(account, host, "kiroruntime", kiroRuntimeSDKVersion, "m/E")
+}
+
+func buildLegacyStreamingHeaderValues(account *config.Account, host string) kiroHeaderValues {
+	return buildKiroHeaderValues(account, host, "codewhispererstreaming", kiroLegacyStreamingSDKVersion, "m/E")
 }
 
 func buildRuntimeHeaderValues(account *config.Account, host string) kiroHeaderValues {
+	if config.IsAPIKeyAccount(account) {
+		return buildKiroCLIHeaderValues(host, "codewhispererruntime")
+	}
 	return buildKiroHeaderValues(account, host, "codewhispererruntime", kiroRuntimeSDKVersion, "m/N,E")
+}
+
+func buildKiroCLIHeaderValues(host, apiName string) kiroHeaderValues {
+	userAgent := fmt.Sprintf(
+		"KiroCLI/%s md/appVersion-%s app/AmazonQ-For-CLI api/%s#%s",
+		kiroCLIVersion,
+		kiroCLIVersion,
+		apiName,
+		kiroCLIServiceClientVersion,
+	)
+	return kiroHeaderValues{
+		UserAgent:    userAgent,
+		AmzUserAgent: userAgent,
+		Host:         host,
+	}
 }
 
 func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, mode string) kiroHeaderValues {
@@ -76,7 +100,11 @@ func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kir
 	}
 	req.Header.Set("User-Agent", values.UserAgent)
 	req.Header.Set("x-amz-user-agent", values.AmzUserAgent)
-	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	if account != nil && config.IsAPIKeyAccount(account) {
+		req.Header.Set("x-amzn-codewhisperer-optout", "false")
+	} else {
+		req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	}
 	if values.Host != "" {
 		req.Host = values.Host
 	}
