@@ -1,12 +1,70 @@
 package proxy
 
 import (
+	"errors"
 	"kiro-go/config"
 	"kiro-go/logger"
 	"strings"
 )
 
 const maxAccountRetryAttempts = 3
+
+// maxSameAccountStreamRetries mirrors Kiro IDE's empty/truncated response
+// recovery: retry the same request a few times before giving up or rotating.
+const maxSameAccountStreamRetries = 2
+
+// errUpstreamEmptyResponse and errUpstreamTruncatedResponse are soft failures
+// raised when the stream ended without a usable completion signal. They are
+// retryable on the same account and must not mark the account unhealthy.
+var (
+	errUpstreamEmptyResponse     = errors.New("upstream returned empty response without stop reason")
+	errUpstreamTruncatedResponse = errors.New("upstream truncated response without stop reason")
+	errIncompleteToolUse         = errors.New("upstream returned incomplete tool arguments")
+)
+
+// classifyStreamIntegrity decides whether an upstream stream that returned no
+// transport error is actually complete. Mirrors Kiro IDE:
+//   - empty: no content, no tools, no stopReason
+//   - truncated: some content, no tools, no stopReason
+//   - complete: stopReason present, or tools present, or both
+//
+// A stopReason of any non-empty value counts as complete.
+func classifyStreamIntegrity(contentChars, toolCallCount int, stopReason string, sawReasoning bool) error {
+	if strings.TrimSpace(stopReason) != "" {
+		return nil
+	}
+	if toolCallCount > 0 {
+		// Tool turns often complete without a separate stopReason frame; treat
+		// a delivered tool call as a terminal signal.
+		return nil
+	}
+	if contentChars == 0 && !sawReasoning {
+		return errUpstreamEmptyResponse
+	}
+	if contentChars > 0 {
+		return errUpstreamTruncatedResponse
+	}
+	// reasoning-only with no stopReason is still truncated for clients that
+	// expected a final answer.
+	return errUpstreamTruncatedResponse
+}
+
+func isSuccessfulKiroTurn(stopReason string, toolCallCount int) bool {
+	if strings.TrimSpace(stopReason) == "" {
+		// Complete tool turns can legitimately omit metadataEvent.stopReason.
+		return toolCallCount > 0
+	}
+	switch classifyKiroStopReason(stopReason) {
+	case kiroStopLength, kiroStopContextLimit, kiroStopFiltered:
+		return false
+	default:
+		return true
+	}
+}
+
+func isStreamIntegrityError(err error) bool {
+	return errors.Is(err, errUpstreamEmptyResponse) || errors.Is(err, errUpstreamTruncatedResponse)
+}
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
