@@ -203,6 +203,8 @@ func TestOpenAIConversationIDStableFromAnchor(t *testing.T) {
 }
 
 func TestClaudeConversationIDStableFromAnchor(t *testing.T) {
+	// Continuity requires a successful seal of turn 1; bare content hash is no
+	// longer used (it collided across chats that shared an opener).
 	reqA := &ClaudeRequest{
 		Model:  "claude-sonnet-4.5",
 		System: "sys",
@@ -210,6 +212,18 @@ func TestClaudeConversationIDStableFromAnchor(t *testing.T) {
 			{Role: "user", Content: "hello"},
 		},
 	}
+	payloadA := ClaudeToKiro(reqA, false)
+	if payloadA.ConversationState.ConversationID == "" {
+		t.Fatal("expected non-empty conversation ID")
+	}
+	sealSessionAfterSuccess("", MapModel("claude-sonnet-4.5"),
+		payloadA.ConversationState.ConversationID,
+		payloadA.ConversationState.AgentContinuationId,
+		[]ClaudeMessage{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "ok"},
+		})
+
 	reqB := &ClaudeRequest{
 		Model:  "claude-sonnet-4.5",
 		System: "sys",
@@ -219,15 +233,12 @@ func TestClaudeConversationIDStableFromAnchor(t *testing.T) {
 			{Role: "user", Content: "next"},
 		},
 	}
-
-	payloadA := ClaudeToKiro(reqA, false)
-	payloadB := ClaudeToKiro(reqB, false)
-
-	if payloadA.ConversationState.ConversationID == "" || payloadB.ConversationState.ConversationID == "" {
-		t.Fatalf("expected non-empty conversation IDs")
+	gotConv, gotCont, reused := resolveSessionIDs("", MapModel("claude-sonnet-4.5"), reqB.Messages)
+	if !reused {
+		t.Fatal("expected reuse after seal")
 	}
-	if payloadA.ConversationState.ConversationID != payloadB.ConversationState.ConversationID {
-		t.Fatalf("expected stable conversation ID across turns, got %q vs %q", payloadA.ConversationState.ConversationID, payloadB.ConversationState.ConversationID)
+	if gotConv != payloadA.ConversationState.ConversationID || gotCont != payloadA.ConversationState.AgentContinuationId {
+		t.Fatalf("stable ids after seal: got %s/%s want %s/%s", gotConv, gotCont, payloadA.ConversationState.ConversationID, payloadA.ConversationState.AgentContinuationId)
 	}
 }
 
@@ -268,7 +279,7 @@ func TestClaudeToKiroDropsLeadingAssistantHistory(t *testing.T) {
 }
 
 func TestKiroToClaudeResponseCanEmitEmptyThinkingBlock(t *testing.T) {
-	resp := KiroToClaudeResponse("final answer", "", true, nil, 10, 20, "claude-sonnet-4.6")
+	resp := KiroToClaudeResponse("final answer", "", true, nil, 10, 20, "claude-sonnet-4.6", "END_TURN")
 
 	if len(resp.Content) != 2 {
 		t.Fatalf("expected empty thinking block plus text block, got %d blocks", len(resp.Content))
@@ -526,6 +537,13 @@ func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
 	req := &ClaudeRequest{
 		Model: "claude-opus-4.8",
 		Messages: []ClaudeMessage{
+			{Role: "user", Content: "read this image"},
+			{
+				Role: "assistant",
+				Content: []interface{}{
+					map[string]interface{}{"type": "tool_use", "id": "tool_2", "name": "read", "input": map[string]interface{}{"path": "a.png"}},
+				},
+			},
 			{
 				Role: "user",
 				Content: []interface{}{
@@ -626,13 +644,12 @@ func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
 
 	var toolHistImages int
 	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil &&
-			len(h.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
+		if h.UserInputMessage != nil && strings.Contains(h.UserInputMessage.Content, toolResultsContinuationPrefix) {
 			toolHistImages += len(h.UserInputMessage.Images)
 		}
 	}
 	if toolHistImages != 1 {
-		t.Fatalf("expected tool image carried on the flushed tool-result history entry, got %d", toolHistImages)
+		t.Fatalf("expected tool image carried on the narrated tool-result history entry, got %d", toolHistImages)
 	}
 
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage

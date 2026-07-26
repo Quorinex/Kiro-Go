@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -212,18 +213,25 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	history := make([]KiroHistoryMessage, 0)
 	var currentContent string
 	var currentImages []KiroImage
+	var currentDocuments []KiroDocument
 	var currentToolResults []KiroToolResult
 
 	for i, msg := range req.Messages {
 		isLast := i == len(req.Messages)-1
 
 		if msg.Role == "user" {
-			content, images, toolResults := extractClaudeUserContent(msg.Content)
-			content = normalizeUserContent(content, len(images) > 0)
+			content, images, documents, toolResults, docErr := extractClaudeUserContent(msg.Content)
+			if docErr != "" {
+				// Request-shape validation should have rejected this already.
+				// Keep translation defensive for direct callers.
+				continue
+			}
+			content = normalizeUserContent(content, len(images) > 0 || len(documents) > 0)
 
 			if isLast {
 				currentContent = content
 				currentImages = images
+				currentDocuments = documents
 				currentToolResults = toolResults
 			} else {
 				userMsg := KiroUserInputMessage{
@@ -233,6 +241,9 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 				}
 				if len(images) > 0 {
 					userMsg.Images = images
+				}
+				if len(documents) > 0 {
+					userMsg.Documents = documents
 				}
 				if len(toolResults) > 0 {
 					userMsg.UserInputMessageContext = &UserInputMessageContext{
@@ -245,12 +256,11 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 			}
 		} else if msg.Role == "assistant" {
 			content, toolUses := extractClaudeAssistantContent(msg.Content)
-			history = append(history, KiroHistoryMessage{
-				AssistantResponseMessage: &KiroAssistantResponseMessage{
-					Content:  content,
-					ToolUses: toolUses,
-				},
-			})
+			assistant := &KiroAssistantResponseMessage{
+				Content:  content,
+				ToolUses: toolUses,
+			}
+			history = append(history, KiroHistoryMessage{AssistantResponseMessage: assistant})
 		}
 	}
 
@@ -289,12 +299,13 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	} else {
 		history = sanitizeKiroHistory(history, nil)
 	}
+	currentDocuments = deduplicateConversationDocuments(history, currentDocuments)
 
 	// 构建最终内容
 	finalContent := ""
 	if currentContent != "" {
 		finalContent = currentContent
-	} else if len(currentImages) > 0 {
+	} else if len(currentImages) > 0 || len(currentDocuments) > 0 {
 		finalContent = normalizeUserContent("", true)
 	} else if len(currentToolResults) > 0 {
 		finalContent = buildToolResultsContinuation(currentToolResults)
@@ -310,13 +321,16 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	payload.ToolNameMap = toolNameMap
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"
+	// Provisional IDs; handler overwrites via resolveSessionIDs(apiKey, ...) so
+	// multi-tenant isolation is not lost inside this pure translator.
 	payload.ConversationState.AgentContinuationId = uuid.New().String()
-	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstClaudeConversationAnchor(req.Messages))
+	payload.ConversationState.ConversationID = uuid.New().String()
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
-		Content: finalContent,
-		ModelID: modelID,
-		Origin:  origin,
-		Images:  currentImages,
+		Content:   finalContent,
+		ModelID:   modelID,
+		Origin:    origin,
+		Images:    currentImages,
+		Documents: currentDocuments,
 	}
 
 	// Only attach structured tool results when they answer the last history
@@ -622,13 +636,15 @@ func extractSystemPrompt(system interface{}) string {
 	return ""
 }
 
-func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroToolResult) {
+func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroDocument, []KiroToolResult, string) {
 	var text string
 	var images []KiroImage
+	var documents []KiroDocument
 	var toolResults []KiroToolResult
+	documentNames := make(map[string]bool)
 
 	if s, ok := content.(string); ok {
-		return s, nil, nil
+		return s, nil, nil, nil, ""
 	}
 
 	// Accept both JSON-decoded []interface{} and in-memory []map[string]interface{}
@@ -643,6 +659,15 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 		case "image", "image_url", "input_image":
 			if img := extractImageFromClaudeBlock(block); img != nil {
 				images = append(images, *img)
+			}
+		case "document", "file", "input_document":
+			doc, validationError := parseClaudeDocumentBlock(block)
+			if validationError != "" {
+				return "", nil, nil, nil, validationError
+			}
+			if doc != nil && !documentNames[doc.Name] {
+				documentNames[doc.Name] = true
+				documents = append(documents, *doc)
 			}
 		case "tool_result":
 			toolUseID, _ := block["tool_use_id"].(string)
@@ -661,7 +686,7 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 		}
 	}
 
-	return text, images, toolResults
+	return text, images, documents, toolResults, ""
 }
 
 // contentBlocksAsMaps normalizes Claude content arrays for extraction.
@@ -683,6 +708,171 @@ func contentBlocksAsMaps(content interface{}) []map[string]interface{} {
 	default:
 		return nil
 	}
+}
+
+const maxDocumentsPerConversation = 5
+
+// documentMIMEToFormat mirrors the official client's supported document formats.
+var documentMIMEToFormat = map[string]string{
+	"application/pdf":    "pdf",
+	"text/csv":           "csv",
+	"application/msword": "doc",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+	"application/vnd.ms-excel": "xls",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+	"text/html":     "html",
+	"text/plain":    "txt",
+	"text/markdown": "md",
+}
+
+var documentMagicBytes = map[string][]byte{
+	"application/pdf":    {0x25, 0x50, 0x44, 0x46},
+	"application/msword": {0xd0, 0xcf, 0x11, 0xe0},
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": {0x50, 0x4b, 0x03, 0x04},
+	"application/vnd.ms-excel": {0xd0, 0xcf, 0x11, 0xe0},
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {0x50, 0x4b, 0x03, 0x04},
+}
+
+var (
+	documentBase64Pattern   = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
+	documentNameInvalid     = regexp.MustCompile(`[^a-zA-Z0-9\s\-()\[\]]`)
+	documentRepeatedHyphens = regexp.MustCompile(`-{2,}`)
+)
+
+func documentBlockName(block map[string]interface{}, format string) string {
+	name, _ := block["title"].(string)
+	if name == "" {
+		name, _ = block["name"].(string)
+	}
+	if name == "" {
+		name = "document." + format
+	}
+	return name
+}
+
+func sanitizeDocumentName(name string) string {
+	if dot := strings.LastIndex(name, "."); dot >= 0 {
+		name = name[:dot]
+	}
+	name = documentNameInvalid.ReplaceAllString(name, "-")
+	name = documentRepeatedHyphens.ReplaceAllString(name, "-")
+	name = strings.Join(strings.Fields(name), " ")
+	runes := []rune(strings.TrimSpace(name))
+	if len(runes) > 200 {
+		runes = runes[:200]
+	}
+	name = string(runes)
+	if name == "" {
+		return "document"
+	}
+	return name
+}
+
+// parseClaudeDocumentBlock returns nil without error for unsupported or empty
+// attachments, matching the official client. Supported malformed documents
+// return a user-facing validation message.
+func parseClaudeDocumentBlock(block map[string]interface{}) (*KiroDocument, string) {
+	source, _ := block["source"].(map[string]interface{})
+	if source == nil {
+		return nil, ""
+	}
+	mediaType, _ := source["media_type"].(string)
+	if mediaType == "" {
+		mediaType, _ = source["mediaType"].(string)
+	}
+	if mediaType == "" {
+		mediaType, _ = source["mime_type"].(string)
+	}
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	format, ok := documentMIMEToFormat[mediaType]
+	if !ok {
+		return nil, ""
+	}
+
+	sourceType, _ := source["type"].(string)
+	sourceType = strings.ToLower(strings.TrimSpace(sourceType))
+	if sourceType != "" && sourceType != "base64" && sourceType != "text" {
+		return nil, ""
+	}
+	data, _ := source["data"].(string)
+	if data == "" {
+		return nil, ""
+	}
+
+	var raw []byte
+	if sourceType == "text" {
+		if mediaType != "text/plain" {
+			return nil, ""
+		}
+		raw = []byte(data)
+	} else {
+		if strings.HasPrefix(data, "data:") {
+			idx := strings.Index(data, "base64,")
+			if idx < 0 {
+				return nil, fmt.Sprintf("invalid base64 for document %q", documentBlockName(block, format))
+			}
+			data = data[idx+7:]
+		}
+		if len(data) == 0 || len(data)%4 != 0 || !documentBase64Pattern.MatchString(data) {
+			return nil, fmt.Sprintf("invalid base64 for document %q", documentBlockName(block, format))
+		}
+		var err error
+		raw, err = base64.StdEncoding.DecodeString(data)
+		if err != nil || len(raw) == 0 {
+			return nil, fmt.Sprintf("invalid base64 for document %q", documentBlockName(block, format))
+		}
+		if magic := documentMagicBytes[mediaType]; len(magic) > 0 && !bytes.HasPrefix(raw, magic) {
+			return nil, fmt.Sprintf("document %q content does not match declared type %s", documentBlockName(block, format), mediaType)
+		}
+	}
+
+	doc := &KiroDocument{Name: sanitizeDocumentName(documentBlockName(block, format)), Format: format}
+	doc.Source.Bytes = base64.StdEncoding.EncodeToString(raw)
+	return doc, ""
+}
+
+func validateClaudeDocuments(messages []ClaudeMessage) string {
+	seen := make(map[string]bool)
+	for _, message := range messages {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			continue
+		}
+		_, _, documents, _, validationError := extractClaudeUserContent(message.Content)
+		if validationError != "" {
+			return validationError
+		}
+		for _, doc := range documents {
+			if seen[doc.Name] {
+				continue
+			}
+			seen[doc.Name] = true
+			if len(seen) > maxDocumentsPerConversation {
+				return fmt.Sprintf("too many documents attached (%d); maximum is %d per conversation", len(seen), maxDocumentsPerConversation)
+			}
+		}
+	}
+	return ""
+}
+
+func deduplicateConversationDocuments(history []KiroHistoryMessage, current []KiroDocument) []KiroDocument {
+	seen := make(map[string]bool)
+	filter := func(documents []KiroDocument) []KiroDocument {
+		filtered := documents[:0]
+		for _, document := range documents {
+			if document.Name == "" || seen[document.Name] || len(seen) >= maxDocumentsPerConversation {
+				continue
+			}
+			seen[document.Name] = true
+			filtered = append(filtered, document)
+		}
+		return filtered
+	}
+	for i := range history {
+		if history[i].UserInputMessage != nil {
+			history[i].UserInputMessage.Documents = filter(history[i].UserInputMessage.Documents)
+		}
+	}
+	return filter(current)
 }
 
 func extractImageFromClaudeBlock(block map[string]interface{}) *KiroImage {
@@ -759,6 +949,7 @@ func extractToolResultContent(content interface{}) (string, []KiroImage) {
 func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) {
 	var text string
 	var toolUses []KiroToolUse
+	var pendingSearchQuery string
 
 	if s, ok := content.(string); ok {
 		return s, nil
@@ -766,6 +957,9 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) 
 
 	// Same dual-shape support as extractClaudeUserContent (JSON []interface{}
 	// and in-memory []map[string]interface{} from agentic loop feedback).
+	// Native Anthropic server web_search blocks are not valid Kiro history tool
+	// uses; fold their results into assistant text so the next turn still sees
+	// the search evidence the client already displayed.
 	for _, block := range contentBlocksAsMaps(content) {
 		blockType, _ := block["type"].(string)
 		switch blockType {
@@ -785,10 +979,53 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) 
 				Name:      name,
 				Input:     input,
 			})
+		case "server_tool_use":
+			name, _ := block["name"].(string)
+			if name != webSearchToolName {
+				continue
+			}
+			if input, ok := block["input"].(map[string]interface{}); ok {
+				pendingSearchQuery = toolUseQuery(input)
+			} else {
+				pendingSearchQuery = ""
+			}
+		case "web_search_tool_result":
+			summary := summarizeClaudeWebSearchResult(pendingSearchQuery, block["content"])
+			if summary != "" {
+				if text != "" && !strings.HasSuffix(text, "\n") {
+					text += "\n\n"
+				}
+				text += summary
+			}
+			pendingSearchQuery = ""
 		}
 	}
 
 	return text, toolUses
+}
+
+func summarizeClaudeWebSearchResult(query string, content interface{}) string {
+	results := &WebSearchResults{}
+	for _, block := range contentBlocksAsMaps(content) {
+		if typ, _ := block["type"].(string); typ != "" && typ != "web_search_result" {
+			continue
+		}
+		title, _ := block["title"].(string)
+		url, _ := block["url"].(string)
+		snippet, _ := block["encrypted_content"].(string)
+		if snippet == "" {
+			snippet, _ = block["snippet"].(string)
+		}
+		item := WebSearchResult{Title: title, URL: url}
+		if snippet != "" {
+			item.Snippet = &snippet
+		}
+		results.Results = append(results.Results, item)
+	}
+	// Empty result arrays are valid MCP successes; keep the same
+	// generateSearchSummary("No results found.") representation so a later
+	// client-tool continuation still retains that the search happened.
+	return generateSearchSummary(query, results)
 }
 
 func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]string) {
@@ -995,7 +1232,85 @@ func shortenToolName(name string) string {
 
 // ==================== Kiro -> Claude 转换 ====================
 
-func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
+func normalizeKiroStopReason(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	return strings.NewReplacer("-", "_", " ", "_").Replace(reason)
+}
+
+type kiroStopClass uint8
+
+const (
+	kiroStopComplete kiroStopClass = iota
+	kiroStopLength
+	kiroStopContextLimit
+	kiroStopFiltered
+	kiroStopSequence
+	kiroStopPaused
+)
+
+func classifyKiroStopReason(reason string) kiroStopClass {
+	switch normalizeKiroStopReason(reason) {
+	case "max_tokens", "max_output_tokens", "length":
+		return kiroStopLength
+	case "model_context_window_exceeded", "context_window_exceeded":
+		return kiroStopContextLimit
+	case "refusal", "content_filter", "content_filtered", "guardrail_intervened":
+		return kiroStopFiltered
+	case "stop_sequence":
+		return kiroStopSequence
+	case "pause_turn":
+		return kiroStopPaused
+	default:
+		return kiroStopComplete
+	}
+}
+
+func mapClaudeStopReason(reason string, toolCount int) string {
+	if toolCount > 0 {
+		return "tool_use"
+	}
+	switch classifyKiroStopReason(reason) {
+	case kiroStopLength:
+		return "max_tokens"
+	case kiroStopContextLimit:
+		return "model_context_window_exceeded"
+	case kiroStopFiltered:
+		return "refusal"
+	case kiroStopSequence:
+		return "stop_sequence"
+	case kiroStopPaused:
+		return "pause_turn"
+	default:
+		return "end_turn"
+	}
+}
+
+func mapOpenAIFinishReason(reason string, toolCount int) string {
+	if toolCount > 0 {
+		return "tool_calls"
+	}
+	switch classifyKiroStopReason(reason) {
+	case kiroStopLength, kiroStopContextLimit:
+		return "length"
+	case kiroStopFiltered:
+		return "content_filter"
+	default:
+		return "stop"
+	}
+}
+
+func mapResponsesCompletion(reason string) (status, incompleteReason string) {
+	switch classifyKiroStopReason(reason) {
+	case kiroStopLength, kiroStopContextLimit:
+		return "incomplete", "max_output_tokens"
+	case kiroStopFiltered:
+		return "incomplete", "content_filter"
+	default:
+		return "completed", ""
+	}
+}
+
+func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model, stopReason string) *ClaudeResponse {
 	blocks := make([]ClaudeContentBlock, 0)
 
 	if thinkingContent != "" || includeEmptyThinkingBlock {
@@ -1021,10 +1336,7 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 		})
 	}
 
-	stopReason := "end_turn"
-	if len(toolUses) > 0 {
-		stopReason = "tool_use"
-	}
+	clientStopReason := mapClaudeStopReason(stopReason, len(toolUses))
 
 	return &ClaudeResponse{
 		ID:         "msg_" + uuid.New().String(),
@@ -1032,7 +1344,7 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 		Role:       "assistant",
 		Content:    blocks,
 		Model:      model,
-		StopReason: stopReason,
+		StopReason: clientStopReason,
 		Usage: ClaudeUsage{
 			InputTokens:  inputTokens,
 			OutputTokens: outputTokens,
@@ -1314,6 +1626,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	// 构建 payload
 	payload := &KiroPayload{}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
+	// The OpenAI path has no chain seal yet, so it keeps the content-derived id.
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: finalContent,
@@ -1635,7 +1948,7 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 		// placeholder like ".": replayed across a long history that produces
 		// dozens of "." assistant turns, which the model then imitates by
 		// replying ".". Mark such turns for removal instead.
-		if msg.UserInputMessage != nil && strings.TrimSpace(msg.UserInputMessage.Content) == "" && len(msg.UserInputMessage.Images) == 0 {
+		if msg.UserInputMessage != nil && strings.TrimSpace(msg.UserInputMessage.Content) == "" && len(msg.UserInputMessage.Images) == 0 && len(msg.UserInputMessage.Documents) == 0 {
 			msg.UserInputMessage.Content = minimalFallbackUserContent
 		}
 	}
@@ -1665,7 +1978,8 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 			if last.UserInputMessage != nil &&
 				strings.TrimSpace(last.UserInputMessage.Content) == strings.TrimSpace(msg.UserInputMessage.Content) &&
 				strings.TrimSpace(msg.UserInputMessage.Content) != "" &&
-				len(msg.UserInputMessage.Images) == 0 {
+				len(last.UserInputMessage.Images) == 0 && len(msg.UserInputMessage.Images) == 0 &&
+				len(last.UserInputMessage.Documents) == 0 && len(msg.UserInputMessage.Documents) == 0 {
 				continue // skip duplicate consecutive user turn
 			}
 		}
@@ -1855,7 +2169,7 @@ func firstClaudeConversationAnchor(messages []ClaudeMessage) string {
 		if msg.Role != "user" {
 			continue
 		}
-		text, _, toolResults := extractClaudeUserContent(msg.Content)
+		text, _, _, toolResults, _ := extractClaudeUserContent(msg.Content)
 		if strings.TrimSpace(text) != "" {
 			return strings.TrimSpace(text)
 		}
@@ -2157,8 +2471,8 @@ func extractThinkingFromContent(content string) (string, string) {
 }
 
 // KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
-func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
-	finishReason := "stop"
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat, stopReason string) map[string]interface{} {
+	finishReason := mapOpenAIFinishReason(stopReason, len(toolUses))
 
 	message := map[string]interface{}{
 		"role": "assistant",
@@ -2179,7 +2493,6 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			}
 		}
 		message["tool_calls"] = toolCalls
-		finishReason = "tool_calls"
 	} else {
 		// 根据配置格式化 thinking 输出
 		if reasoningContent != "" {
