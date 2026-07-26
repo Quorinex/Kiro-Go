@@ -22,19 +22,35 @@ import (
 )
 
 // Endpoint configuration (auto-fallback on quota exhaustion).
+type kiroEndpointProtocol uint8
+
+const (
+	kiroProtocolLegacyStreaming kiroEndpointProtocol = iota
+	kiroProtocolRuntime
+	kiroProtocolCLI
+)
+
 type kiroEndpoint struct {
 	URL       string
 	Origin    string
 	AmzTarget string
 	Name      string
+	Protocol  kiroEndpointProtocol
+}
+
+type resolvedKiroEndpoint struct {
+	URL          string
+	HeaderValues kiroHeaderValues
+	ContentType  string
+	AgentMode    bool
 }
 
 var kiroEndpoints = []kiroEndpoint{
 	{
-		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "AI_EDITOR",
-		AmzTarget: "",
-		Name:      "Kiro IDE",
+		URL:      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
+		Origin:   "AI_EDITOR",
+		Name:     "Kiro Runtime",
+		Protocol: kiroProtocolRuntime,
 	},
 	{
 		URL:       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
@@ -57,6 +73,7 @@ var kiroCLIEndpoint = kiroEndpoint{
 	Origin:    "KIRO_CLI",
 	AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
 	Name:      "Kiro CLI",
+	Protocol:  kiroProtocolCLI,
 }
 
 // Global HTTP clients, swappable at runtime to apply proxy reconfiguration without restart.
@@ -179,6 +196,7 @@ type KiroUserInputMessage struct {
 	ModelID                 string                   `json:"modelId,omitempty"`
 	Origin                  string                   `json:"origin"`
 	Images                  []KiroImage              `json:"images,omitempty"`
+	Documents               []KiroDocument           `json:"documents,omitempty"`
 	UserInputMessageContext *UserInputMessageContext `json:"userInputMessageContext,omitempty"`
 }
 
@@ -216,14 +234,34 @@ type KiroImage struct {
 	} `json:"source"`
 }
 
+// KiroDocument is a non-image attachment (PDF, office, text, ...).
+type KiroDocument struct {
+	Name   string `json:"name"`
+	Format string `json:"format"`
+	Source struct {
+		Bytes string `json:"bytes"`
+	} `json:"source"`
+}
+
+// KiroReasoningContent is the signed thinking stamp upstream expects on later
+// turns. Either open text+signature or redacted content.
+type KiroReasoningContent struct {
+	ReasoningText *struct {
+		Text      string `json:"text"`
+		Signature string `json:"signature"`
+	} `json:"reasoningText,omitempty"`
+	RedactedContent []byte `json:"redactedContent,omitempty"`
+}
+
 type KiroHistoryMessage struct {
 	UserInputMessage         *KiroUserInputMessage         `json:"userInputMessage,omitempty"`
 	AssistantResponseMessage *KiroAssistantResponseMessage `json:"assistantResponseMessage,omitempty"`
 }
 
 type KiroAssistantResponseMessage struct {
-	Content  string        `json:"content"`
-	ToolUses []KiroToolUse `json:"toolUses,omitempty"`
+	Content          string                `json:"content"`
+	ToolUses         []KiroToolUse         `json:"toolUses,omitempty"`
+	ReasoningContent *KiroReasoningContent `json:"reasoningContent,omitempty"`
 }
 
 type KiroToolUse struct {
@@ -248,6 +286,13 @@ type KiroStreamCallback struct {
 	OnError        func(err error)
 	OnCredits      func(credits float64)
 	OnContextUsage func(percentage float64)
+	// OnStopReason is fired when a metadataEvent carries stopReason.
+	// Absence after content is how callers detect a truncated stream
+	// (Kiro IDE retries those; see _streamResponseChunks).
+	OnStopReason func(reason string)
+	// OnReasoningMeta carries only the validation stamp for a thinking
+	// segment. Visible text still arrives via OnText(..., true).
+	OnReasoningMeta func(signature, redactedBase64 string)
 }
 
 // ==================== API Call ====================
@@ -281,15 +326,33 @@ func endpointsForAccount(account *config.Account) []kiroEndpoint {
 	return getSortedEndpoints(config.GetPreferredEndpoint())
 }
 
-// cliRuntimeURL builds the regional Kiro CLI runtime URL.
-func cliRuntimeURL(account *config.Account) string {
-	region := "us-east-1"
-	if account != nil {
-		if r := strings.TrimSpace(account.Region); r != "" {
-			region = r
-		}
+func resolveKiroEndpoint(endpoint kiroEndpoint, account *config.Account, profileArn string) (resolvedKiroEndpoint, error) {
+	region := kiroRegionForProfile(account, profileArn)
+	resolvedURL := endpoint.URL
+	if endpoint.Protocol == kiroProtocolRuntime || endpoint.Protocol == kiroProtocolCLI {
+		resolvedURL = strings.Replace(endpoint.URL, "runtime.us-east-1.kiro.dev", "runtime."+region+".kiro.dev", 1)
+	} else if endpoint.Protocol == kiroProtocolLegacyStreaming {
+		resolvedURL = regionalizeURLForProfile(endpoint.URL, account, profileArn)
+	} else {
+		return resolvedKiroEndpoint{}, fmt.Errorf("unsupported Kiro endpoint protocol %d", endpoint.Protocol)
 	}
-	return fmt.Sprintf("https://runtime.%s.kiro.dev/", region)
+	parsed, err := url.Parse(resolvedURL)
+	if err != nil || parsed.Host == "" {
+		return resolvedKiroEndpoint{}, fmt.Errorf("invalid Kiro endpoint URL %q", resolvedURL)
+	}
+
+	resolved := resolvedKiroEndpoint{URL: resolvedURL, ContentType: "application/json", AgentMode: true}
+	switch endpoint.Protocol {
+	case kiroProtocolRuntime:
+		resolved.HeaderValues = buildKiroRuntimeHeaderValues(account, parsed.Host)
+	case kiroProtocolCLI:
+		resolved.HeaderValues = buildKiroCLIHeaderValues(parsed.Host, "codewhispererstreaming")
+		resolved.ContentType = "application/x-amz-json-1.0"
+		resolved.AgentMode = false
+	case kiroProtocolLegacyStreaming:
+		resolved.HeaderValues = buildLegacyStreamingHeaderValues(account, parsed.Host)
+	}
+	return resolved, nil
 }
 
 // getSortedEndpoints returns endpoints ordered by user preference, with optional fallback.
@@ -370,51 +433,32 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 	// Build endpoint list ordered by configuration / credential type.
 	endpoints := endpointsForAccount(account)
-	isAPIKey := config.IsAPIKeyAccount(account)
 
 	var lastErr error
 	for _, ep := range endpoints {
 		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
-		// Target the profile's data-plane region; endpoint URLs are declared for us-east-1.
-		// API Key accounts use the CLI runtime host instead of IDE/Q hosts.
-		epURL := regionalizeURLForProfile(ep.URL, account, payload.ProfileArn)
-		if isAPIKey {
-			epURL = cliRuntimeURL(account)
-		}
-
-		reqBody, _ := json.Marshal(payload)
-		req, err := http.NewRequest("POST", epURL, bytes.NewReader(reqBody))
+		resolved, err := resolveKiroEndpoint(ep, account, payload.ProfileArn)
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
-		host := ""
-		if parsedURL, parseErr := url.Parse(epURL); parseErr == nil {
-			host = parsedURL.Host
+		reqBody, _ := json.Marshal(payload)
+		req, err := http.NewRequest("POST", resolved.URL, bytes.NewReader(reqBody))
+		if err != nil {
+			lastErr = err
+			continue
 		}
-		headerValues := buildStreamingHeaderValues(account, host)
-
-		if isAPIKey {
-			req.Header.Set("Content-Type", "application/x-amz-json-1.0")
-		} else {
-			req.Header.Set("Content-Type", "application/json")
-		}
+		req.Header.Set("Content-Type", resolved.ContentType)
 		req.Header.Set("Accept", "*/*")
 		if ep.AmzTarget != "" {
 			req.Header.Set("X-Amz-Target", ep.AmzTarget)
 		}
-		applyKiroBaseHeaders(req, account, headerValues)
-		if !isAPIKey {
+		applyKiroBaseHeaders(req, account, resolved.HeaderValues)
+		if resolved.AgentMode {
 			req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
-		}
-		// CLI captures use optout=false; IDE path keeps true.
-		if isAPIKey {
-			req.Header.Set("x-amzn-codewhisperer-optout", "false")
-		} else {
-			req.Header.Set("x-amzn-codewhisperer-optout", "true")
 		}
 		req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 		req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
@@ -471,105 +515,116 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		callback = &KiroStreamCallback{}
 	}
 
-	// Read directly without bufio to avoid buffering latency in streaming responses.
 	var inputTokens, outputTokens int
 	var totalCredits float64
-	var currentToolUse *toolUseState
+	pending := &pendingToolUses{}
 
 	for {
-		// Prelude: 12 bytes (total_len + headers_len + crc)
-		prelude := make([]byte, 12)
-		_, err := io.ReadFull(body, prelude)
-		if err == io.EOF {
+		message, err := readEventStreamMessage(body)
+		if err != nil {
+			return err
+		}
+		if message == nil {
 			break
 		}
-		if err != nil {
-			return err
+
+		messageType := strings.TrimSpace(message.headers[":message-type"])
+		if messageType == "" {
+			return fmt.Errorf("event stream message missing :message-type header")
 		}
 
-		totalLength := int(prelude[0])<<24 | int(prelude[1])<<16 | int(prelude[2])<<8 | int(prelude[3])
-		headersLength := int(prelude[4])<<24 | int(prelude[5])<<16 | int(prelude[6])<<8 | int(prelude[7])
-
-		if totalLength < 16 {
-			continue
+		if messageType == "error" || messageType == "exception" {
+			var event map[string]interface{}
+			headerMessage := message.headers[":error-message"]
+			if len(message.payload) > 0 && string(message.payload) != "null" {
+				if err := json.Unmarshal(message.payload, &event); err != nil && headerMessage == "" {
+					headerMessage = strings.TrimSpace(string(message.payload))
+				}
+			}
+			if event == nil {
+				event = map[string]interface{}{}
+			}
+			code := message.headers[":error-code"]
+			if messageType == "exception" {
+				code = message.headers[":exception-type"]
+			}
+			return newUpstreamEventStreamError(messageType, code, headerMessage, event)
+		}
+		if messageType != "event" {
+			return fmt.Errorf("unsupported event stream message type %q", messageType)
 		}
 
-		// Read the remaining message bytes.
-		remaining := totalLength - 12
-		msgBuf := make([]byte, remaining)
-		_, err = io.ReadFull(body, msgBuf)
-		if err != nil {
-			return err
-		}
-
-		if headersLength > len(msgBuf)-4 {
-			continue
-		}
-
-		eventType := extractEventType(msgBuf[0:headersLength])
-		payloadBytes := msgBuf[headersLength : len(msgBuf)-4]
-		if len(payloadBytes) == 0 {
-			continue
+		eventType := strings.TrimSpace(message.headers[":event-type"])
+		if eventType == "" {
+			return fmt.Errorf("event stream event missing :event-type header")
 		}
 
 		var event map[string]interface{}
-		if err := json.Unmarshal(payloadBytes, &event); err != nil {
-			continue
+		if len(message.payload) > 0 {
+			if err := json.Unmarshal(message.payload, &event); err != nil {
+				return fmt.Errorf("decode event stream %s payload: %w", eventType, err)
+			}
+		}
+		if event == nil {
+			event = map[string]interface{}{}
 		}
 
 		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
 
-		// Dispatch by event type.
 		switch eventType {
-		// Both text streams are passed through verbatim. Kiro sends
-		// assistantResponseEvent and reasoningContentEvent as pure incremental deltas
-		// (verified against real upstream traffic), never as cumulative snapshots, and
-		// never replays a chunk: ordering and at-most-once delivery are already
-		// guaranteed by TCP, and a dropped stream is retried as a whole new request
-		// rather than resumed.
-		//
-		// Do NOT reintroduce content-based de-duplication here. At the string level a
-		// replayed chunk is indistinguishable from text that simply repeats itself, and
-		// the wire protocol carries no sequence number or message id to tell them apart
-		// (the AWS event-stream base spec defines none), so such a heuristic can only
-		// guess -- and when it guesses wrong it silently eats real output. The previous
-		// implementation turned "6666666666" into "666", "abababab" into "abab" and
-		// "1833" into "183", on both streams.
 		case "assistantResponseEvent":
-			if content, ok := event["content"].(string); ok && content != "" {
-				if callback.OnText != nil {
-					callback.OnText(content, false)
-				}
+			if content, ok := event["content"].(string); ok && content != "" && callback.OnText != nil {
+				callback.OnText(content, false)
 			}
 		case "reasoningContentEvent":
-			if text, ok := event["text"].(string); ok && text != "" {
-				if callback.OnText != nil {
-					callback.OnText(text, true)
+			if text, ok := event["text"].(string); ok && text != "" && callback.OnText != nil {
+				callback.OnText(text, true)
+			}
+			if callback.OnReasoningMeta != nil {
+				sig, _ := event["signature"].(string)
+				redacted, _ := event["redactedContent"].(string)
+				if sig != "" || redacted != "" {
+					callback.OnReasoningMeta(sig, redacted)
 				}
 			}
 		case "toolUseEvent":
-			currentToolUse = handleToolUseEvent(event, currentToolUse, callback)
+			if err := handleToolUseEvent(event, pending); err != nil {
+				return err
+			}
 		case "meteringEvent":
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}
 		case "contextUsageEvent":
-			if pct, ok := event["contextUsagePercentage"].(float64); ok {
-				if callback.OnContextUsage != nil {
-					callback.OnContextUsage(pct)
-				}
+			if pct, ok := event["contextUsagePercentage"].(float64); ok && callback.OnContextUsage != nil {
+				callback.OnContextUsage(pct)
 			}
+		case "metadataEvent":
+			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" && callback.OnStopReason != nil {
+				callback.OnStopReason(reason)
+			}
+		case "error", "throttlingError", "validationError", "serviceUnavailableError", "invalidStateEvent":
+			return newUpstreamEventStreamError("event", eventType, "", event)
+		case "codeReferenceEvent", "documentCitationEvent", "toolResultEvent",
+			"supplementaryWebLinksEvent", "messageMetadataEvent", "interactionComponentsEvent",
+			"intentsEvent", "followupPromptEvent", "citationEvent", "codeEvent", "dryRunSucceedEvent":
+			// These official metadata/presentation events have no portable
+			// representation in the OpenAI/Anthropic compatibility APIs.
+			logger.Debugf("[EventStream] ignoring known optional event %s", eventType)
+		default:
+			return fmt.Errorf("unsupported upstream event stream event %q", eventType)
 		}
 	}
 
-	if currentToolUse != nil {
-		finishToolUse(currentToolUse, callback)
+	// Flush tools that omitted an explicit stop frame. Any invalid argument
+	// buffer makes the entire parallel tool turn fail.
+	if err := pending.flushAll(callback); err != nil {
+		return err
 	}
 
 	if callback.OnCredits != nil && totalCredits > 0 {
 		callback.OnCredits(totalCredits)
 	}
-
 	if callback.OnComplete != nil {
 		callback.OnComplete(inputTokens, outputTokens)
 	}
@@ -701,7 +756,6 @@ func collectUsageMaps(v interface{}, out *[]map[string]interface{}) {
 	}
 }
 
-
 func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 	for _, k := range keys {
 		v, ok := m[k]
@@ -737,70 +791,198 @@ type toolUseState struct {
 	ToolUseID   string
 	Name        string
 	InputBuffer strings.Builder
+	SawInput    bool
 	GeneratedID bool
 }
 
-func handleToolUseEvent(event map[string]interface{}, current *toolUseState, callback *KiroStreamCallback) *toolUseState {
+// pendingToolUses tracks in-flight tool calls for one stream. Entries are keyed
+// by toolUseId so interleaved parallel frames accumulate independently, and
+// `order` preserves arrival sequence: tool call order is semantic for clients,
+// so a bare map range (randomised in Go) must never decide emit order.
+type pendingToolUses struct {
+	byID      map[string]*toolUseState
+	completed map[string]KiroToolUse
+	order     []string
+	lastID    string
+}
+
+func (p *pendingToolUses) get(id string) *toolUseState {
+	if p.byID == nil {
+		return nil
+	}
+	return p.byID[id]
+}
+
+func (p *pendingToolUses) add(state *toolUseState) {
+	if p.byID == nil {
+		p.byID = map[string]*toolUseState{}
+	}
+	p.byID[state.ToolUseID] = state
+	p.order = append(p.order, state.ToolUseID)
+	p.lastID = state.ToolUseID
+}
+
+func (p *pendingToolUses) isCompleted(id string) bool {
+	_, ok := p.completed[id]
+	return ok
+}
+
+// rekey moves an entry from a generated id to the real id from upstream,
+// keeping its position in the arrival order.
+func (p *pendingToolUses) rekey(state *toolUseState, newID string) {
+	oldID := state.ToolUseID
+	delete(p.byID, oldID)
+	for i, id := range p.order {
+		if id == oldID {
+			p.order[i] = newID
+			break
+		}
+	}
+	state.ToolUseID = newID
+	state.GeneratedID = false
+	p.byID[newID] = state
+	if p.lastID == oldID {
+		p.lastID = newID
+	}
+}
+
+func (p *pendingToolUses) complete(state *toolUseState) error {
+	toolUse, err := decodeToolUse(state)
+	if err != nil {
+		return err
+	}
+	if p.completed == nil {
+		p.completed = make(map[string]KiroToolUse)
+	}
+	p.completed[state.ToolUseID] = toolUse
+	delete(p.byID, state.ToolUseID)
+	if p.lastID == state.ToolUseID {
+		p.lastID = ""
+		for i := len(p.order) - 1; i >= 0; i-- {
+			if p.byID[p.order[i]] != nil {
+				p.lastID = p.order[i]
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// flushAll validates the complete parallel set before exposing any tool to the
+// caller. A malformed sibling therefore cannot leak an otherwise valid tool.
+func (p *pendingToolUses) flushAll(callback *KiroStreamCallback) error {
+	for _, id := range p.order {
+		if p.isCompleted(id) {
+			continue
+		}
+		if state := p.byID[id]; state != nil {
+			if err := p.complete(state); err != nil {
+				return err
+			}
+		}
+	}
+	if callback != nil && callback.OnToolUse != nil {
+		for _, id := range p.order {
+			if toolUse, ok := p.completed[id]; ok {
+				callback.OnToolUse(toolUse)
+			}
+		}
+	}
+	p.byID = nil
+	p.completed = nil
+	p.order = nil
+	p.lastID = ""
+	return nil
+}
+
+// handleToolUseEvent accumulates a toolUseEvent into pending. Frames for
+// different IDs remain independent; completed tools stay buffered until EOF.
+func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUses) error {
 	toolUseID := firstStringField(event, "toolUseId", "toolUseID", "tool_use_id", "id")
 	name := firstStringField(event, "name", "toolName", "tool_name")
 	isStop := firstBoolField(event, "stop", "isStop", "done")
 
-	if toolUseID != "" && name != "" {
-		if current == nil {
-			current = &toolUseState{ToolUseID: toolUseID, Name: name}
-		} else if current.ToolUseID != toolUseID {
-			if current.GeneratedID && current.Name == name {
-				current.ToolUseID = toolUseID
-				current.GeneratedID = false
-			} else {
-				finishToolUse(current, callback)
-				current = &toolUseState{ToolUseID: toolUseID, Name: name}
+	var state *toolUseState
+	switch {
+	case toolUseID != "":
+		if pending.isCompleted(toolUseID) {
+			return nil
+		}
+		state = pending.get(toolUseID)
+		if state == nil && pending.lastID != "" {
+			if previous := pending.get(pending.lastID); previous != nil && previous.GeneratedID && (name == "" || previous.Name == name) {
+				pending.rekey(previous, toolUseID)
+				state = previous
 			}
 		}
-	} else if name != "" && current == nil {
-		current = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
-	} else if name != "" && current != nil && current.Name != name {
-		finishToolUse(current, callback)
-		current = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
-	}
-
-	if current != nil {
-		if input, ok := event["input"].(string); ok {
-			current.InputBuffer.WriteString(input)
-		} else if inputObj, ok := event["input"].(map[string]interface{}); ok {
-			data, _ := json.Marshal(inputObj)
-			current.InputBuffer.Reset()
-			current.InputBuffer.Write(data)
+		if state == nil {
+			if name == "" {
+				return nil
+			}
+			state = &toolUseState{ToolUseID: toolUseID, Name: name}
+			pending.add(state)
+		} else {
+			if name != "" && state.Name == "" {
+				state.Name = name
+			}
+			pending.lastID = state.ToolUseID
 		}
-	}
-
-	if isStop && current != nil {
-		finishToolUse(current, callback)
+	case pending.lastID != "" && pending.get(pending.lastID) != nil:
+		state = pending.get(pending.lastID)
+		if name != "" && state.Name != name {
+			if err := pending.complete(state); err != nil {
+				return err
+			}
+			state = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
+			pending.add(state)
+		}
+	case name != "":
+		state = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
+		pending.add(state)
+	default:
 		return nil
 	}
 
-	return current
+	if input, ok := event["input"].(string); ok {
+		state.SawInput = true
+		state.InputBuffer.WriteString(input)
+	} else if inputObj, ok := event["input"].(map[string]interface{}); ok {
+		state.SawInput = true
+		data, _ := json.Marshal(inputObj)
+		state.InputBuffer.Reset()
+		state.InputBuffer.Write(data)
+	}
+
+	if isStop {
+		return pending.complete(state)
+	}
+	return nil
 }
 
-func finishToolUse(state *toolUseState, callback *KiroStreamCallback) {
-	if state == nil || state.Name == "" || callback == nil || callback.OnToolUse == nil {
-		return
+func decodeToolUse(state *toolUseState) (KiroToolUse, error) {
+	if state == nil || state.Name == "" {
+		return KiroToolUse{}, fmt.Errorf("%w: missing tool identity", errIncompleteToolUse)
 	}
 	if state.ToolUseID == "" {
 		state.ToolUseID = "toolu_" + uuid.New().String()
 	}
+	if !state.SawInput {
+		return KiroToolUse{}, fmt.Errorf("%w: %s (%s): missing input", errIncompleteToolUse, state.Name, state.ToolUseID)
+	}
 	var input map[string]interface{}
 	if state.InputBuffer.Len() > 0 {
-		json.Unmarshal([]byte(state.InputBuffer.String()), &input)
+		if err := json.Unmarshal([]byte(state.InputBuffer.String()), &input); err != nil {
+			return KiroToolUse{}, fmt.Errorf("%w: %s (%s): %v", errIncompleteToolUse, state.Name, state.ToolUseID, err)
+		}
 	}
 	if input == nil {
 		input = make(map[string]interface{})
 	}
-	callback.OnToolUse(KiroToolUse{
+	return KiroToolUse{
 		ToolUseID: state.ToolUseID,
 		Name:      state.Name,
 		Input:     input,
-	})
+	}, nil
 }
 
 func firstStringField(m map[string]interface{}, keys ...string) string {
@@ -819,58 +1001,4 @@ func firstBoolField(m map[string]interface{}, keys ...string) bool {
 		}
 	}
 	return false
-}
-
-// extractEventType extracts the event type string from AWS Event Stream message headers.
-func extractEventType(headers []byte) string {
-	offset := 0
-	for offset < len(headers) {
-		if offset >= len(headers) {
-			break
-		}
-		nameLen := int(headers[offset])
-		offset++
-		if offset+nameLen > len(headers) {
-			break
-		}
-		name := string(headers[offset : offset+nameLen])
-		offset += nameLen
-		if offset >= len(headers) {
-			break
-		}
-		valueType := headers[offset]
-		offset++
-
-		if valueType == 7 { // String
-			if offset+2 > len(headers) {
-				break
-			}
-			valueLen := int(headers[offset])<<8 | int(headers[offset+1])
-			offset += 2
-			if offset+valueLen > len(headers) {
-				break
-			}
-			value := string(headers[offset : offset+valueLen])
-			offset += valueLen
-			if name == ":event-type" {
-				return value
-			}
-			continue
-		}
-
-		// Skip other value types by their fixed byte widths.
-		skipSizes := map[byte]int{0: 0, 1: 0, 2: 1, 3: 2, 4: 4, 5: 8, 8: 8, 9: 16}
-		if valueType == 6 {
-			if offset+2 > len(headers) {
-				break
-			}
-			l := int(headers[offset])<<8 | int(headers[offset+1])
-			offset += 2 + l
-		} else if skip, ok := skipSizes[valueType]; ok {
-			offset += skip
-		} else {
-			break
-		}
-	}
-	return ""
 }

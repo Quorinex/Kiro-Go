@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
 	"kiro-go/config"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -139,20 +141,116 @@ func TestParseEventStreamNilCallbackFieldsAreNoOp(t *testing.T) {
 	}
 }
 
+func TestParseEventStreamRejectsPreludeCRCMismatch(t *testing.T) {
+	frame := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"})
+	frame[8] ^= 0xff
+
+	err := parseEventStream(bytes.NewReader(frame), &KiroStreamCallback{})
+	if err == nil || !strings.Contains(err.Error(), "prelude CRC") {
+		t.Fatalf("parse error = %v, want prelude CRC mismatch", err)
+	}
+}
+
+func TestParseEventStreamRejectsMessageCRCMismatchBeforeCallbacks(t *testing.T) {
+	frame := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"})
+	frame[len(frame)-1] ^= 0xff
+
+	called := false
+	err := parseEventStream(bytes.NewReader(frame), &KiroStreamCallback{
+		OnText: func(string, bool) { called = true },
+	})
+	if err == nil || !strings.Contains(err.Error(), "message CRC") {
+		t.Fatalf("parse error = %v, want message CRC mismatch", err)
+	}
+	if called {
+		t.Fatal("corrupt frame reached callback")
+	}
+}
+
+func TestParseEventStreamReturnsModeledException(t *testing.T) {
+	frame := awsEventStreamMessage(t, map[string]string{
+		":message-type":   "exception",
+		":exception-type": "throttlingError",
+	}, map[string]interface{}{
+		"message":                "rate limited",
+		"reason":                 "INSUFFICIENT_MODEL_CAPACITY",
+		"retryAfterMilliseconds": 1250,
+	})
+
+	err := parseEventStream(bytes.NewReader(frame), &KiroStreamCallback{})
+	if err == nil {
+		t.Fatal("expected modeled stream exception")
+	}
+	for _, want := range []string{"throttlingError", "rate limited", "INSUFFICIENT_MODEL_CAPACITY", "1250"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("stream exception %q missing %q", err, want)
+		}
+	}
+}
+
+func TestParseEventStreamReturnsUnmodeledError(t *testing.T) {
+	frame := awsEventStreamMessage(t, map[string]string{
+		":message-type":  "error",
+		":error-code":    "UpstreamUnavailable",
+		":error-message": "try later",
+	}, nil)
+
+	err := parseEventStream(bytes.NewReader(frame), &KiroStreamCallback{})
+	if err == nil || !strings.Contains(err.Error(), "UpstreamUnavailable") || !strings.Contains(err.Error(), "try later") {
+		t.Fatalf("parse error = %v, want upstream error details", err)
+	}
+}
+
+func TestParseEventStreamRejectsUnknownEvent(t *testing.T) {
+	frame := awsEventStreamFrame(t, "futureEvent", map[string]interface{}{"value": true})
+
+	err := parseEventStream(bytes.NewReader(frame), &KiroStreamCallback{})
+	if err == nil || !strings.Contains(err.Error(), "futureEvent") {
+		t.Fatalf("parse error = %v, want unsupported event", err)
+	}
+}
+
+func TestParseEventStreamIgnoresKnownOptionalEvents(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "codeReferenceEvent", map[string]interface{}{"references": []interface{}{}}),
+		awsEventStreamFrame(t, "documentCitationEvent", map[string]interface{}{"title": "source"}),
+		awsEventStreamFrame(t, "toolResultEvent", map[string]interface{}{}),
+		awsEventStreamFrame(t, "supplementaryWebLinksEvent", map[string]interface{}{"links": []interface{}{}}),
+		awsEventStreamFrame(t, "messageMetadataEvent", map[string]interface{}{}),
+		awsEventStreamFrame(t, "interactionComponentsEvent", map[string]interface{}{}),
+		awsEventStreamFrame(t, "intentsEvent", map[string]interface{}{}),
+		awsEventStreamFrame(t, "followupPromptEvent", map[string]interface{}{}),
+		awsEventStreamFrame(t, "citationEvent", map[string]interface{}{}),
+		awsEventStreamFrame(t, "codeEvent", map[string]interface{}{}),
+		awsEventStreamFrame(t, "dryRunSucceedEvent", map[string]interface{}{}),
+	}, nil))
+
+	if err := parseEventStream(stream, &KiroStreamCallback{}); err != nil {
+		t.Fatalf("known optional events must remain compatible: %v", err)
+	}
+}
+
 func TestHandleToolUseEventGeneratesMissingToolUseID(t *testing.T) {
 	var toolUses []KiroToolUse
-	current := handleToolUseEvent(map[string]interface{}{
+	pending := &pendingToolUses{}
+	if err := handleToolUseEvent(map[string]interface{}{
 		"name":  "mcpIdaProMcpStatus",
 		"input": `{"server":"ida-pro-mcp"}`,
 		"stop":  true,
-	}, nil, &KiroStreamCallback{
-		OnToolUse: func(toolUse KiroToolUse) {
-			toolUses = append(toolUses, toolUse)
-		},
-	})
+	}, pending); err != nil {
+		t.Fatalf("handle tool event: %v", err)
+	}
+	if len(toolUses) != 0 {
+		t.Fatalf("tool must remain buffered until full-set validation: %+v", toolUses)
+	}
+	if err := pending.flushAll(&KiroStreamCallback{OnToolUse: func(toolUse KiroToolUse) {
+		toolUses = append(toolUses, toolUse)
+	}}); err != nil {
+		t.Fatalf("flush tools: %v", err)
+	}
 
-	if current != nil {
-		t.Fatalf("expected stopped tool use to clear current state")
+	if len(pending.order) != 0 {
+		t.Fatalf("expected stopped tool use to clear pending state, got %d", len(pending.order))
 	}
 	if len(toolUses) != 1 {
 		t.Fatalf("expected one tool use, got %d", len(toolUses))
@@ -172,20 +270,31 @@ func TestHandleToolUseEventReplacesGeneratedIDWhenRealIDArrives(t *testing.T) {
 			toolUses = append(toolUses, toolUse)
 		},
 	}
+	pending := &pendingToolUses{}
 
-	current := handleToolUseEvent(map[string]interface{}{
+	if err := handleToolUseEvent(map[string]interface{}{
 		"name":  "mcpIdaProMcpStatus",
 		"input": `{"server":`,
-	}, nil, callback)
-	current = handleToolUseEvent(map[string]interface{}{
+	}, pending); err != nil {
+		t.Fatalf("first tool fragment: %v", err)
+	}
+	if err := handleToolUseEvent(map[string]interface{}{
 		"toolUseId": "toolu_real",
 		"name":      "mcpIdaProMcpStatus",
 		"input":     `"ida-pro-mcp"}`,
 		"stop":      true,
-	}, current, callback)
+	}, pending); err != nil {
+		t.Fatalf("final tool fragment: %v", err)
+	}
+	if len(toolUses) != 0 {
+		t.Fatalf("tool must remain buffered until full-set validation: %+v", toolUses)
+	}
+	if err := pending.flushAll(callback); err != nil {
+		t.Fatalf("flush tools: %v", err)
+	}
 
-	if current != nil {
-		t.Fatalf("expected stopped tool use to clear current state")
+	if len(pending.order) != 0 {
+		t.Fatalf("expected stopped tool use to clear pending state, got %d", len(pending.order))
 	}
 	if len(toolUses) != 1 {
 		t.Fatalf("expected one completed tool use, got %d", len(toolUses))
@@ -269,6 +378,23 @@ func TestSetPayloadProfileArnForAccountClearsAPIKeyProfile(t *testing.T) {
 	}
 }
 
+func TestEndpointsForAccountPrefersKiroRuntimeForOAuth(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	account := &config.Account{AccessToken: "token", Region: "eu-central-1"}
+	eps := endpointsForAccount(account)
+	if len(eps) == 0 {
+		t.Fatal("expected at least one endpoint")
+	}
+	if eps[0].Name != "Kiro Runtime" || eps[0].Origin != "AI_EDITOR" {
+		t.Fatalf("unexpected primary endpoint: %+v", eps[0])
+	}
+	if resolved, err := resolveKiroEndpoint(eps[0], account, ""); err != nil || resolved.URL != "https://runtime.eu-central-1.kiro.dev/generateAssistantResponse" {
+		t.Fatalf("OAuth Kiro endpoint = %+v, err=%v", resolved, err)
+	}
+}
+
 func TestEndpointsForAccountUsesCLIForAPIKey(t *testing.T) {
 	eps := endpointsForAccount(&config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_x"})
 	if len(eps) != 1 || eps[0].Name != "Kiro CLI" {
@@ -277,8 +403,9 @@ func TestEndpointsForAccountUsesCLIForAPIKey(t *testing.T) {
 	if eps[0].Origin != "KIRO_CLI" {
 		t.Fatalf("origin = %q", eps[0].Origin)
 	}
-	if got := cliRuntimeURL(&config.Account{Region: "eu-central-1"}); got != "https://runtime.eu-central-1.kiro.dev/" {
-		t.Fatalf("cli url = %q", got)
+	resolved, err := resolveKiroEndpoint(eps[0], &config.Account{Region: "eu-central-1", AuthMethod: "api_key", KiroApiKey: "ksk_x"}, "")
+	if err != nil || resolved.URL != "https://runtime.eu-central-1.kiro.dev/" {
+		t.Fatalf("cli endpoint = %+v, err=%v", resolved, err)
 	}
 }
 
@@ -301,7 +428,7 @@ func assertProxyURL(t *testing.T, got *url.URL, want string) {
 	}
 }
 
-func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]interface{}) []byte {
+func awsEventStreamMessage(t *testing.T, fields map[string]string, payload interface{}) []byte {
 	t.Helper()
 
 	payloadBytes, err := json.Marshal(payload)
@@ -309,20 +436,34 @@ func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]inte
 		t.Fatalf("marshal payload: %v", err)
 	}
 
-	headerValue := []byte(eventType)
-	headers := make([]byte, 0, 1+len(":event-type")+1+2+len(headerValue))
-	headers = append(headers, byte(len(":event-type")))
-	headers = append(headers, []byte(":event-type")...)
-	headers = append(headers, byte(7))
-	headers = append(headers, byte(len(headerValue)>>8), byte(len(headerValue)))
-	headers = append(headers, headerValue...)
+	var headers []byte
+	for _, name := range []string{":message-type", ":event-type", ":exception-type", ":error-code", ":error-message"} {
+		value, ok := fields[name]
+		if !ok {
+			continue
+		}
+		headers = append(headers, byte(len(name)))
+		headers = append(headers, name...)
+		headers = append(headers, byte(7))
+		headers = append(headers, byte(len(value)>>8), byte(len(value)))
+		headers = append(headers, value...)
+	}
 
 	totalLength := 12 + len(headers) + len(payloadBytes) + 4
-	frame := make([]byte, 12, totalLength)
+	frame := make([]byte, totalLength)
 	binary.BigEndian.PutUint32(frame[0:4], uint32(totalLength))
 	binary.BigEndian.PutUint32(frame[4:8], uint32(len(headers)))
-	frame = append(frame, headers...)
-	frame = append(frame, payloadBytes...)
-	frame = append(frame, 0, 0, 0, 0)
+	binary.BigEndian.PutUint32(frame[8:12], crc32.ChecksumIEEE(frame[:8]))
+	copy(frame[12:], headers)
+	copy(frame[12+len(headers):], payloadBytes)
+	binary.BigEndian.PutUint32(frame[totalLength-4:], crc32.ChecksumIEEE(frame[:totalLength-4]))
 	return frame
+}
+
+func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]interface{}) []byte {
+	t.Helper()
+	return awsEventStreamMessage(t, map[string]string{
+		":message-type": "event",
+		":event-type":   eventType,
+	}, payload)
 }
