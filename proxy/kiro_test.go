@@ -2,12 +2,15 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"kiro-go/config"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,7 +145,7 @@ func TestParseEventStreamNilCallbackFieldsAreNoOp(t *testing.T) {
 
 func TestHandleToolUseEventGeneratesMissingToolUseID(t *testing.T) {
 	var toolUses []KiroToolUse
-	current := handleToolUseEvent(map[string]interface{}{
+	current, err := handleToolUseEvent(map[string]interface{}{
 		"name":  "mcpIdaProMcpStatus",
 		"input": `{"server":"ida-pro-mcp"}`,
 		"stop":  true,
@@ -151,6 +154,9 @@ func TestHandleToolUseEventGeneratesMissingToolUseID(t *testing.T) {
 			toolUses = append(toolUses, toolUse)
 		},
 	})
+	if err != nil {
+		t.Fatalf("unexpected tool use error: %v", err)
+	}
 
 	if current != nil {
 		t.Fatalf("expected stopped tool use to clear current state")
@@ -174,16 +180,22 @@ func TestHandleToolUseEventReplacesGeneratedIDWhenRealIDArrives(t *testing.T) {
 		},
 	}
 
-	current := handleToolUseEvent(map[string]interface{}{
+	current, err := handleToolUseEvent(map[string]interface{}{
 		"name":  "mcpIdaProMcpStatus",
 		"input": `{"server":`,
 	}, nil, callback)
-	current = handleToolUseEvent(map[string]interface{}{
+	if err != nil {
+		t.Fatalf("unexpected first tool fragment error: %v", err)
+	}
+	current, err = handleToolUseEvent(map[string]interface{}{
 		"toolUseId": "toolu_real",
 		"name":      "mcpIdaProMcpStatus",
 		"input":     `"ida-pro-mcp"}`,
 		"stop":      true,
 	}, current, callback)
+	if err != nil {
+		t.Fatalf("unexpected completed tool error: %v", err)
+	}
 
 	if current != nil {
 		t.Fatalf("expected stopped tool use to clear current state")
@@ -422,5 +434,368 @@ func TestParseEventStreamTrackedThinkingCountsAsEmission(t *testing.T) {
 	}
 	if !emitted {
 		t.Fatalf("thinking text is client-visible, so it must count as emitted")
+	}
+}
+
+func TestParseEventStreamTrackedRejectsIncompleteToolOnCleanEOF(t *testing.T) {
+	frame := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_partial",
+		"name":      "lookup",
+		"input":     `{"query":`,
+	})
+
+	var toolUses, completed int
+	emitted, err := parseEventStreamTracked(bytes.NewReader(frame), &KiroStreamCallback{
+		OnToolUse:  func(KiroToolUse) { toolUses++ },
+		OnComplete: func(int, int) { completed++ },
+	})
+	if !errors.Is(err, errIncompleteKiroToolInput) {
+		t.Fatalf("expected incomplete tool error, got %v", err)
+	}
+	if emitted {
+		t.Fatal("an incomplete tool use that was not delivered must not count as emitted")
+	}
+	if toolUses != 0 || completed != 0 {
+		t.Fatalf("toolUses=%d completed=%d, want no callbacks", toolUses, completed)
+	}
+}
+
+func TestCallKiroAPIRetriesAPIKeyEndpointAfterEmptyStream(t *testing.T) {
+	var calls, completed int
+	var text string
+	var attempts, invocationIDs, hosts []string
+	installKiroStreamTestClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		attempts = append(attempts, req.Header.Get("Amz-Sdk-Request"))
+		invocationIDs = append(invocationIDs, req.Header.Get("Amz-Sdk-Invocation-Id"))
+		hosts = append(hosts, req.URL.Host)
+		if calls == 1 {
+			return kiroStreamTestResponse(bytes.NewReader(nil)), nil
+		}
+		return kiroStreamTestResponse(bytes.NewReader(awsEventStreamFrame(t,
+			"assistantResponseEvent", map[string]interface{}{"content": "recovered"}))), nil
+	}))
+
+	var waits int
+	installKiroRetryWait(t, func(delay time.Duration) {
+		waits++
+		if delay != streamRetryBackoff {
+			t.Errorf("retry delay = %s, want %s", delay, streamRetryBackoff)
+		}
+	})
+
+	err := CallKiroAPI(
+		newKiroRetryTestAPIKeyAccount("eu-west-1"),
+		newKiroRetryTestPayload(),
+		&KiroStreamCallback{
+			OnText:     func(chunk string, _ bool) { text += chunk },
+			OnComplete: func(int, int) { completed++ },
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 || waits != 1 {
+		t.Fatalf("calls=%d waits=%d, want calls=2 waits=1", calls, waits)
+	}
+	if text != "recovered" || completed != 1 {
+		t.Fatalf("text=%q completed=%d, want recovered and one completion", text, completed)
+	}
+	if got := strings.Join(attempts, ","); got != "attempt=1; max=2,attempt=2; max=2" {
+		t.Fatalf("attempt headers = %q", got)
+	}
+	if len(invocationIDs) != 2 || invocationIDs[0] == "" || invocationIDs[0] != invocationIDs[1] {
+		t.Fatalf("same endpoint retries must share an invocation ID: %q", invocationIDs)
+	}
+	if got := strings.Join(hosts, ","); got != "runtime.eu-west-1.kiro.dev,runtime.eu-west-1.kiro.dev" {
+		t.Fatalf("API key retry hosts = %q", got)
+	}
+}
+
+func TestCallKiroAPIRetriesCurrentEndpointBeforeFallback(t *testing.T) {
+	installKiroRetryTestEndpoints(t)
+
+	var trace, attempts, invocationIDs []string
+	var text string
+	var completed int
+	installKiroStreamTestClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		trace = append(trace, req.URL.Host)
+		attempts = append(attempts, req.Header.Get("Amz-Sdk-Request"))
+		invocationIDs = append(invocationIDs, req.Header.Get("Amz-Sdk-Invocation-Id"))
+		if req.URL.Host == "first.example" {
+			return kiroStreamTestResponse(&truncatedReader{
+				data: []byte{0, 0, 1},
+				err:  io.ErrUnexpectedEOF,
+			}), nil
+		}
+		return kiroStreamTestResponse(bytes.NewReader(awsEventStreamFrame(t,
+			"assistantResponseEvent", map[string]interface{}{"content": "fallback"}))), nil
+	}))
+	installKiroRetryWait(t, func(delay time.Duration) {
+		if delay != streamRetryBackoff {
+			t.Errorf("retry delay = %s, want %s", delay, streamRetryBackoff)
+		}
+		trace = append(trace, "wait")
+	})
+
+	err := CallKiroAPI(
+		newKiroRetryTestOAuthAccount(),
+		newKiroRetryTestPayload(),
+		&KiroStreamCallback{
+			OnText:     func(chunk string, _ bool) { text += chunk },
+			OnComplete: func(int, int) { completed++ },
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantTrace := "first.example,wait,first.example,wait,second.example"
+	if got := strings.Join(trace, ","); got != wantTrace {
+		t.Fatalf("request trace = %q, want %q", got, wantTrace)
+	}
+	wantAttempts := "attempt=1; max=2,attempt=2; max=2,attempt=1; max=2"
+	if got := strings.Join(attempts, ","); got != wantAttempts {
+		t.Fatalf("attempt headers = %q, want %q", got, wantAttempts)
+	}
+	if len(invocationIDs) != 3 ||
+		invocationIDs[0] == "" ||
+		invocationIDs[0] != invocationIDs[1] ||
+		invocationIDs[1] == invocationIDs[2] {
+		t.Fatalf("unexpected invocation IDs: %q", invocationIDs)
+	}
+	if text != "fallback" || completed != 1 {
+		t.Fatalf("text=%q completed=%d, want fallback and one completion", text, completed)
+	}
+}
+
+func TestCallKiroAPISingleEndpointStopsAfterFinalAttempt(t *testing.T) {
+	var calls, waits, completed int
+	var attempts []string
+	installKiroStreamTestClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		attempts = append(attempts, req.Header.Get("Amz-Sdk-Request"))
+		return kiroStreamTestResponse(&truncatedReader{
+			data: []byte{0, 0, 1},
+			err:  io.ErrUnexpectedEOF,
+		}), nil
+	}))
+	installKiroRetryWait(t, func(time.Duration) { waits++ })
+
+	err := CallKiroAPI(
+		newKiroRetryTestAPIKeyAccount(""),
+		newKiroRetryTestPayload(),
+		&KiroStreamCallback{OnComplete: func(int, int) { completed++ }},
+	)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected final truncation error, got %v", err)
+	}
+	if calls != maxStreamAttemptsPerEndpoint || waits != maxStreamAttemptsPerEndpoint-1 {
+		t.Fatalf("calls=%d waits=%d, want calls=%d waits=%d",
+			calls, waits, maxStreamAttemptsPerEndpoint, maxStreamAttemptsPerEndpoint-1)
+	}
+	if completed != 0 {
+		t.Fatalf("failed attempts must not complete, got %d callbacks", completed)
+	}
+	wantAttempts := "attempt=1; max=2,attempt=2; max=2"
+	if got := strings.Join(attempts, ","); got != wantAttempts {
+		t.Fatalf("attempt headers = %q, want %q", got, wantAttempts)
+	}
+}
+
+func TestCallKiroAPIRetriesIncompleteToolUse(t *testing.T) {
+	var calls, waits, completed int
+	var toolUses []KiroToolUse
+	installKiroStreamTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			frame := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+				"toolUseId": "toolu_partial",
+				"name":      "lookup",
+				"input":     `{"query":`,
+				"stop":      true,
+			})
+			return kiroStreamTestResponse(bytes.NewReader(frame)), nil
+		}
+		frame := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_complete",
+			"name":      "lookup",
+			"input":     `{"query":"kiro"}`,
+			"stop":      true,
+		})
+		return kiroStreamTestResponse(bytes.NewReader(frame)), nil
+	}))
+	installKiroRetryWait(t, func(time.Duration) { waits++ })
+
+	err := CallKiroAPI(
+		newKiroRetryTestAPIKeyAccount(""),
+		newKiroRetryTestPayload(),
+		&KiroStreamCallback{
+			OnToolUse:  func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+			OnComplete: func(int, int) { completed++ },
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 || waits != 1 {
+		t.Fatalf("calls=%d waits=%d, want calls=2 waits=1", calls, waits)
+	}
+	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_complete" {
+		t.Fatalf("expected only the completed retry tool use, got %#v", toolUses)
+	}
+	if got := toolUses[0].Input["query"]; got != "kiro" {
+		t.Fatalf("tool input = %#v, want kiro", got)
+	}
+	if completed != 1 {
+		t.Fatalf("completion callbacks = %d, want 1", completed)
+	}
+}
+
+func TestCallKiroAPIDoesNotRetryAfterCompletedToolCallback(t *testing.T) {
+	var calls, waits, completed int
+	var toolUses []KiroToolUse
+	installKiroStreamTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		frame := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_complete",
+			"name":      "lookup",
+			"input":     `{"query":"kiro"}`,
+			"stop":      true,
+		})
+		return kiroStreamTestResponse(&truncatedReader{
+			data: append(frame, 0, 0, 1),
+			err:  io.ErrUnexpectedEOF,
+		}), nil
+	}))
+	installKiroRetryWait(t, func(time.Duration) { waits++ })
+
+	err := CallKiroAPI(
+		newKiroRetryTestAPIKeyAccount(""),
+		newKiroRetryTestPayload(),
+		&KiroStreamCallback{
+			OnToolUse:  func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+			OnComplete: func(int, int) { completed++ },
+		},
+	)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected truncation error, got %v", err)
+	}
+	if calls != 1 || waits != 0 {
+		t.Fatalf("calls=%d waits=%d, want no retry or wait after tool callback", calls, waits)
+	}
+	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_complete" {
+		t.Fatalf("expected one completed tool callback, got %#v", toolUses)
+	}
+	if completed != 0 {
+		t.Fatalf("completion callbacks = %d, want 0", completed)
+	}
+}
+
+func TestCallKiroAPIDoesNotRetryTimedOutStream(t *testing.T) {
+	var calls, waits int
+	installKiroStreamTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return kiroStreamTestResponse(&truncatedReader{err: context.DeadlineExceeded}), nil
+	}))
+	installKiroRetryWait(t, func(time.Duration) { waits++ })
+
+	err := CallKiroAPI(
+		newKiroRetryTestAPIKeyAccount(""),
+		newKiroRetryTestPayload(),
+		&KiroStreamCallback{},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+	if calls != 1 || waits != 0 {
+		t.Fatalf("calls=%d waits=%d, want no retry or wait after deadline", calls, waits)
+	}
+}
+
+func TestCallKiroAPIDoesNotFallbackAfterTimedOutTransport(t *testing.T) {
+	installKiroRetryTestEndpoints(t)
+
+	var calls, waits int
+	installKiroStreamTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, context.DeadlineExceeded
+	}))
+	installKiroRetryWait(t, func(time.Duration) { waits++ })
+
+	err := CallKiroAPI(
+		newKiroRetryTestOAuthAccount(),
+		newKiroRetryTestPayload(),
+		&KiroStreamCallback{},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+	if calls != 1 || waits != 0 {
+		t.Fatalf("calls=%d waits=%d, want no fallback or wait after deadline", calls, waits)
+	}
+}
+
+func installKiroRetryTestEndpoints(t *testing.T) {
+	t.Helper()
+	oldResolver := resolveKiroEndpoints
+	resolveKiroEndpoints = func(*config.Account) []kiroEndpoint {
+		return []kiroEndpoint{
+			{URL: "https://first.example/generate", Origin: "AI_EDITOR", Name: "first"},
+			{URL: "https://second.example/generate", Origin: "AI_EDITOR", Name: "second"},
+		}
+	}
+	t.Cleanup(func() { resolveKiroEndpoints = oldResolver })
+}
+
+func installKiroStreamTestClient(t *testing.T, transport http.RoundTripper) {
+	t.Helper()
+	oldClient, hadOldClient := proxyClientCache.Load(kiroRetryTestProxyURL)
+	proxyClientCache.Store(kiroRetryTestProxyURL, &http.Client{Transport: transport})
+	t.Cleanup(func() {
+		if hadOldClient {
+			proxyClientCache.Store(kiroRetryTestProxyURL, oldClient)
+		} else {
+			proxyClientCache.Delete(kiroRetryTestProxyURL)
+		}
+	})
+}
+
+func installKiroRetryWait(t *testing.T, wait func(time.Duration)) {
+	t.Helper()
+	oldWait := streamRetryWait
+	streamRetryWait = wait
+	t.Cleanup(func() { streamRetryWait = oldWait })
+}
+
+func newKiroRetryTestPayload() *KiroPayload {
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "test"
+	return payload
+}
+
+const kiroRetryTestProxyURL = "test://kiro-retry-proxy"
+
+func newKiroRetryTestAPIKeyAccount(region string) *config.Account {
+	return &config.Account{
+		AuthMethod: "api_key",
+		KiroApiKey: "ksk_test",
+		Region:     region,
+		ProxyURL:   kiroRetryTestProxyURL,
+	}
+}
+
+func newKiroRetryTestOAuthAccount() *config.Account {
+	return &config.Account{
+		AccessToken: "access-token",
+		ProfileArn:  "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
+		ProxyURL:    kiroRetryTestProxyURL,
+	}
+}
+
+func kiroStreamTestResponse(body io.Reader) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(body),
+		Header:     make(http.Header),
 	}
 }
