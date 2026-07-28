@@ -171,14 +171,34 @@ func (h *Handler) handleResponsesNonStream(
 			},
 		}
 
-		err := CallKiroAPIContext(ctx, account, payload, callback)
+		measure := func() (int, int, string, bool) {
+			return len(content), len(toolUses), upstreamStopReason, reasoningContent != ""
+		}
+
+		reset := func() {
+			content = ""
+			reasoningContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamStopReason = ""
+		}
+
+		// Fully buffered path: nothing reaches the client until the response is
+		// encoded, so a retry can never duplicate output.
+		err := runKiroWithIntegrityRetry(ctx, account, payload, callback, measure, reset, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailure(account, err)
+			// Integrity failures are upstream hiccups, not account faults.
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailure(account, err)
+			}
 			continue
 		}
 
@@ -500,7 +520,27 @@ func (h *Handler) handleResponsesStream(
 			},
 		}
 
-		err := CallKiroAPIContext(ctx, account, payload, callback)
+		measure := func() (int, int, string, bool) {
+			return fullText.Len(), len(toolUses), upstreamStopReason, reasoningText.Len() > 0
+		}
+
+		// Retries only run while responseStarted is false, i.e. before any
+		// content or function-call item has been sent, so the output_index /
+		// content_index cursors are still untouched. Only the accumulators need
+		// clearing.
+		reset := func() {
+			fullText.Reset()
+			reasoningText.Reset()
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamStopReason = ""
+		}
+
+		err := runKiroWithIntegrityRetry(ctx, account, payload, callback, measure, reset,
+			func() bool { return !responseStarted })
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -508,7 +548,10 @@ func (h *Handler) handleResponsesStream(
 			if !responseStarted {
 				lastErr = err
 				excluded[account.ID] = true
-				h.handleAccountFailure(account, err)
+				// Integrity failures are upstream hiccups, not account faults.
+				if !isStreamIntegrityError(err) {
+					h.handleAccountFailure(account, err)
+				}
 				continue
 			}
 			send("response.failed", map[string]interface{}{

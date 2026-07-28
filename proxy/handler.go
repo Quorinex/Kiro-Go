@@ -1277,14 +1277,44 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			},
 		}
 
-		err := CallKiroAPIContext(ctx, account, payload, callback)
+		measure := func() (int, int, string, bool) {
+			return rawContentBuilder.Len(), len(toolUses), upstreamStopReason, rawThinkingBuilder.Len() > 0
+		}
+
+		// A same-account retry only happens while nothing has been flushed, so
+		// SSE block indices are still at their initial values and need no
+		// rollback. What must be cleared is every accumulator plus the thinking
+		// tag parser state: processClaudeText buffers up to 50 runes before
+		// flushing, so a short truncated attempt can leave a partial tag behind
+		// that would otherwise be prefixed onto the retry's first chunk.
+		reset := func() {
+			rawContentBuilder.Reset()
+			rawThinkingBuilder.Reset()
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamStopReason = ""
+			textBuffer = ""
+			inThinkingBlock = false
+			dropTagThinking = false
+			thinkingSource = thinkingSourceUnknown
+			thinkingStarted = false
+			eventThinkingOpen = false
+		}
+
+		err := runKiroWithIntegrityRetry(ctx, account, payload, callback, measure, reset,
+			func() bool { return !messageStarted })
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailure(account, err)
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailure(account, err)
+			}
 			if !messageStarted {
 				continue
 			}
@@ -1555,14 +1585,33 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 			},
 		}
 
-		err := CallKiroAPIContext(ctx, account, payload, callback)
+		measure := func() (int, int, string, bool) {
+			return len(content), len(toolUses), upstreamStopReason, thinkingContent != ""
+		}
+
+		reset := func() {
+			content = ""
+			thinkingContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamStopReason = ""
+		}
+
+		// Fully buffered: nothing reaches the client until the response is
+		// encoded, so a retry can never duplicate output.
+		err := runKiroWithIntegrityRetry(ctx, account, payload, callback, measure, reset, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailure(account, err)
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailure(account, err)
+			}
 			continue
 		}
 
@@ -2010,14 +2059,44 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 			},
 		}
 
-		err := CallKiroAPIContext(ctx, account, payload, callback)
+		measure := func() (int, int, string, bool) {
+			return rawContentBuilder.Len(), len(toolCalls), upstreamStopReason, rawReasoningBuilder.Len() > 0
+		}
+
+		// Retries only happen before anything is flushed, so chunk indices stay
+		// valid. The thinking tag parser state must be cleared too: processText
+		// holds back up to 50 runes, so a short truncated attempt would
+		// otherwise prepend its leftovers to the retry's first chunk.
+		reset := func() {
+			rawContentBuilder.Reset()
+			rawReasoningBuilder.Reset()
+			toolCalls = nil
+			toolCallIndex = 0
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamStopReason = ""
+			textBuffer = ""
+			inThinkingBlock = false
+			dropTagThinking = false
+			thinkingSource = thinkingSourceUnknown
+			thinkingStarted = false
+			eventThinkingOpen = false
+		}
+
+		err := runKiroWithIntegrityRetry(ctx, account, payload, callback, measure, reset,
+			func() bool { return !responseStarted })
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailure(account, err)
+			// Integrity failures are upstream hiccups, not account faults.
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailure(account, err)
+			}
 			if !responseStarted {
 				continue
 			}
@@ -2133,14 +2212,34 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 			},
 		}
 
-		err := CallKiroAPIContext(ctx, account, payload, callback)
+		measure := func() (int, int, string, bool) {
+			return len(content), len(toolUses), upstreamStopReason, reasoningContent != ""
+		}
+
+		reset := func() {
+			content = ""
+			reasoningContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamStopReason = ""
+		}
+
+		// Fully buffered: nothing reaches the client until the response is
+		// encoded, so a retry can never duplicate output.
+		err := runKiroWithIntegrityRetry(ctx, account, payload, callback, measure, reset, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailure(account, err)
+			// Integrity failures are upstream hiccups, not account faults.
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailure(account, err)
+			}
 			continue
 		}
 

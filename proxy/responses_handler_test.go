@@ -303,6 +303,9 @@ func TestResponsesContinuationKeepsNewInstructions(t *testing.T) {
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "second reply",
 		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "end_turn",
+		}))
 	}))
 	defer server.Close()
 	defer swapKiroEndpointsForTest(t, server)()
@@ -380,6 +383,9 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "responses non-stream OK",
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "end_turn",
 		}))
 	}))
 	defer server.Close()
@@ -466,6 +472,9 @@ func TestResponsesStreamSSE(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "stream chunk",
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "end_turn",
 		}))
 	}))
 	defer server.Close()

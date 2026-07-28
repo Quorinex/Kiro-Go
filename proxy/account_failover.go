@@ -1,12 +1,87 @@
 package proxy
 
 import (
+	"errors"
 	"kiro-go/config"
 	"kiro-go/logger"
 	"strings"
 )
 
 const maxAccountRetryAttempts = 3
+
+// maxSameAccountStreamRetries bounds same-account recovery of a truncated
+// stream. Kiro IDE caps its truncation retry at one (Dt3 = 1 in extension.js),
+// but that budget was set for a single-credential client. This proxy also
+// rotates accounts, and the two recover different failures: a same-account
+// retry helps when the upstream hiccupped, rotation helps when that account's
+// backend is unhealthy. Two is therefore not a copy of the IDE.
+//
+// Cost of the extra attempt is bounded and small. Truncation returns nil from
+// CallKiroAPIContext, so it never reaches the endpoint fallback or
+// maxStreamAttemptsPerEndpoint - those fire only on transport errors. Worst
+// case across maxAccountRetryAttempts accounts is 3*(1+budget) requests: 9 at
+// two retries versus 6 at one.
+//
+// The payoff lands mostly on the three fully buffered paths, whose canRetry is
+// nil: a non-stream client gets a 500 with nothing usable, so one more chance
+// is worth more there than on a stream that has already flushed partial text.
+const maxSameAccountStreamRetries = 2
+
+// errUpstreamTruncatedResponse is a soft failure raised when a transport-clean
+// stream carried content but never a terminal signal. It is retryable on the
+// same account and must not mark the account unhealthy.
+//
+// There is deliberately no empty-response error here. A stream that produced no
+// output at all is already caught one layer down: parseEventStreamTracked
+// returns errEmptyKiroStream when !sawOutput (proxy/kiro.go), and
+// CallKiroAPIContext retries it internally. Since sawOutput is set by exactly
+// the three signals classifyStreamIntegrity measures (content, reasoning,
+// toolUse), an all-zero measurement can never reach this layer with a nil
+// error.
+var errUpstreamTruncatedResponse = errors.New("upstream truncated response without stop reason")
+
+// classifyStreamIntegrity decides whether an upstream stream that returned no
+// transport error is actually complete. parseEventStream reports success on a
+// clean EOF, so a stream that died mid-answer is otherwise indistinguishable
+// from a finished one.
+//
+// Complete when a stopReason arrived, or when a tool call was delivered. Both
+// match Kiro IDE, whose empty and truncation predicates each require
+// toolCallCount === 0.
+//
+// Truncated when content arrived without any terminal signal.
+//
+// Reasoning-only with no answer is STRICTER THAN THE IDE, deliberately. The
+// IDE's truncation predicate ends in (contentChars > 0 || !reasoningSeen), so
+// reasoning with no answer and no stopReason is treated as complete there and
+// is never retried. That is the exact shape of the production symptom this
+// proxy exists to fix: thinking streams in full, then the turn dies before the
+// answer or the tool call. Handing a client reasoning with no answer as a
+// successful turn is what made the failure invisible, so it is classified as
+// truncated here.
+func classifyStreamIntegrity(contentChars, toolCallCount int, stopReason string, sawReasoning bool) error {
+	if strings.TrimSpace(stopReason) != "" {
+		return nil
+	}
+	if toolCallCount > 0 {
+		return nil
+	}
+	if contentChars > 0 || sawReasoning {
+		return errUpstreamTruncatedResponse
+	}
+	// No content, no reasoning, no tools: unreachable through the wired paths
+	// (errEmptyKiroStream fires first, see above). Treated as truncated rather
+	// than complete so a future caller that bypasses that guard still cannot
+	// ship an empty turn as a success.
+	return errUpstreamTruncatedResponse
+}
+
+// isStreamIntegrityError reports whether err is a soft integrity failure.
+// Callers may rotate accounts on these, but must not run them through
+// handleAccountFailure: an upstream blip should not mark an account unhealthy.
+func isStreamIntegrityError(err error) bool {
+	return errors.Is(err, errUpstreamTruncatedResponse)
+}
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
