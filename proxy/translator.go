@@ -275,31 +275,30 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		history = append(priming, history...)
 	}
 
-	// Decide whether the current tool results form a valid "active" tool turn:
-	// the last history assistant must carry matching structured toolUses. If not
-	// (orphaned tool results, e.g. after context compaction), flatten them into
-	// the current message text so the upstream does not reject the request.
+	// Keep structured tool results only while they answer the final assistant
+	// tool turn. Older tool cycles are flattened by sanitizeKiroHistory because
+	// Kiro rejects structured tool calls and results in history.
 	currentToolResultIDs := collectToolResultIDs(currentToolResults)
 	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
 
-	// Flatten structured tool calls/results that live in history; upstream only
-	// accepts a single active tool turn (last assistant toolUses ⟺ current toolResults).
 	if keepCurrentToolResults {
 		history = sanitizeKiroHistory(history, currentToolResultIDs)
 	} else {
 		history = sanitizeKiroHistory(history, nil)
 	}
 
-	// 构建最终内容
-	finalContent := ""
-	if currentContent != "" {
-		finalContent = currentContent
-	} else if len(currentImages) > 0 {
-		finalContent = normalizeUserContent("", true)
-	} else if len(currentToolResults) > 0 {
-		finalContent = buildToolResultsContinuation(currentToolResults)
-	} else {
-		finalContent = minimalFallbackUserContent
+	// 构建最终内容。工具结果既保留结构化配对，也携带可读文本；
+	// 同一消息带有图片时，图片占位文本不能覆盖工具结果内容。
+	finalContent := currentContent
+	if len(currentToolResults) > 0 {
+		finalContent = joinHistoryText(finalContent, buildToolResultsContinuation(currentToolResults))
+	}
+	if finalContent == "" {
+		if len(currentImages) > 0 {
+			finalContent = normalizeUserContent("", true)
+		} else {
+			finalContent = minimalFallbackUserContent
+		}
 	}
 
 	// 转换工具
@@ -995,7 +994,28 @@ func shortenToolName(name string) string {
 
 // ==================== Kiro -> Claude 转换 ====================
 
-func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
+func mapClaudeStopReason(reason string, toolCount int) string {
+	if toolCount > 0 {
+		return "tool_use"
+	}
+
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_tokens", "max_output_tokens", "length":
+		return "max_tokens"
+	case "model_context_window_exceeded", "context_window_exceeded":
+		return "model_context_window_exceeded"
+	case "refusal", "content_filter", "content_filtered", "guardrail_intervened":
+		return "refusal"
+	case "stop_sequence":
+		return "stop_sequence"
+	case "pause_turn":
+		return "pause_turn"
+	default:
+		return "end_turn"
+	}
+}
+
+func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model, upstreamStopReason string) *ClaudeResponse {
 	blocks := make([]ClaudeContentBlock, 0)
 
 	if thinkingContent != "" || includeEmptyThinkingBlock {
@@ -1021,10 +1041,7 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 		})
 	}
 
-	stopReason := "end_turn"
-	if len(toolUses) > 0 {
-		stopReason = "tool_use"
-	}
+	stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
 
 	return &ClaudeResponse{
 		ID:         "msg_" + uuid.New().String(),
@@ -1037,6 +1054,21 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 			InputTokens:  inputTokens,
 			OutputTokens: outputTokens,
 		},
+	}
+}
+
+func mapOpenAIFinishReason(reason string, toolCount int) string {
+	if toolCount > 0 {
+		return "tool_calls"
+	}
+
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_tokens", "max_output_tokens", "length", "model_context_window_exceeded", "context_window_exceeded":
+		return "length"
+	case "refusal", "content_filter", "content_filtered", "guardrail_intervened":
+		return "content_filter"
+	default:
+		return "stop"
 	}
 }
 
@@ -1285,8 +1317,9 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		history = append(priming, history...)
 	}
 
-	// Decide whether current tool results form a valid active tool turn; if not,
-	// flatten them into the current message text (see ClaudeToKiro for rationale).
+	// Keep structured tool results only while they answer the final assistant
+	// tool turn. Older tool cycles are flattened by sanitizeKiroHistory because
+	// Kiro rejects structured tool calls and results in history.
 	currentToolResultIDs := collectToolResultIDs(currentToolResults)
 	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
 
@@ -1295,14 +1328,15 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	} else {
 		history = sanitizeKiroHistory(history, nil)
 	}
-
-	// 构建最终内容
+	// 构建最终内容。工具结果既保留结构化配对，也携带可读文本；
+	// 同一消息带有图片时，图片占位文本不能覆盖工具结果内容。
 	finalContent := currentContent
+	if len(currentToolResults) > 0 {
+		finalContent = joinHistoryText(finalContent, buildToolResultsContinuation(currentToolResults))
+	}
 	if finalContent == "" {
 		if len(currentImages) > 0 {
 			finalContent = normalizeUserContent("", true)
-		} else if len(currentToolResults) > 0 {
-			finalContent = buildToolResultsContinuation(currentToolResults)
 		} else {
 			finalContent = minimalFallbackUserContent
 		}
@@ -1453,17 +1487,22 @@ func collectToolResultIDs(toolResults []KiroToolResult) map[string]bool {
 
 // currentToolResultsMatchLastAssistant reports whether the current message's
 // tool results answer the structured tool calls of the final history assistant
-// message. Only in that case may the current toolResults stay structured.
+// message.
 func currentToolResultsMatchLastAssistant(history []KiroHistoryMessage, currentToolResultIDs map[string]bool) bool {
-	if len(currentToolResultIDs) == 0 || len(history) == 0 {
+	if len(history) == 0 {
 		return false
 	}
 	last := history[len(history)-1]
-	if last.AssistantResponseMessage == nil || len(last.AssistantResponseMessage.ToolUses) == 0 {
+	return last.AssistantResponseMessage != nil &&
+		toolResultsAnswerToolUses(last.AssistantResponseMessage.ToolUses, currentToolResultIDs)
+}
+
+func toolResultsAnswerToolUses(toolUses []KiroToolUse, toolResultIDs map[string]bool) bool {
+	if len(toolUses) == 0 || len(toolResultIDs) == 0 {
 		return false
 	}
-	for _, tu := range last.AssistantResponseMessage.ToolUses {
-		if !currentToolResultIDs[tu.ToolUseID] {
+	for _, tu := range toolUses {
+		if !toolResultIDs[tu.ToolUseID] {
 			return false
 		}
 	}
@@ -2157,8 +2196,8 @@ func extractThinkingFromContent(content string) (string, string) {
 }
 
 // KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
-func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
-	finishReason := "stop"
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat, upstreamStopReason string) map[string]interface{} {
+	finishReason := mapOpenAIFinishReason(upstreamStopReason, len(toolUses))
 
 	message := map[string]interface{}{
 		"role": "assistant",
@@ -2179,7 +2218,6 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			}
 		}
 		message["tool_calls"] = toolCalls
-		finishReason = "tool_calls"
 	} else {
 		// 根据配置格式化 thinking 输出
 		if reasoningContent != "" {

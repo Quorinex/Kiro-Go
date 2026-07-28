@@ -105,6 +105,75 @@ func TestResponsesStoreAndLoad(t *testing.T) {
 	}
 }
 
+func TestResponsesNonStreamPreservesUpstreamIncompleteStatus(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "partial answer",
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "MAX_TOKENS",
+		}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"input":"hello"
+	}`))
+	rec := httptest.NewRecorder()
+	h.handleOpenAIResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response ResponsesObject
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
+	}
+	if response.Status != "incomplete" {
+		t.Fatalf("status=%q, want incomplete", response.Status)
+	}
+	if response.IncompleteDetails == nil || response.IncompleteDetails.Reason != "max_output_tokens" {
+		t.Fatalf("incomplete_details=%#v, want max_output_tokens", response.IncompleteDetails)
+	}
+}
+
+func TestMapResponsesCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reason string
+		status string
+		detail string
+	}{
+		{name: "max tokens", reason: "MAX_TOKENS", status: "incomplete", detail: "max_output_tokens"},
+		{name: "max output tokens alias", reason: "max_output_tokens", status: "incomplete", detail: "max_output_tokens"},
+		{name: "length alias", reason: "length", status: "incomplete", detail: "max_output_tokens"},
+		{name: "context limit", reason: "CONTEXT_WINDOW_EXCEEDED", status: "incomplete", detail: "max_output_tokens"},
+		{name: "model context limit alias", reason: "model_context_window_exceeded", status: "incomplete", detail: "max_output_tokens"},
+		{name: "content filter", reason: "CONTENT_FILTERED", status: "incomplete", detail: "content_filter"},
+		{name: "refusal alias", reason: "refusal", status: "incomplete", detail: "content_filter"},
+		{name: "guardrail alias", reason: "guardrail_intervened", status: "incomplete", detail: "content_filter"},
+		// END_TURN is the literal the Kiro IDE bundle compares against.
+		{name: "end turn", reason: "END_TURN", status: "completed"},
+		// Absent metadataEvent: reported as completed here on purpose. Detecting
+		// that as truncation is the stream integrity layer's job, not this map's.
+		{name: "empty reports completed", reason: "", status: "completed"},
+		{name: "normal completion", reason: "COMPLETE", status: "completed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, detail := mapResponsesCompletion(tc.reason)
+			if status != tc.status || detail != tc.detail {
+				t.Fatalf("mapResponsesCompletion(%q) = (%q, %q), want (%q, %q)", tc.reason, status, detail, tc.status, tc.detail)
+			}
+		})
+	}
+}
+
 func TestResponsesPreviousResponseIDExpands(t *testing.T) {
 	prev := &ResponsesObject{
 		ID:          "resp_prev",
@@ -353,6 +422,39 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	}
 	if loaded.ID != resp.ID {
 		t.Fatalf("stored response id mismatch")
+	}
+}
+
+func TestResponsesStreamPreservesUpstreamIncompleteStatus(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "partial answer",
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
+			"stopReason": "MAX_TOKENS",
+		}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"input":"hello",
+		"stream":true,
+		"store":false
+	}`))
+	rec := httptest.NewRecorder()
+	h.handleOpenAIResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"incomplete"`) || !strings.Contains(rec.Body.String(), `"reason":"max_output_tokens"`) {
+		t.Fatalf("expected incomplete response.completed event, got %s", rec.Body.String())
 	}
 }
 

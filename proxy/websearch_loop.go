@@ -10,6 +10,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"kiro-go/config"
@@ -33,7 +34,7 @@ type webSearchRoundOutcome struct {
 }
 
 // runWebSearchLoop is the mixed-tools entry point.
-func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, req *ClaudeRequest, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	// Working copy of messages we will mutate as we feed search results back.
 	working := *req
 	working.Messages = append([]ClaudeMessage(nil), req.Messages...)
@@ -50,7 +51,10 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 	// Allow one extra iteration so a terminal flush can run after the last
 	// search-only round (same pattern as 0..=MAX_WEB_SEARCH_ROUNDS in kiro-rs).
 	for roundIdx := 0; roundIdx <= maxUses; roundIdx++ {
-		round, account, err := h.callUpstreamForWebSearch(&working, thinking, fallbackInput)
+		if ctx.Err() != nil {
+			return
+		}
+		round, account, err := h.callUpstreamForWebSearch(ctx, &working, thinking, fallbackInput)
 		if err != nil {
 			logger.Warnf("[WebSearchLoop] upstream round %d failed: %v", roundIdx, err)
 			accountID := ""
@@ -141,7 +145,7 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 }
 
 // callUpstreamForWebSearch converts the Claude request and buffers one Kiro stream.
-func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, estimatedInputTokens int) (*webSearchRoundOutcome, *config.Account, error) {
+func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeRequest, thinking bool, estimatedInputTokens int) (*webSearchRoundOutcome, *config.Account, error) {
 	payload := ClaudeToKiro(req, thinking)
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -195,8 +199,11 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := CallKiroAPIContext(ctx, account, payload, callback)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, account, ctx.Err()
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"kiro-go/config"
 	"kiro-go/logger"
@@ -28,18 +29,17 @@ const (
 	// streamRetryBackoff spaces out a retry of a stream that died before
 	// delivering any output callback. Upstream drops cluster in time, so an
 	// immediate retry tends to hit the same blip.
-	streamRetryBackoff = 700 * time.Millisecond
-
-	// maxStreamAttemptsPerEndpoint includes the initial request. One retry
-	// covers the observed transient drops without multiplying the existing
-	// endpoint and account fallback budgets more than necessary.
+	streamRetryBackoff           = 700 * time.Millisecond
 	maxStreamAttemptsPerEndpoint = 2
+	maxEventStreamMessageSize    = 16 * 1024 * 1024
 )
 
 var (
 	errEmptyKiroStream         = errors.New("upstream stream ended before any output")
 	errIncompleteKiroToolInput = errors.New("upstream stream ended with incomplete tool input")
-	streamRetryWait            = time.Sleep
+	errInvalidKiroEventStream  = errors.New("invalid upstream event stream")
+	errKiroEventStreamUpstream = errors.New("upstream event stream error")
+	streamRetryWait            = waitForStreamRetry
 	resolveKiroEndpoints       = endpointsForAccount
 )
 
@@ -270,6 +270,7 @@ type KiroStreamCallback struct {
 	OnError        func(err error)
 	OnCredits      func(credits float64)
 	OnContextUsage func(percentage float64)
+	OnStopReason   func(reason string)
 }
 
 // ==================== API Call ====================
@@ -348,6 +349,14 @@ func getSortedEndpoints(preferred string) []kiroEndpoint {
 
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	return CallKiroAPIContext(context.Background(), account, payload, callback)
+}
+
+// CallKiroAPIContext calls Kiro while respecting cancellation from the client request.
+func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	originalProfileArn := ""
 	if payload != nil {
 		originalProfileArn = payload.ProfileArn
@@ -403,6 +412,9 @@ endpointLoop:
 		// Target the profile's data-plane region; endpoint URLs are declared for us-east-1.
 		// API Key accounts use the CLI runtime host instead of IDE/Q hosts.
 		epURL := regionalizeURLForProfile(ep.URL, account, payload.ProfileArn)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if isAPIKey {
 			epURL = cliRuntimeURL(account)
 		}
@@ -416,13 +428,15 @@ endpointLoop:
 		invocationID := uuid.New().String()
 
 		for streamAttempt := 1; streamAttempt <= maxStreamAttemptsPerEndpoint; streamAttempt++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Requests and bodies cannot be reused after an HTTP attempt.
-			req, err := http.NewRequest("POST", epURL, bytes.NewReader(reqBody))
+			req, err := http.NewRequestWithContext(ctx, "POST", epURL, bytes.NewReader(reqBody))
 			if err != nil {
 				lastErr = err
 				continue endpointLoop
 			}
-
 			if isAPIKey {
 				req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 			} else {
@@ -481,6 +495,9 @@ endpointLoop:
 			}
 			lastErr = err
 			// "Emitted" deliberately means that an output callback ran. This
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			// conservative boundary also protects buffered/non-stream callers:
 			// retrying after their callback mutated state would concatenate two
 			// attempts even if no network bytes were flushed yet.
@@ -499,7 +516,9 @@ endpointLoop:
 
 			logger.Warnf("[KiroAPI] Endpoint %s stream failed before any output (attempt %d/%d): %v",
 				ep.Name, streamAttempt, maxStreamAttemptsPerEndpoint, err)
-			streamRetryWait(streamRetryBackoff)
+			if err := streamRetryWait(ctx, streamRetryBackoff); err != nil {
+				return err
+			}
 			if !hasSameEndpointRetry {
 				continue endpointLoop
 			}
@@ -527,6 +546,17 @@ func accountEmailForLog(account *config.Account) string {
 	return account.Email
 }
 
+func waitForStreamRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // ==================== Event Stream Parsing ====================
 
 // parseEventStream decodes an AWS binary Event Stream response body.
@@ -548,7 +578,7 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 	var totalCredits float64
 	var contextUsagePercentages []float64
 	var sawOutput bool
-	var currentToolUse *toolUseState
+	pending := &pendingToolUses{}
 	trackedCallback := *callback
 	originalOnToolUse := trackedCallback.OnToolUse
 	trackedCallback.OnToolUse = func(toolUse KiroToolUse) {
@@ -561,7 +591,7 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 	callback = &trackedCallback
 
 	for {
-		// Prelude: 12 bytes (total_len + headers_len + crc)
+		// Prelude: total length, headers length, and prelude CRC.
 		prelude := make([]byte, 12)
 		_, readErr := io.ReadFull(body, prelude)
 		if readErr == io.EOF {
@@ -571,54 +601,50 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 			return emitted, readErr
 		}
 
-		totalLength := int(prelude[0])<<24 | int(prelude[1])<<16 | int(prelude[2])<<8 | int(prelude[3])
-		headersLength := int(prelude[4])<<24 | int(prelude[5])<<16 | int(prelude[6])<<8 | int(prelude[7])
-
-		if totalLength < 16 {
-			continue
+		totalLength := int(eventStreamUint32(prelude[0:4]))
+		headersLength := int(eventStreamUint32(prelude[4:8]))
+		if totalLength < 16 || totalLength > maxEventStreamMessageSize {
+			return emitted, fmt.Errorf("%w: invalid frame length %d", errInvalidKiroEventStream, totalLength)
+		}
+		if headersLength > totalLength-16 {
+			return emitted, fmt.Errorf("%w: invalid headers length %d", errInvalidKiroEventStream, headersLength)
+		}
+		if got, want := eventStreamUint32(prelude[8:12]), crc32.ChecksumIEEE(prelude[:8]); got != want {
+			return emitted, fmt.Errorf("%w: prelude CRC mismatch", errInvalidKiroEventStream)
 		}
 
-		// Read the remaining message bytes.
-		remaining := totalLength - 12
-		msgBuf := make([]byte, remaining)
-		_, err = io.ReadFull(body, msgBuf)
-		if err != nil {
+		remaining := totalLength - len(prelude)
+		message := make([]byte, remaining)
+		if _, err := io.ReadFull(body, message); err != nil {
 			return emitted, err
 		}
-
-		if headersLength > len(msgBuf)-4 {
-			continue
+		if got, want := eventStreamUint32(message[len(message)-4:]), eventStreamChecksum(prelude, message[:len(message)-4]); got != want {
+			return emitted, fmt.Errorf("%w: message CRC mismatch", errInvalidKiroEventStream)
 		}
 
-		eventType := extractEventType(msgBuf[0:headersLength])
-		payloadBytes := msgBuf[headersLength : len(msgBuf)-4]
-		if len(payloadBytes) == 0 {
-			continue
+		headers, headerErr := parseEventStreamHeaders(message[:headersLength])
+		if headerErr != nil {
+			return emitted, fmt.Errorf("%w: %v", errInvalidKiroEventStream, headerErr)
+		}
+		payloadBytes := message[headersLength : len(message)-4]
+		event := make(map[string]interface{})
+		if len(payloadBytes) > 0 {
+			if err := json.Unmarshal(payloadBytes, &event); err != nil {
+				return emitted, fmt.Errorf("%w: decode payload: %v", errInvalidKiroEventStream, err)
+			}
 		}
 
-		var event map[string]interface{}
-		if err := json.Unmarshal(payloadBytes, &event); err != nil {
-			continue
+		if messageType := headers[":message-type"]; messageType == "error" || messageType == "exception" {
+			detail, _ := event["message"].(string)
+			if detail == "" {
+				detail = messageType
+			}
+			return emitted, fmt.Errorf("%w: %s", errKiroEventStreamUpstream, detail)
 		}
 
 		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
 
-		// Dispatch by event type.
-		switch eventType {
-		// Both text streams are passed through verbatim. Kiro sends
-		// assistantResponseEvent and reasoningContentEvent as pure incremental deltas
-		// (verified against real upstream traffic), never as cumulative snapshots, and
-		// never replays a chunk: ordering and at-most-once delivery are already
-		// guaranteed by TCP, and a dropped stream is retried as a whole new request
-		// rather than resumed.
-		//
-		// Do NOT reintroduce content-based de-duplication here. At the string level a
-		// replayed chunk is indistinguishable from text that simply repeats itself, and
-		// the wire protocol carries no sequence number or message id to tell them apart
-		// (the AWS event-stream base spec defines none), so such a heuristic can only
-		// guess -- and when it guesses wrong it silently eats real output. The previous
-		// implementation turned "6666666666" into "666", "abababab" into "abab" and
-		// "1833" into "183", on both streams.
+		switch headers[":event-type"] {
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
 				sawOutput = true
@@ -636,11 +662,9 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 				}
 			}
 		case "toolUseEvent":
-			nextToolUse, toolErr := handleToolUseEvent(event, currentToolUse, callback)
-			if toolErr != nil {
+			if toolErr := handleToolUseEvent(event, pending, callback); toolErr != nil {
 				return emitted, toolErr
 			}
-			currentToolUse = nextToolUse
 		case "meteringEvent":
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
@@ -649,29 +673,31 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 			if pct, ok := event["contextUsagePercentage"].(float64); ok {
 				contextUsagePercentages = append(contextUsagePercentages, pct)
 			}
+		case "metadataEvent":
+			// stopReason rides inside metadataEvent on the wire; there is no
+			// standalone stop reason event type. Its absence after content is
+			// how callers detect a truncated stream.
+			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" && callback.OnStopReason != nil {
+				callback.OnStopReason(reason)
+			}
 		}
 	}
 
-	if currentToolUse != nil {
-		if err := finishToolUse(currentToolUse, callback); err != nil {
-			return emitted, err
-		}
+	// Flush tools that never received a stop frame, in arrival order.
+	if err := pending.flushAll(callback); err != nil {
+		return emitted, err
 	}
-
 	if !sawOutput {
 		return emitted, errEmptyKiroStream
 	}
-
 	if callback.OnCredits != nil && totalCredits > 0 {
 		callback.OnCredits(totalCredits)
 	}
-
 	if callback.OnContextUsage != nil {
 		for _, percentage := range contextUsagePercentages {
 			callback.OnContextUsage(percentage)
 		}
 	}
-
 	if callback.OnComplete != nil {
 		callback.OnComplete(inputTokens, outputTokens)
 	}
@@ -841,52 +867,156 @@ type toolUseState struct {
 	GeneratedID bool
 }
 
-func handleToolUseEvent(event map[string]interface{}, current *toolUseState, callback *KiroStreamCallback) (*toolUseState, error) {
+// pendingToolUses tracks the tool calls in flight for one stream. Entries are
+// keyed by toolUseId so interleaved parallel frames accumulate independently,
+// and `order` preserves arrival sequence: tool call order is semantic for
+// clients, so a bare map range (randomised in Go) must never decide it.
+type pendingToolUses struct {
+	byID   map[string]*toolUseState
+	order  []string
+	lastID string
+}
+
+func (p *pendingToolUses) get(id string) *toolUseState {
+	if p.byID == nil {
+		return nil
+	}
+	return p.byID[id]
+}
+
+func (p *pendingToolUses) add(state *toolUseState) {
+	if p.byID == nil {
+		p.byID = make(map[string]*toolUseState)
+	}
+	p.byID[state.ToolUseID] = state
+	p.order = append(p.order, state.ToolUseID)
+	p.lastID = state.ToolUseID
+}
+
+// rekey moves an entry from a locally generated id to the real id from
+// upstream, keeping its position in the arrival order.
+func (p *pendingToolUses) rekey(state *toolUseState, newID string) {
+	oldID := state.ToolUseID
+	delete(p.byID, oldID)
+	for i, id := range p.order {
+		if id == oldID {
+			p.order[i] = newID
+			break
+		}
+	}
+	state.ToolUseID = newID
+	state.GeneratedID = false
+	p.byID[newID] = state
+	if p.lastID == oldID {
+		p.lastID = newID
+	}
+}
+
+func (p *pendingToolUses) remove(id string) {
+	delete(p.byID, id)
+	for i, existing := range p.order {
+		if existing == id {
+			p.order = append(p.order[:i], p.order[i+1:]...)
+			break
+		}
+	}
+	if p.lastID == id {
+		p.lastID = ""
+	}
+}
+
+// flushAll emits every tool still open when the stream ended, in arrival order.
+// It stops at the first incomplete tool so the caller can retry the request
+// rather than deliver a call with missing arguments.
+func (p *pendingToolUses) flushAll(callback *KiroStreamCallback) error {
+	order := p.order
+	byID := p.byID
+	p.byID = nil
+	p.order = nil
+	p.lastID = ""
+	for _, id := range order {
+		state := byID[id]
+		if state == nil {
+			continue
+		}
+		if err := finishToolUse(state, callback); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// handleToolUseEvent accumulates one toolUseEvent frame into pending.
+// Frames for different toolUseIds stay open concurrently so interleaved
+// parallel tool calls reassemble correctly; a fragment that omits toolUseId
+// continues the most recently seen tool.
+func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUses, callback *KiroStreamCallback) error {
 	toolUseID := firstStringField(event, "toolUseId", "toolUseID", "tool_use_id", "id")
 	name := firstStringField(event, "name", "toolName", "tool_name")
 	isStop := firstBoolField(event, "stop", "isStop", "done")
 
-	if toolUseID != "" && name != "" {
-		if current == nil {
-			current = &toolUseState{ToolUseID: toolUseID, Name: name}
-		} else if current.ToolUseID != toolUseID {
-			if current.GeneratedID && current.Name == name {
-				current.ToolUseID = toolUseID
-				current.GeneratedID = false
-			} else {
-				if err := finishToolUse(current, callback); err != nil {
-					return current, err
-				}
-				current = &toolUseState{ToolUseID: toolUseID, Name: name}
+	var state *toolUseState
+
+	switch {
+	case toolUseID != "":
+		state = pending.get(toolUseID)
+		if state == nil && pending.lastID != "" {
+			// Upstream may send the opening fragment without an id and only
+			// reveal the real one later. Adopt the synthetic entry we opened
+			// for it instead of splitting one logical call across two entries
+			// (which also splits its argument JSON, so neither half parses).
+			if prev := pending.get(pending.lastID); prev != nil && prev.GeneratedID && (name == "" || prev.Name == name) {
+				pending.rekey(prev, toolUseID)
+				state = prev
 			}
 		}
-	} else if name != "" && current == nil {
-		current = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
-	} else if name != "" && current != nil && current.Name != name {
-		if err := finishToolUse(current, callback); err != nil {
-			return current, err
+		if state == nil {
+			if name == "" {
+				// Orphan fragment: an id never seen before and no name to open with.
+				return nil
+			}
+			state = &toolUseState{ToolUseID: toolUseID, Name: name}
+			pending.add(state)
+		} else {
+			if name != "" && state.Name == "" {
+				state.Name = name
+			}
+			pending.lastID = state.ToolUseID
 		}
-		current = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
+	case pending.lastID != "" && pending.get(pending.lastID) != nil:
+		state = pending.get(pending.lastID)
+		if name != "" && state.Name != name {
+			// Name changed with no id: close the tool in flight rather than
+			// appending foreign arguments to it, then open a new one.
+			if err := finishToolUse(state, callback); err != nil {
+				return err
+			}
+			pending.remove(state.ToolUseID)
+			state = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
+			pending.add(state)
+		}
+	case name != "":
+		state = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
+		pending.add(state)
+	default:
+		return nil
 	}
 
-	if current != nil {
-		if input, ok := event["input"].(string); ok {
-			current.InputBuffer.WriteString(input)
-		} else if inputObj, ok := event["input"].(map[string]interface{}); ok {
-			data, _ := json.Marshal(inputObj)
-			current.InputBuffer.Reset()
-			current.InputBuffer.Write(data)
-		}
+	if input, ok := event["input"].(string); ok {
+		state.InputBuffer.WriteString(input)
+	} else if inputObj, ok := event["input"].(map[string]interface{}); ok {
+		data, _ := json.Marshal(inputObj)
+		state.InputBuffer.Reset()
+		state.InputBuffer.Write(data)
 	}
 
-	if isStop && current != nil {
-		if err := finishToolUse(current, callback); err != nil {
-			return current, err
+	if isStop {
+		if err := finishToolUse(state, callback); err != nil {
+			return err
 		}
-		return nil, nil
+		pending.remove(state.ToolUseID)
 	}
-
-	return current, nil
+	return nil
 }
 
 func finishToolUse(state *toolUseState, callback *KiroStreamCallback) error {
@@ -934,56 +1064,58 @@ func firstBoolField(m map[string]interface{}, keys ...string) bool {
 	return false
 }
 
-// extractEventType extracts the event type string from AWS Event Stream message headers.
-func extractEventType(headers []byte) string {
-	offset := 0
-	for offset < len(headers) {
-		if offset >= len(headers) {
-			break
-		}
-		nameLen := int(headers[offset])
+func eventStreamUint32(data []byte) uint32 {
+	return uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
+}
+
+func eventStreamChecksum(prelude, message []byte) uint32 {
+	checksum := crc32.Update(0, crc32.IEEETable, prelude)
+	return crc32.Update(checksum, crc32.IEEETable, message)
+}
+
+func parseEventStreamHeaders(data []byte) (map[string]string, error) {
+	headers := make(map[string]string)
+	for offset := 0; offset < len(data); {
+		nameLength := int(data[offset])
 		offset++
-		if offset+nameLen > len(headers) {
-			break
+		if nameLength == 0 || offset+nameLength >= len(data) {
+			return nil, errors.New("malformed event header name")
 		}
-		name := string(headers[offset : offset+nameLen])
-		offset += nameLen
-		if offset >= len(headers) {
-			break
-		}
-		valueType := headers[offset]
+		name := string(data[offset : offset+nameLength])
+		offset += nameLength
+		valueType := data[offset]
 		offset++
 
-		if valueType == 7 { // String
-			if offset+2 > len(headers) {
-				break
-			}
-			valueLen := int(headers[offset])<<8 | int(headers[offset+1])
-			offset += 2
-			if offset+valueLen > len(headers) {
-				break
-			}
-			value := string(headers[offset : offset+valueLen])
-			offset += valueLen
-			if name == ":event-type" {
-				return value
-			}
+		valueLength := 0
+		switch valueType {
+		case 0, 1:
 			continue
-		}
-
-		// Skip other value types by their fixed byte widths.
-		skipSizes := map[byte]int{0: 0, 1: 0, 2: 1, 3: 2, 4: 4, 5: 8, 8: 8, 9: 16}
-		if valueType == 6 {
-			if offset+2 > len(headers) {
-				break
+		case 2:
+			valueLength = 1
+		case 3:
+			valueLength = 2
+		case 4:
+			valueLength = 4
+		case 5, 8:
+			valueLength = 8
+		case 9:
+			valueLength = 16
+		case 6, 7:
+			if offset+2 > len(data) {
+				return nil, errors.New("malformed variable event header")
 			}
-			l := int(headers[offset])<<8 | int(headers[offset+1])
-			offset += 2 + l
-		} else if skip, ok := skipSizes[valueType]; ok {
-			offset += skip
-		} else {
-			break
+			valueLength = int(data[offset])<<8 | int(data[offset+1])
+			offset += 2
+		default:
+			return nil, fmt.Errorf("unsupported event header type %d", valueType)
 		}
+		if offset+valueLength > len(data) {
+			return nil, errors.New("truncated event header value")
+		}
+		if valueType == 7 {
+			headers[name] = string(data[offset : offset+valueLength])
+		}
+		offset += valueLength
 	}
-	return ""
+	return headers, nil
 }

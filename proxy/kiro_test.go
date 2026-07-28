@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"io"
 	"kiro-go/config"
 	"net/http"
@@ -50,6 +51,49 @@ func TestParseEventStreamAssistantRepeatedContentIsNotDropped(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("assistant text corrupted: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseEventStreamTrackedRejectsInvalidOrUpstreamErrorFrames(t *testing.T) {
+	validText := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "partial answer",
+	})
+	corruptFrame := append([]byte(nil), awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "corrupt",
+	})...)
+	corruptFrame[len(corruptFrame)-5] ^= 1
+
+	upstreamError := awsEventStreamFrameWithHeaders(t, map[string]string{
+		":message-type": "exception",
+		":event-type":   "error",
+	}, map[string]interface{}{
+		"message": "upstream denied request",
+	})
+
+	for _, tc := range []struct {
+		name   string
+		stream []byte
+	}{
+		{name: "message CRC mismatch", stream: append(validText, corruptFrame...)},
+		{name: "upstream exception", stream: append(validText, upstreamError...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var text string
+			var completed int
+			emitted, err := parseEventStreamTracked(bytes.NewReader(tc.stream), &KiroStreamCallback{
+				OnText:     func(chunk string, _ bool) { text += chunk },
+				OnComplete: func(int, int) { completed++ },
+			})
+			if err == nil {
+				t.Fatal("expected invalid upstream frame to fail parsing")
+			}
+			if !emitted || text != "partial answer" {
+				t.Fatalf("expected the first text frame to have been emitted, emitted=%v text=%q", emitted, text)
+			}
+			if completed != 0 {
+				t.Fatalf("failed stream must not complete, got %d completion callbacks", completed)
 			}
 		})
 	}
@@ -143,13 +187,46 @@ func TestParseEventStreamNilCallbackFieldsAreNoOp(t *testing.T) {
 	}
 }
 
+func TestParseEventStreamPreservesInterleavedToolInputs(t *testing.T) {
+	var stream bytes.Buffer
+	for _, event := range []map[string]interface{}{
+		{"toolUseId": "toolu_a", "name": "lookup", "input": `{"query":"a`},
+		{"toolUseId": "toolu_b", "name": "lookup", "input": `{"query":"b`},
+		{"toolUseId": "toolu_a", "name": "lookup", "input": `1"}`, "stop": true},
+		{"toolUseId": "toolu_b", "name": "lookup", "input": `2"}`, "stop": true},
+	} {
+		stream.Write(awsEventStreamFrame(t, "toolUseEvent", event))
+	}
+
+	var toolUses []KiroToolUse
+	err := parseEventStream(bytes.NewReader(stream.Bytes()), &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) {
+			toolUses = append(toolUses, toolUse)
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if len(toolUses) != 2 {
+		t.Fatalf("tool uses=%d, want 2 (%#v)", len(toolUses), toolUses)
+	}
+	got := map[string]string{}
+	for _, toolUse := range toolUses {
+		got[toolUse.ToolUseID], _ = toolUse.Input["query"].(string)
+	}
+	if got["toolu_a"] != "a1" || got["toolu_b"] != "b2" {
+		t.Fatalf("interleaved inputs=%#v, want toolu_a=a1 and toolu_b=b2", got)
+	}
+}
+
 func TestHandleToolUseEventGeneratesMissingToolUseID(t *testing.T) {
 	var toolUses []KiroToolUse
-	current, err := handleToolUseEvent(map[string]interface{}{
+	pending := &pendingToolUses{}
+	err := handleToolUseEvent(map[string]interface{}{
 		"name":  "mcpIdaProMcpStatus",
 		"input": `{"server":"ida-pro-mcp"}`,
 		"stop":  true,
-	}, nil, &KiroStreamCallback{
+	}, pending, &KiroStreamCallback{
 		OnToolUse: func(toolUse KiroToolUse) {
 			toolUses = append(toolUses, toolUse)
 		},
@@ -158,8 +235,8 @@ func TestHandleToolUseEventGeneratesMissingToolUseID(t *testing.T) {
 		t.Fatalf("unexpected tool use error: %v", err)
 	}
 
-	if current != nil {
-		t.Fatalf("expected stopped tool use to clear current state")
+	if len(pending.order) != 0 {
+		t.Fatalf("expected stopped tool use to clear pending state, got %d", len(pending.order))
 	}
 	if len(toolUses) != 1 {
 		t.Fatalf("expected one tool use, got %d", len(toolUses))
@@ -179,26 +256,25 @@ func TestHandleToolUseEventReplacesGeneratedIDWhenRealIDArrives(t *testing.T) {
 			toolUses = append(toolUses, toolUse)
 		},
 	}
+	pending := &pendingToolUses{}
 
-	current, err := handleToolUseEvent(map[string]interface{}{
+	if err := handleToolUseEvent(map[string]interface{}{
 		"name":  "mcpIdaProMcpStatus",
 		"input": `{"server":`,
-	}, nil, callback)
-	if err != nil {
+	}, pending, callback); err != nil {
 		t.Fatalf("unexpected first tool fragment error: %v", err)
 	}
-	current, err = handleToolUseEvent(map[string]interface{}{
+	if err := handleToolUseEvent(map[string]interface{}{
 		"toolUseId": "toolu_real",
 		"name":      "mcpIdaProMcpStatus",
 		"input":     `"ida-pro-mcp"}`,
 		"stop":      true,
-	}, current, callback)
-	if err != nil {
+	}, pending, callback); err != nil {
 		t.Fatalf("unexpected completed tool error: %v", err)
 	}
 
-	if current != nil {
-		t.Fatalf("expected stopped tool use to clear current state")
+	if len(pending.order) != 0 {
+		t.Fatalf("expected stopped tool use to clear pending state, got %d", len(pending.order))
 	}
 	if len(toolUses) != 1 {
 		t.Fatalf("expected one completed tool use, got %d", len(toolUses))
@@ -316,27 +392,37 @@ func assertProxyURL(t *testing.T, got *url.URL, want string) {
 
 func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]interface{}) []byte {
 	t.Helper()
+	return awsEventStreamFrameWithHeaders(t, map[string]string{
+		":event-type": eventType,
+	}, payload)
+}
+
+func awsEventStreamFrameWithHeaders(t *testing.T, headers map[string]string, payload map[string]interface{}) []byte {
+	t.Helper()
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
 
-	headerValue := []byte(eventType)
-	headers := make([]byte, 0, 1+len(":event-type")+1+2+len(headerValue))
-	headers = append(headers, byte(len(":event-type")))
-	headers = append(headers, []byte(":event-type")...)
-	headers = append(headers, byte(7))
-	headers = append(headers, byte(len(headerValue)>>8), byte(len(headerValue)))
-	headers = append(headers, headerValue...)
+	headerBytes := make([]byte, 0)
+	for name, value := range headers {
+		headerBytes = append(headerBytes, byte(len(name)))
+		headerBytes = append(headerBytes, name...)
+		headerBytes = append(headerBytes, byte(7))
+		headerBytes = append(headerBytes, byte(len(value)>>8), byte(len(value)))
+		headerBytes = append(headerBytes, value...)
+	}
 
-	totalLength := 12 + len(headers) + len(payloadBytes) + 4
+	totalLength := 12 + len(headerBytes) + len(payloadBytes) + 4
 	frame := make([]byte, 12, totalLength)
 	binary.BigEndian.PutUint32(frame[0:4], uint32(totalLength))
-	binary.BigEndian.PutUint32(frame[4:8], uint32(len(headers)))
-	frame = append(frame, headers...)
+	binary.BigEndian.PutUint32(frame[4:8], uint32(len(headerBytes)))
+	binary.BigEndian.PutUint32(frame[8:12], crc32.ChecksumIEEE(frame[:8]))
+	frame = append(frame, headerBytes...)
 	frame = append(frame, payloadBytes...)
 	frame = append(frame, 0, 0, 0, 0)
+	binary.BigEndian.PutUint32(frame[len(frame)-4:], crc32.ChecksumIEEE(frame[:len(frame)-4]))
 	return frame
 }
 
@@ -735,6 +821,32 @@ func TestCallKiroAPIDoesNotFallbackAfterTimedOutTransport(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIContextStopsRetryWhenClientCancels(t *testing.T) {
+	type requestContextKey struct{}
+	baseContext := context.WithValue(context.Background(), requestContextKey{}, "client-request")
+	ctx, cancel := context.WithCancel(baseContext)
+	defer cancel()
+
+	var calls, waits int
+	installKiroStreamTestClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if got := req.Context().Value(requestContextKey{}); got != "client-request" {
+			t.Fatalf("upstream request context value = %v, want client-request", got)
+		}
+		cancel()
+		return kiroStreamTestResponse(bytes.NewReader(nil)), nil
+	}))
+	installKiroRetryWait(t, func(time.Duration) { waits++ })
+
+	err := CallKiroAPIContext(ctx, newKiroRetryTestAPIKeyAccount(""), newKiroRetryTestPayload(), &KiroStreamCallback{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if calls != 1 || waits != 0 {
+		t.Fatalf("calls=%d waits=%d, want no retry or wait after client cancellation", calls, waits)
+	}
+}
+
 func installKiroRetryTestEndpoints(t *testing.T) {
 	t.Helper()
 	oldResolver := resolveKiroEndpoints
@@ -763,7 +875,10 @@ func installKiroStreamTestClient(t *testing.T, transport http.RoundTripper) {
 func installKiroRetryWait(t *testing.T, wait func(time.Duration)) {
 	t.Helper()
 	oldWait := streamRetryWait
-	streamRetryWait = wait
+	streamRetryWait = func(_ context.Context, delay time.Duration) error {
+		wait(delay)
+		return nil
+	}
 	t.Cleanup(func() { streamRetryWait = oldWait })
 }
 

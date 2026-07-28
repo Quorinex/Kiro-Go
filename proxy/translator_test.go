@@ -268,7 +268,7 @@ func TestClaudeToKiroDropsLeadingAssistantHistory(t *testing.T) {
 }
 
 func TestKiroToClaudeResponseCanEmitEmptyThinkingBlock(t *testing.T) {
-	resp := KiroToClaudeResponse("final answer", "", true, nil, 10, 20, "claude-sonnet-4.6")
+	resp := KiroToClaudeResponse("final answer", "", true, nil, 10, 20, "claude-sonnet-4.6", "")
 
 	if len(resp.Content) != 2 {
 		t.Fatalf("expected empty thinking block plus text block, got %d blocks", len(resp.Content))
@@ -281,6 +281,71 @@ func TestKiroToClaudeResponseCanEmitEmptyThinkingBlock(t *testing.T) {
 	}
 	if resp.Content[1].Type != "text" || resp.Content[1].Text != "final answer" {
 		t.Fatalf("expected text block to be preserved, got %#v", resp.Content[1])
+	}
+}
+
+func TestMapClaudeStopReason(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reason    string
+		toolCount int
+		want      string
+	}{
+		{name: "max tokens", reason: "MAX_TOKENS", want: "max_tokens"},
+		{name: "max output tokens alias", reason: "max_output_tokens", want: "max_tokens"},
+		{name: "length alias", reason: "length", want: "max_tokens"},
+		{name: "context limit", reason: "CONTEXT_WINDOW_EXCEEDED", want: "model_context_window_exceeded"},
+		{name: "model context limit alias", reason: "model_context_window_exceeded", want: "model_context_window_exceeded"},
+		{name: "content filter", reason: "CONTENT_FILTERED", want: "refusal"},
+		{name: "refusal alias", reason: "refusal", want: "refusal"},
+		{name: "guardrail alias", reason: "guardrail_intervened", want: "refusal"},
+		{name: "stop sequence", reason: "STOP_SEQUENCE", want: "stop_sequence"},
+		{name: "pause", reason: "PAUSE_TURN", want: "pause_turn"},
+		// END_TURN is the only stopReason literal the Kiro IDE bundle compares
+		// against, so it is the realistic "finished normally" input.
+		{name: "end turn", reason: "END_TURN", want: "end_turn"},
+		// Absent metadataEvent leaves the reason empty. Mapping it to end_turn is
+		// the deliberate fallback for clients that require a terminal reason; the
+		// truncation itself is caught by the stream integrity layer, not here.
+		{name: "empty falls back to end turn", reason: "", want: "end_turn"},
+		{name: "unknown defaults to end turn", reason: "COMPLETE", want: "end_turn"},
+		{name: "tool use takes priority", reason: "MAX_TOKENS", toolCount: 1, want: "tool_use"},
+		{name: "tool use wins over empty reason", reason: "", toolCount: 2, want: "tool_use"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mapClaudeStopReason(tc.reason, tc.toolCount); got != tc.want {
+				t.Fatalf("mapClaudeStopReason(%q, %d) = %q, want %q", tc.reason, tc.toolCount, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMapOpenAIFinishReason(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reason    string
+		toolCount int
+		want      string
+	}{
+		{name: "max tokens", reason: "MAX_TOKENS", want: "length"},
+		{name: "max output tokens alias", reason: "max_output_tokens", want: "length"},
+		{name: "length alias", reason: "length", want: "length"},
+		{name: "context limit", reason: "CONTEXT_WINDOW_EXCEEDED", want: "length"},
+		{name: "model context limit alias", reason: "model_context_window_exceeded", want: "length"},
+		{name: "content filter", reason: "CONTENT_FILTERED", want: "content_filter"},
+		{name: "refusal alias", reason: "refusal", want: "content_filter"},
+		{name: "guardrail alias", reason: "guardrail_intervened", want: "content_filter"},
+		{name: "end turn", reason: "END_TURN", want: "stop"},
+		{name: "empty falls back to stop", reason: "", want: "stop"},
+		{name: "unknown defaults to stop", reason: "COMPLETE", want: "stop"},
+		{name: "tool calls take priority", reason: "MAX_TOKENS", toolCount: 1, want: "tool_calls"},
+		{name: "tool calls win over empty reason", reason: "", toolCount: 2, want: "tool_calls"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mapOpenAIFinishReason(tc.reason, tc.toolCount); got != tc.want {
+				t.Fatalf("mapOpenAIFinishReason(%q, %d) = %q, want %q", tc.reason, tc.toolCount, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -309,6 +374,17 @@ func TestToolResultsContinuationIncludesInstructionPrefix(t *testing.T) {
 	}
 	if !strings.Contains(content, "result-1") {
 		t.Fatalf("expected tool result text in continuation content, got %q", content)
+	}
+}
+
+func TestKiroToOpenAIResponseWithReasoningPreservesFinishReason(t *testing.T) {
+	response := KiroToOpenAIResponseWithReasoning("partial answer", "", nil, 10, 20, "claude-sonnet-4.5", "reasoning_content", "MAX_TOKENS")
+	choices, ok := response["choices"].([]map[string]interface{})
+	if !ok || len(choices) != 1 {
+		t.Fatalf("unexpected choices: %#v", response["choices"])
+	}
+	if got := choices[0]["finish_reason"]; got != "length" {
+		t.Fatalf("finish_reason=%#v, want length", got)
 	}
 }
 
@@ -554,12 +630,14 @@ func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
 	if len(cur.Images) != 1 {
 		t.Fatalf("expected one image extracted, got %d", len(cur.Images))
 	}
-	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
-		t.Fatalf("expected one tool result")
+	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) != 0 {
+		t.Fatalf("orphan tool result must be flattened, got %#v", cur.UserInputMessageContext.ToolResults)
 	}
-	gotText := cur.UserInputMessageContext.ToolResults[0].Content[0].Text
-	if gotText != "here is the screenshot" {
-		t.Fatalf("expected original tool text preserved, got %q", gotText)
+	if !strings.Contains(cur.Content, toolResultsContinuationPrefix) {
+		t.Fatalf("expected tool result continuation, got %q", cur.Content)
+	}
+	if !strings.Contains(cur.Content, "here is the screenshot") {
+		t.Fatalf("expected original tool text preserved, got %q", cur.Content)
 	}
 }
 
@@ -624,15 +702,21 @@ func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
 
 	payload := OpenAIToKiro(req, false)
 
-	var toolHistImages int
+	var toolHistImages, structuredToolResults int
 	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil &&
-			len(h.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
-			toolHistImages += len(h.UserInputMessage.Images)
+		if h.UserInputMessage == nil {
+			continue
+		}
+		toolHistImages += len(h.UserInputMessage.Images)
+		if context := h.UserInputMessage.UserInputMessageContext; context != nil {
+			structuredToolResults += len(context.ToolResults)
 		}
 	}
 	if toolHistImages != 1 {
-		t.Fatalf("expected tool image carried on the flushed tool-result history entry, got %d", toolHistImages)
+		t.Fatalf("expected tool image carried in history, got %d", toolHistImages)
+	}
+	if structuredToolResults != 0 {
+		t.Fatalf("history must not retain structured tool results, got %d", structuredToolResults)
 	}
 
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage
