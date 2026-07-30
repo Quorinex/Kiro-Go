@@ -24,6 +24,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Failed to read request body")
 		return
 	}
+	body = maybeCompressRequestBody(body)
 
 	var req ResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
