@@ -74,7 +74,12 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 				messages = append(messages, *msg)
 			}
 
-		case typ == "function_call_output" || typ == "tool_result":
+		case typ == "additional_tools":
+			// Tool declarations, not conversational content; extracted
+			// separately by extractResponsesTools. Skip so it isn't
+			// misread as an empty developer message.
+
+		case typ == "function_call_output" || typ == "tool_result" || typ == "custom_tool_call_output":
 			flushPendingUser()
 			callID, _ := obj["call_id"].(string)
 			if callID == "" {
@@ -98,23 +103,23 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 			}
 			tc.Function.Name, _ = obj["name"].(string)
 			tc.Function.Arguments = stringifyArbitrary(obj["arguments"])
-			// Merge consecutive function_call items into a single assistant
-			// message so parallel tool calls stay grouped in one turn. The
-			// Responses API emits each parallel call as a separate input item;
-			// keeping them in one assistant message preserves the tool_use /
-			// tool_result pairing that Kiro requires.
-			if n := len(messages); n > 0 &&
-				messages[n-1].Role == "assistant" &&
-				len(messages[n-1].ToolCalls) > 0 &&
-				strings.TrimSpace(extractOpenAIMessageText(messages[n-1].Content)) == "" {
-				messages[n-1].ToolCalls = append(messages[n-1].ToolCalls, tc)
-			} else {
-				messages = append(messages, OpenAIMessage{
-					Role:      "assistant",
-					Content:   "",
-					ToolCalls: []ToolCall{tc},
-				})
+			messages = appendAssistantToolCall(messages, tc)
+
+		case typ == "custom_tool_call":
+			flushPendingUser()
+			tc := ToolCall{
+				ID:   stringField(obj, "call_id", "id"),
+				Type: "function",
 			}
+			tc.Function.Name, _ = obj["name"].(string)
+			// Codex's custom tools take a raw string "input" rather than a
+			// JSON "arguments" object. Wrap it under the same "input" key
+			// the outbound schema in customToolInputSchema declares, so the
+			// round trip stays consistent.
+			inputStr := stringifyArbitrary(obj["input"])
+			argsBytes, _ := json.Marshal(map[string]string{"input": inputStr})
+			tc.Function.Arguments = string(argsBytes)
+			messages = appendAssistantToolCall(messages, tc)
 
 		case typ == "input_text" || typ == "text":
 			text, _ := obj["text"].(string)
@@ -148,6 +153,94 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 
 	flushPendingUser()
 	return messages, nil
+}
+
+// appendAssistantToolCall merges consecutive tool-call items into a single
+// assistant message so parallel tool calls stay grouped in one turn. The
+// Responses API emits each parallel call as a separate input item; keeping
+// them in one assistant message preserves the tool_use / tool_result pairing
+// that Kiro requires.
+func appendAssistantToolCall(messages []OpenAIMessage, tc ToolCall) []OpenAIMessage {
+	if n := len(messages); n > 0 &&
+		messages[n-1].Role == "assistant" &&
+		len(messages[n-1].ToolCalls) > 0 &&
+		strings.TrimSpace(extractOpenAIMessageText(messages[n-1].Content)) == "" {
+		messages[n-1].ToolCalls = append(messages[n-1].ToolCalls, tc)
+		return messages
+	}
+	return append(messages, OpenAIMessage{
+		Role:      "assistant",
+		Content:   "",
+		ToolCalls: []ToolCall{tc},
+	})
+}
+
+// extractResponsesTools scans a Responses API "input" array for
+// "additional_tools" items and returns the tool declarations found inside
+// them. Newer Codex clients (e.g. codex-kiro / v0.146+) stop sending the
+// top-level "tools" field entirely and instead embed every tool -- including
+// its own built-in "exec" custom tool that fronts shell/file/git access --
+// as a developer-role "additional_tools" input item. Without this, the
+// model receives zero tool definitions and correctly (but confusingly)
+// reports having no tool access at all.
+func extractResponsesTools(raw json.RawMessage) []OpenAITool {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed[0] != '[' {
+		return nil
+	}
+
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+
+	var tools []OpenAITool
+	for _, item := range items {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(item, &head); err != nil || head.Type != "additional_tools" {
+			continue
+		}
+		var block struct {
+			Tools []json.RawMessage `json:"tools"`
+		}
+		if err := json.Unmarshal(item, &block); err != nil {
+			continue
+		}
+		for _, t := range block.Tools {
+			tools = append(tools, decodeResponsesTool(t)...)
+		}
+	}
+	return tools
+}
+
+// decodeResponsesTool decodes a single tool entry from an "additional_tools"
+// block. "namespace" entries (e.g. Codex's "collaboration" sub-agent group)
+// wrap a nested "tools" list instead of describing a callable tool
+// themselves, so they're flattened using each nested tool's own name --
+// Codex's dispatcher matches calls by that plain name, not a namespaced path.
+func decodeResponsesTool(raw json.RawMessage) []OpenAITool {
+	var head struct {
+		Type  string            `json:"type"`
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil
+	}
+	if head.Type == "namespace" {
+		var out []OpenAITool
+		for _, nested := range head.Tools {
+			out = append(out, decodeResponsesTool(nested)...)
+		}
+		return out
+	}
+
+	var tool OpenAITool
+	if err := json.Unmarshal(raw, &tool); err != nil {
+		return nil
+	}
+	return []OpenAITool{tool}
 }
 
 func buildMessageFromInputItem(obj map[string]interface{}, role string) *OpenAIMessage {

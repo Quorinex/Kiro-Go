@@ -31,6 +31,15 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Newer Codex clients stop sending the top-level "tools" field and embed
+	// every tool declaration -- including Codex's own built-in "exec"
+	// custom tool that fronts shell/file/git access -- as an
+	// "additional_tools" item inside "input" instead. Merge those in so the
+	// model actually receives them.
+	if extra := extractResponsesTools(req.Input); len(extra) > 0 {
+		req.Tools = append(req.Tools, extra...)
+	}
+
 	if strings.TrimSpace(req.Model) == "" {
 		req.Model = defaultResponsesModel
 	}
@@ -253,11 +262,36 @@ func mapResponsesCompletion(reason string) (status, incompleteReason string) {
 	}
 }
 
+// customToolNameSet returns the set of tool names declared with
+// type "custom" (e.g. Codex's freeform "exec" tool), so tool_use results for
+// them can be re-encoded as custom_tool_call output items instead of
+// function_call ones.
+func customToolNameSet(tools []OpenAITool) map[string]bool {
+	set := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		if t.Type == "custom" {
+			set[t.Function.Name] = true
+		}
+	}
+	return set
+}
+
+// customToolCallInput extracts the raw string argument Kiro returned for a
+// custom tool call, per the single "input" field declared in
+// customToolInputSchema.
+func customToolCallInput(input map[string]interface{}) string {
+	if s, ok := input["input"].(string); ok {
+		return s
+	}
+	return ""
+}
+
 func buildResponsesObject(
 	id, model, content string, toolUses []KiroToolUse,
 	inputTokens, outputTokens int, req *ResponsesRequest, upstreamStopReason string,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
+	customTools := customToolNameSet(req.Tools)
 
 	if strings.TrimSpace(content) != "" {
 		output = append(output, ResponseOutputItem{
@@ -273,6 +307,17 @@ func buildResponsesObject(
 	}
 
 	for _, tu := range toolUses {
+		if customTools[tu.Name] {
+			output = append(output, ResponseOutputItem{
+				ID:     generateOutputItemID("ctc"),
+				Type:   "custom_tool_call",
+				Status: "completed",
+				CallID: tu.ToolUseID,
+				Name:   tu.Name,
+				Input:  customToolCallInput(tu.Input),
+			})
+			continue
+		}
 		args, _ := json.Marshal(tu.Input)
 		output = append(output, ResponseOutputItem{
 			ID:        generateOutputItemID("fc"),
@@ -362,6 +407,7 @@ func (h *Handler) handleResponsesStream(
 	var lastErr error
 	responseStarted := false
 	reqStart := time.Now()
+	streamCustomTools := customToolNameSet(req.Tools)
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
@@ -475,6 +521,51 @@ func (h *Handler) handleResponsesStream(
 				}
 
 				toolUses = append(toolUses, tu)
+
+				if streamCustomTools[tu.Name] {
+					input := customToolCallInput(tu.Input)
+					ctcID := generateOutputItemID("ctc")
+					send("response.output_item.added", map[string]interface{}{
+						"type":         "response.output_item.added",
+						"output_index": outputIndex,
+						"item": map[string]interface{}{
+							"id":      ctcID,
+							"type":    "custom_tool_call",
+							"status":  "in_progress",
+							"call_id": tu.ToolUseID,
+							"name":    tu.Name,
+							"input":   "",
+						},
+					})
+					send("response.custom_tool_call_input.delta", map[string]interface{}{
+						"type":         "response.custom_tool_call_input.delta",
+						"item_id":      ctcID,
+						"output_index": outputIndex,
+						"delta":        input,
+					})
+					send("response.custom_tool_call_input.done", map[string]interface{}{
+						"type":         "response.custom_tool_call_input.done",
+						"item_id":      ctcID,
+						"output_index": outputIndex,
+						"input":        input,
+					})
+					send("response.output_item.done", map[string]interface{}{
+						"type":         "response.output_item.done",
+						"output_index": outputIndex,
+						"item": map[string]interface{}{
+							"id":      ctcID,
+							"type":    "custom_tool_call",
+							"status":  "completed",
+							"call_id": tu.ToolUseID,
+							"name":    tu.Name,
+							"input":   input,
+						},
+					})
+					outputIndex++
+					responseStarted = true
+					return
+				}
+
 				args, _ := json.Marshal(tu.Input)
 				fcID := generateOutputItemID("fc")
 				send("response.output_item.added", map[string]interface{}{

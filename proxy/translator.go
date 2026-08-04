@@ -2096,6 +2096,24 @@ func parseBase64Image(data, format string) *KiroImage {
 	}
 }
 
+// customToolInputSchema is the schema advertised to Kiro for OpenAI "custom"
+// tools (e.g. Codex's freeform "exec" tool), which take a single raw string
+// argument rather than a JSON-schema-described object. Kiro's tool_use still
+// requires a JSON object input, so we pin the argument to a single "input"
+// string field; convertOpenAIToolUseToCustomCall relies on this exact key
+// when translating the model's tool call back into a Responses API
+// custom_tool_call output item.
+var customToolInputSchema = map[string]interface{}{
+	"type": "object",
+	"properties": map[string]interface{}{
+		"input": map[string]interface{}{
+			"type":        "string",
+			"description": "Raw text input for this tool.",
+		},
+	},
+	"required": []interface{}{"input"},
+}
+
 func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 	if len(tools) == 0 {
 		return nil
@@ -2103,7 +2121,7 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Type != "function" {
+		if tool.Type != "function" && tool.Type != "custom" {
 			continue
 		}
 		desc := tool.Function.Description
@@ -2118,7 +2136,11 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
-		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		if tool.Type == "custom" {
+			wrapper.ToolSpecification.InputSchema = InputSchema{JSON: customToolInputSchema}
+		} else {
+			wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		}
 		result = append(result, wrapper)
 	}
 	return result
