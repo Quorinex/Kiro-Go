@@ -551,6 +551,42 @@ func TestExtractResponsesToolsAdditionalTools(t *testing.T) {
 	if !ok || followup.Type != "function" {
 		t.Fatalf("expected namespace-flattened followup_task tool with its own plain name, got %+v", byName)
 	}
+	if followup.Namespace != "collaboration" {
+		t.Fatalf("expected followup_task to carry its source namespace for the response round trip, got %q", followup.Namespace)
+	}
+}
+
+// TestToolNamespaceMapAndFunctionCallOutput ensures a tool flattened out of a
+// Responses API namespace (e.g. Codex's "collaboration" spawn_agent group)
+// gets its namespace re-attached as a sibling "namespace" field on the
+// function_call output item -- Codex's FunctionCall wire format keys
+// dispatch on ToolName{name, namespace}, so a response with a bare name and
+// no namespace field never matches what Codex registered internally.
+func TestToolNamespaceMapAndFunctionCallOutput(t *testing.T) {
+	tools := []OpenAITool{{Type: "function", Namespace: "collaboration"}}
+	tools[0].Function.Name = "spawn_agent"
+
+	ns := toolNamespaceMap(tools)
+	if ns["spawn_agent"] != "collaboration" {
+		t.Fatalf("expected spawn_agent namespaced under collaboration, got %+v", ns)
+	}
+
+	req := &ResponsesRequest{Tools: tools}
+	toolUses := []KiroToolUse{{ToolUseID: "call_1", Name: "spawn_agent", Input: map[string]interface{}{"task_name": "worker", "message": "hi"}}}
+	obj := buildResponsesObject("resp_1", "gpt-5.6-terra", "", toolUses, 0, 0, req, "tool_use")
+
+	var fc *ResponseOutputItem
+	for i := range obj.Output {
+		if obj.Output[i].Type == "function_call" {
+			fc = &obj.Output[i]
+		}
+	}
+	if fc == nil {
+		t.Fatalf("expected a function_call output item, got %+v", obj.Output)
+	}
+	if fc.Namespace != "collaboration" {
+		t.Fatalf("expected function_call namespace %q, got %q", "collaboration", fc.Namespace)
+	}
 }
 
 // TestConvertOpenAIToolsCustomType ensures "custom" tools (freeform string
@@ -614,5 +650,71 @@ func TestResponsesParseCustomToolCallRoundTrip(t *testing.T) {
 	}
 	if msgs[2].Role != "tool" || msgs[2].ToolCallID != "call_1" || msgs[2].Content != "1" {
 		t.Fatalf("expected tool result message, got %+v", msgs[2])
+	}
+}
+
+// TestResponsesParseAgentMessage covers Codex's multi-agent v2 delivery of a
+// spawned sub-agent's initial task (and inter-agent messages) as an
+// "agent_message" item rather than a plain "message". Without this parsing
+// case the sub-agent silently receives no task at all -- it still runs, but
+// answers as if starting a conversation with no instructions.
+func TestResponsesParseAgentMessage(t *testing.T) {
+	raw := json.RawMessage(`[
+		{
+			"type": "agent_message",
+			"author": "/root",
+			"recipient": "/root/worker",
+			"content": [{"type": "input_text", "text": "reply with exactly: PONG"}]
+		}
+	]`)
+
+	msgs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatalf("parse agent_message: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d (%+v)", len(msgs), msgs)
+	}
+	if msgs[0].Role != "user" {
+		t.Fatalf("expected user role, got %q", msgs[0].Role)
+	}
+	if got, _ := msgs[0].Content.(string); got != "reply with exactly: PONG" {
+		t.Fatalf("expected task text, got %v", msgs[0].Content)
+	}
+}
+
+// TestResponsesParseAgentMessageReadsEncryptedContentField ensures the
+// "encrypted_content" part's value is read as plain text, not skipped as
+// opaque ciphertext. Codex tags multi-agent payload content this way
+// unconditionally, but against a non-ChatGPT-backend provider (no
+// encryption session exists) the field genuinely carries the task text
+// as-is -- confirmed live against a real Codex CLI session, where a spawned
+// sub-agent's "Message Type: NEW_TASK" agent_message arrived as
+// {"type":"input_text","text":"Message Type: NEW_TASK\n...\nPayload:\n"}
+// followed by {"type":"encrypted_content","encrypted_content":"<the actual
+// plaintext task>"}.
+func TestResponsesParseAgentMessageReadsEncryptedContentField(t *testing.T) {
+	raw := json.RawMessage(`[
+		{
+			"type": "agent_message",
+			"author": "/root",
+			"recipient": "/root/worker",
+			"content": [
+				{"type": "input_text", "text": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},
+				{"type": "encrypted_content", "encrypted_content": "reply with exactly: PONG"}
+			]
+		}
+	]`)
+
+	msgs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatalf("parse agent_message: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d (%+v)", len(msgs), msgs)
+	}
+	got, _ := msgs[0].Content.(string)
+	if !strings.Contains(got, "reply with exactly: PONG") {
+		t.Fatalf("expected the task payload to be readable, got %v", got)
 	}
 }

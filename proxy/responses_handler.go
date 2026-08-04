@@ -276,6 +276,21 @@ func customToolNameSet(tools []OpenAITool) map[string]bool {
 	return set
 }
 
+// toolNamespaceMap maps a tool's name back to the Responses API "namespace"
+// group it was flattened out of (see decodeResponsesTool). Codex's own
+// FunctionCall wire format carries this as a sibling "namespace" field
+// alongside the bare "name" -- a response missing it doesn't match Codex's
+// internal ToolName{name, namespace} registration for that tool.
+func toolNamespaceMap(tools []OpenAITool) map[string]string {
+	m := make(map[string]string, len(tools))
+	for _, t := range tools {
+		if t.Namespace != "" {
+			m[t.Function.Name] = t.Namespace
+		}
+	}
+	return m
+}
+
 // customToolCallInput extracts the raw string argument Kiro returned for a
 // custom tool call, per the single "input" field declared in
 // customToolInputSchema.
@@ -292,6 +307,7 @@ func buildResponsesObject(
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
 	customTools := customToolNameSet(req.Tools)
+	namespaces := toolNamespaceMap(req.Tools)
 
 	if strings.TrimSpace(content) != "" {
 		output = append(output, ResponseOutputItem{
@@ -325,6 +341,7 @@ func buildResponsesObject(
 			Status:    "completed",
 			CallID:    tu.ToolUseID,
 			Name:      tu.Name,
+			Namespace: namespaces[tu.Name],
 			Arguments: string(args),
 		})
 	}
@@ -408,6 +425,7 @@ func (h *Handler) handleResponsesStream(
 	responseStarted := false
 	reqStart := time.Now()
 	streamCustomTools := customToolNameSet(req.Tools)
+	streamToolNamespaces := toolNamespaceMap(req.Tools)
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
@@ -521,7 +539,6 @@ func (h *Handler) handleResponsesStream(
 				}
 
 				toolUses = append(toolUses, tu)
-
 				if streamCustomTools[tu.Name] {
 					input := customToolCallInput(tu.Input)
 					ctcID := generateOutputItemID("ctc")
@@ -568,17 +585,30 @@ func (h *Handler) handleResponsesStream(
 
 				args, _ := json.Marshal(tu.Input)
 				fcID := generateOutputItemID("fc")
+				addedItem := map[string]interface{}{
+					"id":        fcID,
+					"type":      "function_call",
+					"status":    "in_progress",
+					"call_id":   tu.ToolUseID,
+					"name":      tu.Name,
+					"arguments": "",
+				}
+				doneItem := map[string]interface{}{
+					"id":        fcID,
+					"type":      "function_call",
+					"status":    "completed",
+					"call_id":   tu.ToolUseID,
+					"name":      tu.Name,
+					"arguments": string(args),
+				}
+				if ns := streamToolNamespaces[tu.Name]; ns != "" {
+					addedItem["namespace"] = ns
+					doneItem["namespace"] = ns
+				}
 				send("response.output_item.added", map[string]interface{}{
 					"type":         "response.output_item.added",
 					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "in_progress",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": "",
-					},
+					"item":         addedItem,
 				})
 				send("response.function_call_arguments.delta", map[string]interface{}{
 					"type":         "response.function_call_arguments.delta",
@@ -589,14 +619,7 @@ func (h *Handler) handleResponsesStream(
 				send("response.output_item.done", map[string]interface{}{
 					"type":         "response.output_item.done",
 					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "completed",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": string(args),
-					},
+					"item":         doneItem,
 				})
 				outputIndex++
 				responseStarted = true

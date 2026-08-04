@@ -79,6 +79,20 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 			// separately by extractResponsesTools. Skip so it isn't
 			// misread as an empty developer message.
 
+		case typ == "agent_message":
+			// Codex's multi-agent v2 delivers a spawned sub-agent's initial
+			// task (and later inter-agent messages) as this item type
+			// instead of a plain "message" -- {"author":...,"recipient":...,
+			// "content":[{"type":"input_text","text":...}]}, or
+			// {"type":"encrypted_content",...} when Codex thinks the
+			// transport is encrypted. Without this case the content is
+			// silently dropped and a spawned sub-agent receives no task at
+			// all (it still runs, but with nothing to do).
+			flushPendingUser()
+			if text := extractAgentMessageText(obj); text != "" {
+				messages = append(messages, OpenAIMessage{Role: "user", Content: text})
+			}
+
 		case typ == "function_call_output" || typ == "tool_result" || typ == "custom_tool_call_output":
 			flushPendingUser()
 			callID, _ := obj["call_id"].(string)
@@ -218,11 +232,14 @@ func extractResponsesTools(raw json.RawMessage) []OpenAITool {
 // decodeResponsesTool decodes a single tool entry from an "additional_tools"
 // block. "namespace" entries (e.g. Codex's "collaboration" sub-agent group)
 // wrap a nested "tools" list instead of describing a callable tool
-// themselves, so they're flattened using each nested tool's own name --
-// Codex's dispatcher matches calls by that plain name, not a namespaced path.
+// themselves, so they're flattened using each nested tool's own bare name --
+// Codex's dispatcher matches calls by that plain name plus a separate
+// "namespace" field carried alongside it on the wire (see OpenAITool.Namespace),
+// not a namespace-prefixed name.
 func decodeResponsesTool(raw json.RawMessage) []OpenAITool {
 	var head struct {
 		Type  string            `json:"type"`
+		Name  string            `json:"name"`
 		Tools []json.RawMessage `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &head); err != nil {
@@ -231,7 +248,12 @@ func decodeResponsesTool(raw json.RawMessage) []OpenAITool {
 	if head.Type == "namespace" {
 		var out []OpenAITool
 		for _, nested := range head.Tools {
-			out = append(out, decodeResponsesTool(nested)...)
+			for _, tool := range decodeResponsesTool(nested) {
+				if tool.Namespace == "" {
+					tool.Namespace = head.Name
+				}
+				out = append(out, tool)
+			}
 		}
 		return out
 	}
@@ -297,6 +319,39 @@ func buildMessageFromInputItem(obj map[string]interface{}, role string) *OpenAIM
 	}
 
 	return nil
+}
+
+// extractAgentMessageText concatenates the parts of an "agent_message"
+// item's "content" array. Codex always tags multi-agent payload content as
+// "encrypted_content" -- real ciphertext only when talking to its own
+// ChatGPT-hosted backend, which negotiates the encryption. Against any other
+// provider (like this one) no such session exists, so despite the tag the
+// "encrypted_content" field is verified to carry the plain task text as-is
+// (confirmed by direct observation: e.g. {"type":"encrypted_content",
+// "encrypted_content":"reply with exactly: PONG11"}). Treating it as opaque
+// ciphertext -- as Codex's own client-side plaintext_agent_message_content
+// does -- is exactly why a spawned sub-agent previously received no task at
+// all ("Ready — no task payload was included").
+func extractAgentMessageText(obj map[string]interface{}) string {
+	content, _ := obj["content"].([]interface{})
+	var parts []string
+	for _, c := range content {
+		part, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch part["type"] {
+		case "input_text":
+			if text, ok := part["text"].(string); ok && text != "" {
+				parts = append(parts, text)
+			}
+		case "encrypted_content":
+			if text, ok := part["encrypted_content"].(string); ok && text != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func stringifyArbitrary(v interface{}) string {
