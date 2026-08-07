@@ -669,6 +669,13 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}
+			// Builder ID / Q CLI accounts close the stream with a metering
+			// event instead of a metadataEvent carrying stopReason. Treat
+			// metering as the normal terminal signal so those streams are
+			// not misclassified as truncated.
+			if callback.OnStopReason != nil {
+				callback.OnStopReason("end_turn")
+			}
 		case "contextUsageEvent":
 			if pct, ok := event["contextUsagePercentage"].(float64); ok {
 				contextUsagePercentages = append(contextUsagePercentages, pct)
