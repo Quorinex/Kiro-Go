@@ -336,27 +336,34 @@ func (h *Handler) refreshAllAccounts() {
 			continue
 		}
 
-		// API Key accounts skip OAuth refresh; still sync usage/subscription.
-		if !config.IsAPIKeyAccount(account) {
-			// 检查 token 是否需要刷新
-			if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
-				if _, err := h.refreshAccountToken(account, false); err != nil {
-					logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
-					h.handleAccountFailure(account, err)
-					continue
+		// Builder ID accounts (no profileArn) cannot resolve a profile ARN
+		// upstream; refreshing them serially (potentially thousands of
+		// accounts) just burns time, spams the log with "no available Kiro
+		// profile", and hammers the AWS endpoint. Only refresh accounts that
+		// can actually resolve a profile (API Key / SSO with profileArn).
+		if config.IsAPIKeyAccount(account) || account.ProfileArn != "" {
+			// API Key accounts skip OAuth refresh; still sync usage/subscription.
+			if !config.IsAPIKeyAccount(account) {
+				// 检查 token 是否需要刷新
+				if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
+					if _, err := h.refreshAccountToken(account, false); err != nil {
+						logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
+						h.handleAccountFailure(account, err)
+						continue
+					}
 				}
 			}
-		}
 
-		// 刷新账户信息
-		info, err := RefreshAccountInfo(account)
-		if err != nil {
-			logger.Warnf("[BackgroundRefresh] Failed to refresh %s: %v", account.Email, err)
-			continue
-		}
+			// 刷新账户信息
+			info, err := RefreshAccountInfo(account)
+			if err != nil {
+				logger.Warnf("[BackgroundRefresh] Failed to refresh %s: %v", account.Email, err)
+				continue
+			}
 
-		config.UpdateAccountInfo(account.ID, *info)
-		logger.Infof("[BackgroundRefresh] Refreshed %s: %s %.1f/%.1f", account.Email, info.SubscriptionType, info.UsageCurrent, info.UsageLimit)
+			config.UpdateAccountInfo(account.ID, *info)
+			logger.Infof("[BackgroundRefresh] Refreshed %s: %s %.1f/%.1f", account.Email, info.SubscriptionType, info.UsageCurrent, info.UsageLimit)
+		}
 	}
 	h.pool.Reload()
 }
@@ -626,6 +633,14 @@ func (h *Handler) refreshModelsCache() {
 	aggregated := make([]ModelInfo, 0)
 	for i := range accounts {
 		account := &accounts[i]
+		// Builder ID accounts cannot resolve a profile upstream (403 on
+		// ListAvailableModels). Skipping them keeps background refresh fast
+		// and avoids hammering upstream / spamming the log with per-account
+		// failures. They still route optimistically (GetNextForModel falls
+		// back to the full pool when no account has a cached model list).
+		if !config.IsAPIKeyAccount(account) && account.ProfileArn == "" {
+			continue
+		}
 		if err := h.ensureValidToken(account); err != nil {
 			logger.Warnf("[ModelsCache] Skip %s token refresh failed: %v", account.Email, err)
 			h.handleAccountFailure(account, err)
