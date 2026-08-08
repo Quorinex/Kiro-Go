@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"kiro-go/config"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -199,7 +202,7 @@ func TestHandleToolUseEventReplacesGeneratedIDWhenRealIDArrives(t *testing.T) {
 }
 
 func TestBuildKiroTransportUsesExplicitProxyURL(t *testing.T) {
-	transport := buildKiroTransport("http://proxy.local:8080")
+	transport := buildKiroTransport("http://proxy.local:8080", true)
 	req := &http.Request{URL: mustParseURL(t, "https://q.us-east-1.amazonaws.com")}
 
 	got, err := transport.Proxy(req)
@@ -214,7 +217,7 @@ func TestBuildKiroTransportFallsBackToEnvironmentProxy(t *testing.T) {
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "")
 
-	transport := buildKiroTransport("")
+	transport := buildKiroTransport("", true)
 	req := &http.Request{URL: mustParseURL(t, "https://q.us-east-1.amazonaws.com")}
 
 	got, err := transport.Proxy(req)
@@ -224,18 +227,38 @@ func TestBuildKiroTransportFallsBackToEnvironmentProxy(t *testing.T) {
 	assertProxyURL(t, got, "http://env-proxy.local:2323")
 }
 
-func TestInitKiroHttpClientKeepsShortRestTimeout(t *testing.T) {
+// Streaming responses must not carry an overall client deadline: http.Client.Timeout
+// covers reading the body, so any cap severs a healthy in-progress SSE stream
+// mid-token. The header wait is bounded on the transport instead.
+func TestInitKiroHttpClientLeavesStreamingUnbounded(t *testing.T) {
 	InitKiroHttpClient("")
 	t.Cleanup(func() { InitKiroHttpClient("") })
 
 	streamClient := kiroHttpStore.Load()
 	restClient := kiroRestHttpStore.Load()
 
-	if streamClient.Timeout != 5*time.Minute {
-		t.Fatalf("expected streaming timeout to be 5m, got %s", streamClient.Timeout)
+	if streamClient.Timeout != 0 {
+		t.Fatalf("expected streaming client to have no overall timeout, got %s", streamClient.Timeout)
 	}
+	streamTransport, ok := streamClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", streamClient.Transport)
+	}
+	if streamTransport.ResponseHeaderTimeout != streamResponseHeaderTimeout {
+		t.Fatalf("expected streaming header timeout %s, got %s",
+			streamResponseHeaderTimeout, streamTransport.ResponseHeaderTimeout)
+	}
+
 	if restClient.Timeout != 30*time.Second {
 		t.Fatalf("expected REST timeout to stay 30s, got %s", restClient.Timeout)
+	}
+	restTransport, ok := restClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", restClient.Transport)
+	}
+	if restTransport.ResponseHeaderTimeout != 0 {
+		t.Fatalf("expected REST transport to rely on client timeout, got header timeout %s",
+			restTransport.ResponseHeaderTimeout)
 	}
 }
 
@@ -280,6 +303,51 @@ func TestEndpointsForAccountUsesCLIForAPIKey(t *testing.T) {
 	if got := cliRuntimeURL(&config.Account{Region: "eu-central-1"}); got != "https://runtime.eu-central-1.kiro.dev/" {
 		t.Fatalf("cli url = %q", got)
 	}
+}
+
+func TestCallKiroAPI429CarriesRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "45")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	targetURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	originalClient := kiroHttpStore.Load()
+	kiroHttpStore.Store(&http.Client{Transport: rewriteRoundTripper{
+		target: targetURL,
+		base:   server.Client().Transport,
+	}})
+	t.Cleanup(func() { kiroHttpStore.Store(originalClient) })
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	account := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_test", Region: "us-east-1"}
+	callErr := CallKiroAPI(account, &KiroPayload{}, nil)
+
+	var quotaErr *upstreamQuotaError
+	if !errors.As(callErr, &quotaErr) {
+		t.Fatalf("expected upstreamQuotaError, got %T: %v", callErr, callErr)
+	}
+	if quotaErr.retryAfter != "45" {
+		t.Fatalf("retry-after = %q, want 45", quotaErr.retryAfter)
+	}
+}
+
+type rewriteRoundTripper struct {
+	target *url.URL
+	base   http.RoundTripper
+}
+
+func (rt rewriteRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL = rt.target
+	clone.Host = rt.target.Host
+	return rt.base.RoundTrip(clone)
 }
 
 func mustParseURL(t *testing.T, raw string) *url.URL {

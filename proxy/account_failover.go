@@ -1,12 +1,61 @@
 package proxy
 
 import (
+	"errors"
 	"kiro-go/config"
 	"kiro-go/logger"
+	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const maxAccountRetryAttempts = 3
+
+const (
+	defaultQuotaCooldown = time.Hour
+	minQuotaCooldown     = 10 * time.Second
+	maxQuotaCooldown     = 24 * time.Hour
+)
+
+// upstreamQuotaError carries the upstream Retry-After hint across the API-call
+// boundary so account selection can observe it instead of hammering the same
+// credential on every incoming Claude CLI request.
+type upstreamQuotaError struct {
+	endpoint   string
+	retryAfter string
+}
+
+func (e *upstreamQuotaError) Error() string {
+	if e == nil || e.endpoint == "" {
+		return "quota exhausted"
+	}
+	return "quota exhausted on " + e.endpoint
+}
+
+func retryAfterDuration(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultQuotaCooldown
+	}
+
+	var duration time.Duration
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		duration = time.Duration(seconds) * time.Second
+	} else if retryAt, err := http.ParseTime(value); err == nil {
+		duration = retryAt.Sub(now)
+	} else {
+		return defaultQuotaCooldown
+	}
+
+	if duration < minQuotaCooldown {
+		return minQuotaCooldown
+	}
+	if duration > maxQuotaCooldown {
+		return maxQuotaCooldown
+	}
+	return duration
+}
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
@@ -92,7 +141,12 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 		h.disableAccountOverage(account)
 		h.pool.RecordError(account.ID, false)
 	case isQuotaErrorMessage(errMsg):
-		h.pool.RecordError(account.ID, true)
+		cooldown := defaultQuotaCooldown
+		var quotaErr *upstreamQuotaError
+		if errors.As(err, &quotaErr) {
+			cooldown = retryAfterDuration(quotaErr.retryAfter, time.Now())
+		}
+		h.pool.RecordErrorWithCooldown(account.ID, cooldown)
 	case isSuspensionErrorMessage(errMsg):
 		h.disableAccount(account, "BANNED", "AWS temporarily suspended - unusual user activity detected")
 	case isProfileUnavailableErrorMessage(errMsg):

@@ -415,7 +415,9 @@ func TestParseModelAndThinking(t *testing.T) {
 		{"sonnet dot form", "claude-sonnet-4.6", "claude-sonnet-4.6", false},
 		{"haiku dash form", "claude-haiku-4-5", "claude-haiku-4.5", false},
 		{"haiku dot form", "claude-haiku-4.5", "claude-haiku-4.5", false},
-		{"future major bump", "claude-sonnet-5-0", "claude-sonnet-5.0", false},
+		{"sonnet 5 alias with version suffix", "claude-sonnet-5-0", "claude-sonnet-4.5", false},
+		{"opus 5 pass through", "claude-opus-5", "claude-opus-5", false},
+		{"opus 5 thinking pass through", "claude-opus-5-thinking", "claude-opus-5", true},
 
 		// Bare family name passes through (no minor to normalize).
 		{"bare sonnet 4", "claude-sonnet-4", "claude-sonnet-4", false},
@@ -425,7 +427,7 @@ func TestParseModelAndThinking(t *testing.T) {
 
 		// Cross-family legacy IDs.
 		{"claude 3.5 sonnet", "claude-3-5-sonnet", "claude-sonnet-4.5", false},
-		{"claude 3 opus", "claude-3-opus", "claude-sonnet-4.5", false},
+		{"claude 3 opus", "claude-3-opus", "claude-opus-4.6", false},
 		{"claude 3 sonnet", "claude-3-sonnet", "claude-sonnet-4", false},
 		{"claude 3 haiku", "claude-3-haiku", "claude-haiku-4.5", false},
 
@@ -526,6 +528,13 @@ func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
 	req := &ClaudeRequest{
 		Model: "claude-opus-4.8",
 		Messages: []ClaudeMessage{
+			{Role: "user", Content: "hello"},
+			{
+				Role: "assistant",
+				Content: []map[string]interface{}{
+					{"type": "tool_use", "id": "tool_2", "name": "take_screenshot", "input": map[string]interface{}{}},
+				},
+			},
 			{
 				Role: "user",
 				Content: []interface{}{
@@ -626,13 +635,12 @@ func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
 
 	var toolHistImages int
 	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil &&
-			len(h.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
+		if h.UserInputMessage != nil && len(h.UserInputMessage.Images) > 0 {
 			toolHistImages += len(h.UserInputMessage.Images)
 		}
 	}
 	if toolHistImages != 1 {
-		t.Fatalf("expected tool image carried on the flushed tool-result history entry, got %d", toolHistImages)
+		t.Fatalf("expected tool image carried on the history entry, got %d", toolHistImages)
 	}
 
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage

@@ -16,8 +16,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -236,6 +238,23 @@ type Config struct {
 	FailedRequests  int     `json:"failedRequests,omitempty"`  // Failed requests count
 	TotalTokens     int     `json:"totalTokens,omitempty"`     // Total tokens processed
 	TotalCredits    float64 `json:"totalCredits,omitempty"`    // Total credits consumed
+
+	// Custom External API & Priority Upstream Routing
+	ExternalAPI ExternalAPIConfig `json:"externalApi,omitempty"`
+}
+
+// ExternalAPIConfig represents custom external API settings and model mappings.
+type ExternalAPIConfig struct {
+	Enabled                    bool   `json:"enabled"`                      // Priority route via external API
+	BaseURL                    string `json:"baseUrl"`                      // Base URL e.g. https://api.tuongtacfree.vn/
+	AuthToken                  string `json:"authToken,omitempty"`          // Auth token
+	APIKey                     string `json:"apiKey,omitempty"`             // API key
+	DefaultModel               string `json:"defaultModel,omitempty"`       // Default model preference (e.g. opus)
+	DefaultSonnetModel         string `json:"defaultSonnetModel,omitempty"` // Default sonnet model ID
+	DefaultOpusModel           string `json:"defaultOpusModel,omitempty"`   // Default opus model ID
+	DefaultHaikuModel          string `json:"defaultHaikuModel,omitempty"`  // Default haiku model ID
+	DisableNonessentialTraffic bool   `json:"disableNonessentialTraffic,omitempty"`
+	TimeoutMS                  int    `json:"timeoutMs,omitempty"`
 }
 
 // AccountInfo contains account metadata retrieved from Kiro API.
@@ -1240,4 +1259,123 @@ func defaultSystemVersion() string {
 	default:
 		return "linux#6.6.87"
 	}
+}
+
+func GetExternalAPIConfig() ExternalAPIConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return ExternalAPIConfig{}
+	}
+	return externalAPIConfigWithEnvOverrides(cfg.ExternalAPI)
+}
+
+func UpdateExternalAPIConfig(ext ExternalAPIConfig) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	normalized, err := normalizeExternalAPIConfig(ext)
+	if err != nil {
+		return err
+	}
+	previous := cfg.ExternalAPI
+	cfg.ExternalAPI = normalized
+	if err := Save(); err != nil {
+		cfg.ExternalAPI = previous
+		return err
+	}
+	return nil
+}
+
+func normalizeExternalAPIConfig(ext ExternalAPIConfig) (ExternalAPIConfig, error) {
+	ext = externalAPIConfigWithDefaults(ext)
+	if ext.AuthToken == "" {
+		ext.AuthToken = ext.APIKey
+	}
+	if ext.APIKey == "" {
+		ext.APIKey = ext.AuthToken
+	}
+	if ext.BaseURL != "" {
+		parsed, err := url.Parse(ext.BaseURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return ext, errors.New("externalApi.baseUrl must be a valid URL")
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return ext, errors.New("externalApi.baseUrl must use http or https")
+		}
+		ext.BaseURL = strings.TrimRight(parsed.String(), "/")
+	}
+	if ext.Enabled && ext.BaseURL == "" {
+		return ext, errors.New("externalApi.baseUrl is required when external API is enabled")
+	}
+	return ext, nil
+}
+
+func externalAPIConfigWithDefaults(ext ExternalAPIConfig) ExternalAPIConfig {
+	ext.BaseURL = strings.TrimSpace(ext.BaseURL)
+	ext.AuthToken = strings.TrimSpace(ext.AuthToken)
+	ext.APIKey = strings.TrimSpace(ext.APIKey)
+	ext.DefaultModel = strings.TrimSpace(ext.DefaultModel)
+	ext.DefaultSonnetModel = strings.TrimSpace(ext.DefaultSonnetModel)
+	ext.DefaultOpusModel = strings.TrimSpace(ext.DefaultOpusModel)
+	ext.DefaultHaikuModel = strings.TrimSpace(ext.DefaultHaikuModel)
+	if ext.DefaultModel == "" {
+		ext.DefaultModel = "opus"
+	}
+	if ext.DefaultOpusModel == "" {
+		ext.DefaultOpusModel = "claude-opus-5"
+	}
+	if ext.DefaultSonnetModel == "" {
+		ext.DefaultSonnetModel = "claude-sonnet-4.5"
+	}
+	if ext.DefaultHaikuModel == "" {
+		ext.DefaultHaikuModel = "claude-haiku-4.5"
+	}
+	if ext.TimeoutMS <= 0 {
+		ext.TimeoutMS = 600000
+	}
+	return ext
+}
+
+func externalAPIConfigWithEnvOverrides(ext ExternalAPIConfig) ExternalAPIConfig {
+	if value := strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")); value != "" {
+		ext.BaseURL = value
+	}
+	if value := firstExternalAPIEnv("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"); value != "" {
+		ext.APIKey = value
+		ext.AuthToken = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_SONNET_MODEL")); value != "" {
+		ext.DefaultSonnetModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_OPUS_MODEL")); value != "" {
+		ext.DefaultOpusModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL")); value != "" {
+		ext.DefaultHaikuModel = value
+	}
+	if value := firstExternalAPIEnv("KIRO_GO_EXTERNAL_API_ENABLED", "EXTERNAL_API_ENABLED"); value != "" {
+		if enabled, err := strconv.ParseBool(value); err == nil {
+			ext.Enabled = enabled
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")); value != "" {
+		if disabled, err := strconv.ParseBool(value); err == nil {
+			ext.DisableNonessentialTraffic = disabled
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("API_TIMEOUT_MS")); value != "" {
+		if timeoutMS, err := strconv.Atoi(value); err == nil && timeoutMS > 0 {
+			ext.TimeoutMS = timeoutMS
+		}
+	}
+	return externalAPIConfigWithDefaults(ext)
+}
+
+func firstExternalAPIEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
 }

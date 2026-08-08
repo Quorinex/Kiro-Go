@@ -118,27 +118,11 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		return acc
 	}
 
-		// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
-	var best *config.Account
-	var earliest time.Time
-	for i := range p.accounts {
-		acc := &p.accounts[i]
-		if excluded != nil && excluded[acc.ID] {
-			continue
-		}
-		if isQuotaBlocked(*acc, allowOverUsage) {
-			continue
-		}
-		if cooldown, ok := p.cooldowns[acc.ID]; ok {
-			if best == nil || cooldown.Before(earliest) {
-				best = acc
-				earliest = cooldown
-			}
-		} else {
-			return acc
-		}
-	}
-	return best
+	// All otherwise-eligible accounts are cooling down. Returning the account
+	// whose cooldown expires first defeats the cooldown and creates a retry
+	// storm against an upstream that has already returned 429/transport errors.
+	// Fail fast until an account genuinely becomes eligible again.
+	return nil
 }
 
 // SetModelList 缓存账号支持的模型集合（由 handler 在刷新后调用）
@@ -229,30 +213,10 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		return acc
 	}
 
-	// fallback：找冷却时间最短且支持该模型的账号
-	var best *config.Account
-	var earliest time.Time
-	for i := range p.accounts {
-		acc := &p.accounts[i]
-		if excluded != nil && excluded[acc.ID] {
-			continue
-		}
-		if !p.accountHasModel(acc.ID, model) {
-			continue
-		}
-		if isQuotaBlocked(*acc, allowOverUsage) {
-			continue
-		}
-		if cooldown, ok := p.cooldowns[acc.ID]; ok {
-			if best == nil || cooldown.Before(earliest) {
-				best = acc
-				earliest = cooldown
-			}
-		} else {
-			return acc
-		}
-	}
-	return best
+	// Every account that supports this model is currently cooling down. Respect
+	// the cooldown instead of immediately selecting the least-bad account and
+	// hammering the same quota-limited upstream again.
+	return nil
 }
 
 // GetByID 根据 ID 获取账号
@@ -277,14 +241,24 @@ func (p *AccountPool) RecordSuccess(id string) {
 
 // RecordError 记录请求错误，设置冷却
 func (p *AccountPool) RecordError(id string, isQuotaError bool) {
+	cooldown := time.Duration(0)
+	if isQuotaError {
+		cooldown = time.Hour
+	}
+	p.RecordErrorWithCooldown(id, cooldown)
+}
+
+// RecordErrorWithCooldown records a failed request and optionally applies an
+// immediate cooldown. A zero duration preserves the existing transient-error
+// policy: only three consecutive errors trigger a one-minute cooldown.
+func (p *AccountPool) RecordErrorWithCooldown(id string, cooldown time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.errorCounts[id]++
 
-	if isQuotaError {
-		// 配额错误，冷却 1 小时
-		p.cooldowns[id] = time.Now().Add(time.Hour)
+	if cooldown > 0 {
+		p.cooldowns[id] = time.Now().Add(cooldown)
 	} else if p.errorCounts[id] >= 3 {
 		// 连续 3 次错误，冷却 1 分钟
 		p.cooldowns[id] = time.Now().Add(time.Minute)

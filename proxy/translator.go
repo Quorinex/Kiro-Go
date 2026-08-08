@@ -22,9 +22,10 @@ type modelMapping struct {
 }
 
 var modelAliases = []modelMapping{
+	{"claude-sonnet-5", "claude-sonnet-4.5"},
 	{"claude-sonnet-4-20250514", "claude-sonnet-4"},
 	{"claude-3-5-sonnet", "claude-sonnet-4.5"},
-	{"claude-3-opus", "claude-sonnet-4.5"},
+	{"claude-3-opus", "claude-opus-4.6"},
 	{"claude-3-sonnet", "claude-sonnet-4"},
 	{"claude-3-haiku", "claude-haiku-4.5"},
 	{"gpt-4-turbo", "claude-sonnet-4.5"},

@@ -9,8 +9,10 @@ import (
 	"io"
 	"kiro-go/config"
 	"kiro-go/logger"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -80,8 +82,8 @@ func GetClientForProxy(proxyURL string) *http.Client {
 		return cached.(*http.Client)
 	}
 	client := &http.Client{
-		Timeout:   5 * time.Minute,
-		Transport: buildKiroTransport(proxyURL),
+		// No Timeout: this client serves SSE streams (see buildKiroTransport).
+		Transport: buildKiroTransport(proxyURL, true),
 	}
 	proxyClientCache.Store(proxyURL, client)
 	return client
@@ -99,7 +101,7 @@ func GetRestClientForProxy(proxyURL string) *http.Client {
 	}
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: buildKiroTransport(proxyURL),
+		Transport: buildKiroTransport(proxyURL, false),
 	}
 	proxyClientCache.Store(cacheKey, client)
 	return client
@@ -114,14 +116,34 @@ func ResolveAccountProxyURL(account *config.Account) string {
 	return config.GetProxyURL()
 }
 
+// streamResponseHeaderTimeout bounds how long we wait for the upstream to send
+// response headers. Once headers arrive the stream may run arbitrarily long, so
+// no overall deadline is applied to streaming clients (see buildKiroTransport).
+const streamResponseHeaderTimeout = 2 * time.Minute
+
 // buildKiroTransport constructs an HTTP Transport with optional outbound proxy support.
-func buildKiroTransport(proxyURL string) *http.Transport {
+//
+// streaming selects the timeout policy. Streaming responses (SSE) must not carry
+// an overall deadline: http.Client.Timeout covers reading the response body, so
+// any cap would sever a healthy in-progress stream mid-token. Instead we bound
+// only the wait for response headers and let idle connection reaping handle
+// dead peers.
+func buildKiroTransport(proxyURL string, streaming bool) *http.Transport {
 	t := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  false,
-		ForceAttemptHTTP2:   true,
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: 15 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   50,
+		IdleConnTimeout:       15 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableCompression:    false,
+		ForceAttemptHTTP2:     true,
+	}
+	if streaming {
+		t.ResponseHeaderTimeout = streamResponseHeaderTimeout
 	}
 	if proxyURL != "" {
 		if u, err := url.Parse(proxyURL); err == nil {
@@ -130,22 +152,101 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 			t.ForceAttemptHTTP2 = false
 		}
 	} else {
-		t.Proxy = http.ProxyFromEnvironment
+		t.Proxy = proxyFromCurrentEnvironment()
 	}
 	return t
 }
 
+func proxyFromCurrentEnvironment() func(*http.Request) (*url.URL, error) {
+	httpProxy := firstProxyEnv("HTTP_PROXY", "http_proxy")
+	httpsProxy := firstProxyEnv("HTTPS_PROXY", "https_proxy")
+	allProxy := firstProxyEnv("ALL_PROXY", "all_proxy")
+	noProxy := firstProxyEnv("NO_PROXY", "no_proxy")
+
+	return func(req *http.Request) (*url.URL, error) {
+		if req == nil || req.URL == nil || shouldBypassEnvProxy(req.URL.Hostname(), noProxy) {
+			return nil, nil
+		}
+
+		rawProxy := ""
+		switch strings.ToLower(req.URL.Scheme) {
+		case "https":
+			rawProxy = firstNonEmpty(httpsProxy, allProxy)
+		case "http":
+			rawProxy = firstNonEmpty(httpProxy, allProxy)
+		default:
+			rawProxy = allProxy
+		}
+		if rawProxy == "" {
+			return nil, nil
+		}
+		return parseEnvProxyURL(rawProxy)
+	}
+}
+
+func firstProxyEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func parseEnvProxyURL(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	return url.Parse(raw)
+}
+
+func shouldBypassEnvProxy(host, noProxy string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	noProxy = strings.ToLower(strings.TrimSpace(noProxy))
+	if host == "" || noProxy == "" {
+		return false
+	}
+	if noProxy == "*" {
+		return true
+	}
+	for _, entry := range strings.Split(noProxy, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		entry = strings.TrimPrefix(entry, ".")
+		if host == entry || strings.HasSuffix(host, "."+entry) {
+			return true
+		}
+	}
+	return false
+}
+
 // InitKiroHttpClient initializes (or reinitializes) the HTTP clients used for Kiro API requests.
 func InitKiroHttpClient(proxyURL string) {
+	// No overall Timeout: this client streams SSE responses whose duration is
+	// bounded by the model's output, not by the clock.
 	client := &http.Client{
-		Timeout:   5 * time.Minute,
-		Transport: buildKiroTransport(proxyURL),
+		Transport: buildKiroTransport(proxyURL, true),
 	}
 	kiroHttpStore.Store(client)
 
 	restClient := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: buildKiroTransport(proxyURL),
+		Transport: buildKiroTransport(proxyURL, false),
 	}
 	kiroRestHttpStore.Store(restClient)
 }
@@ -427,9 +528,12 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		}
 
 		if resp.StatusCode == 429 {
+			retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
 			resp.Body.Close()
-			logger.Warnf("[KiroAPI] Endpoint %s quota exhausted (429), trying next...", ep.Name)
-			lastErr = fmt.Errorf("quota exhausted on %s", ep.Name)
+			if len(endpoints) > 1 {
+				logger.Warnf("[KiroAPI] Endpoint %s quota exhausted (429), trying next endpoint...", ep.Name)
+			}
+			lastErr = &upstreamQuotaError{endpoint: ep.Name, retryAfter: retryAfter}
 			continue
 		}
 
@@ -700,7 +804,6 @@ func collectUsageMaps(v interface{}, out *[]map[string]interface{}) {
 		}
 	}
 }
-
 
 func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 	for _, k := range keys {

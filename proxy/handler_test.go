@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
@@ -98,7 +99,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 
 	rec := httptest.NewRecorder()
-	h.handleClaudeNonStream(rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	h.handleClaudeNonStream(rec, nil, nil, nil, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "", false)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected retry to succeed, status=%d body=%s", rec.Code, rec.Body.String())
@@ -120,6 +121,259 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 	if len(resp.Content) == 0 || resp.Content[0].Text != "retried successfully" {
 		t.Fatalf("expected retried response content, got %#v", resp.Content)
+	}
+}
+
+func TestExternalClaudeRoutingMapsDefaultOpusToOpus5(t *testing.T) {
+	t.Setenv("KIRO_GO_EXTERNAL_API_ENABLED", "true")
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	var gotPath string
+	var gotModel string
+	var gotAPIKey string
+	var gotAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotAuthorization = r.Header.Get("Authorization")
+
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode external payload: %v", err)
+		}
+		gotModel, _ = payload["model"].(string)
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-opus-5","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+	t.Setenv("ANTHROPIC_BASE_URL", server.URL)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-test")
+	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-5")
+
+	if err := config.UpdateExternalAPIConfig(config.ExternalAPIConfig{
+		Enabled:      true,
+		BaseURL:      server.URL,
+		APIKey:       "sk-test",
+		DefaultModel: "opus",
+	}); err != nil {
+		t.Fatalf("update external API config: %v", err)
+	}
+
+	h := &Handler{}
+	reqBody := `{"model":"auto","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`
+	rec := httptest.NewRecorder()
+	h.handleClaudeMessagesInternal(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/v1/messages" {
+		t.Fatalf("external path = %q, want /v1/messages", gotPath)
+	}
+	if gotModel != "claude-opus-5" {
+		t.Fatalf("external model = %q, want claude-opus-5", gotModel)
+	}
+	if gotAPIKey != "sk-test" || gotAuthorization != "Bearer sk-test" {
+		t.Fatalf("external auth headers not forwarded correctly: x-api-key=%q authorization=%q", gotAPIKey, gotAuthorization)
+	}
+}
+
+func TestExternalClaudeRequestLogRecordsUsageAndDuration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"mapped-model","stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":5}}`))
+	}))
+	defer server.Close()
+
+	h := &Handler{}
+	req := &ClaudeRequest{Model: "claude-opus-5", Messages: []ClaudeMessage{{Role: "user", Content: "hello"}}}
+	body := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`)
+	rec := httptest.NewRecorder()
+
+	if !h.proxyExternalClaude(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)), body, req, config.ExternalAPIConfig{Enabled: true, BaseURL: server.URL, DefaultModel: "mapped-model"}, false) {
+		t.Fatalf("proxyExternalClaude returned false")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	logs := h.getRequestLogs()
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want 1", len(logs))
+	}
+	if logs[0].Tokens != 7 {
+		t.Fatalf("tokens = %d, want 7", logs[0].Tokens)
+	}
+	if logs[0].Duration <= 0 {
+		t.Fatalf("duration = %d, want > 0", logs[0].Duration)
+	}
+}
+
+func TestExternalClaudeRetryableStatusFallsBackBeforeWritingResponse(t *testing.T) {
+	resetExternalCircuits()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"external quota"}`))
+	}))
+	defer server.Close()
+
+	h := &Handler{}
+	req := &ClaudeRequest{Model: "claude-opus-5", Messages: []ClaudeMessage{{Role: "user", Content: "hello"}}}
+	body := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`)
+	rec := httptest.NewRecorder()
+
+	if h.proxyExternalClaude(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)), body, req, config.ExternalAPIConfig{BaseURL: server.URL}, false) {
+		t.Fatal("retryable external status should fall back to Kiro")
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("external error body leaked before fallback: %s", rec.Body.String())
+	}
+}
+
+func TestExternalClaudeTransportErrorFallsBackBeforeWritingResponse(t *testing.T) {
+	resetExternalCircuits()
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	baseURL := server.URL
+	server.Close()
+
+	h := &Handler{}
+	req := &ClaudeRequest{Model: "claude-opus-5", Messages: []ClaudeMessage{{Role: "user", Content: "hello"}}}
+	body := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`)
+	rec := httptest.NewRecorder()
+
+	if h.proxyExternalClaude(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)), body, req, config.ExternalAPIConfig{BaseURL: baseURL, TimeoutMS: 100}, false) {
+		t.Fatal("external transport error should fall back to Kiro")
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("transport error response leaked before fallback: %s", rec.Body.String())
+	}
+}
+
+func TestExternalClaudeRetryableFailureAndSuccessShareCircuitKey(t *testing.T) {
+	resetExternalCircuits()
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"mapped-model","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	h := &Handler{}
+	req := &ClaudeRequest{Model: "claude-opus-5", Messages: []ClaudeMessage{{Role: "user", Content: "hello"}}}
+	body := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`)
+	ext := config.ExternalAPIConfig{BaseURL: server.URL, DefaultModel: "mapped-model"}
+
+	if h.proxyExternalClaude(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)), body, req, ext, false) {
+		t.Fatal("first retryable response should fall back")
+	}
+	if failures, _ := externalCircuitStateSnapshot(server.URL); failures != 1 {
+		t.Fatalf("circuit failures after retryable response = %d, want 1", failures)
+	}
+	if !h.proxyExternalClaude(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)), body, req, ext, false) {
+		t.Fatal("second successful response should be served externally")
+	}
+	if failures, openUntil := externalCircuitStateSnapshot(server.URL); failures != 0 || !openUntil.IsZero() {
+		t.Fatalf("success did not reset same circuit key: failures=%d openUntil=%v", failures, openUntil)
+	}
+}
+
+func TestExternalClaudeStopHookNormalizationForcesCleanJSONStream(t *testing.T) {
+	t.Setenv("KIRO_GO_EXTERNAL_API_ENABLED", "true")
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	var gotStream bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode external payload: %v", err)
+		}
+		if stream, _ := payload["stream"].(bool); stream {
+			gotStream = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"```json\\n{\\\"ok\\\": true, \\\"reason\\\": \\\"done\\\"}\\n```\"}],\"model\":\"claude-opus-5\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}"))
+	}))
+	defer server.Close()
+	t.Setenv("ANTHROPIC_BASE_URL", server.URL)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-test")
+	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-5")
+
+	if err := config.UpdateExternalAPIConfig(config.ExternalAPIConfig{
+		Enabled:      true,
+		BaseURL:      server.URL,
+		APIKey:       "sk-test",
+		DefaultModel: "opus",
+	}); err != nil {
+		t.Fatalf("update external API config: %v", err)
+	}
+
+	h := &Handler{}
+	reqBody := `{"model":"auto","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"Based on the conversation transcript above, has the following stopping condition been satisfied? Answer based on transcript evidence only.\n\nCondition: reply exactly DONE and stop\n\nARGUMENTS: {\"session_id\":\"s\",\"transcript_path\":\"/tmp/transcript.jsonl\",\"cwd\":\"/tmp\",\"prompt_id\":\"p\",\"permission_mode\":\"bypassPermissions\",\"effort\":{\"level\":\"low\"},\"hook_event_name\":\"Stop\",\"stop_hook_active\":false,\"last_assistant_message\":\"DONE\",\"background_tasks\":[],\"session_crons\":[]}"}]}`
+	rec := httptest.NewRecorder()
+	h.handleClaudeMessagesInternal(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if gotStream {
+		t.Fatalf("expected proxy to force non-stream upstream request for hook normalization")
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: message_start") || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("expected SSE envelope, got %s", body)
+	}
+	if strings.Contains(body, "```json") || strings.Contains(body, "```") {
+		t.Fatalf("expected markdown fences to be stripped, got %s", body)
+	}
+	if !strings.Contains(body, `{\"ok\":true,\"reason\":\"done\"}`) {
+		t.Fatalf("expected normalized JSON verdict in stream body, got %s", body)
+	}
+}
+
+func TestCopyExternalClaudeHeadersDoesNotForwardLocalAuth(t *testing.T) {
+	src := http.Header{
+		"Anthropic-Version": []string{"2023-06-01"},
+		"Anthropic-Beta":    []string{"tools-2024-04-04"},
+		"X-Api-Key":         []string{"local-proxy-key"},
+		"Authorization":     []string{"Bearer local-proxy-key"},
+		"X-Trace-Id":        []string{"local-trace"},
+	}
+	dst := http.Header{}
+
+	copyExternalClaudeHeaders(dst, src)
+
+	if got := dst.Get("Anthropic-Version"); got != "2023-06-01" {
+		t.Fatalf("anthropic-version = %q", got)
+	}
+	if got := dst.Get("Anthropic-Beta"); got != "tools-2024-04-04" {
+		t.Fatalf("anthropic-beta = %q", got)
+	}
+	if got := dst.Get("X-Api-Key"); got != "" {
+		t.Fatalf("local X-Api-Key leaked to external upstream")
+	}
+	if got := dst.Get("Authorization"); got != "" {
+		t.Fatalf("local Authorization leaked to external upstream")
+	}
+	if got := dst.Get("X-Trace-Id"); got != "" {
+		t.Fatalf("local X-* header leaked to external upstream")
 	}
 }
 

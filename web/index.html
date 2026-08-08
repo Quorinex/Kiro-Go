@@ -273,6 +273,47 @@
           <button class="btn btn-primary" id="saveOverUsageBtn" data-i18n="settings.saveUsage"></button>
         </div>
 
+        <!-- Custom Model & External API settings -->
+        <div class="card">
+          <div class="card-header"><span class="card-title"><i class="fa-solid fa-cloud-bolt"></i> Cấu hình Model & Priority Call URL</span></div>
+          <div class="form-group mb-3">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <span class="switch"><input type="checkbox" id="externalApiPriority" /><span class="slider"></span></span>
+              <span class="font-semibold">Dùng External API thay cho Account List Kiro</span>
+            </label>
+            <small class="text-xs text-gray-500 block mt-1">Bật: gọi URL ngoài trước. Tắt: dùng Account List Kiro như cũ, không xoá hay tắt account nào.</small>
+            <div id="externalRoutingStatus" class="text-xs muted-text mt-2"></div>
+          </div>
+          <div class="form-group">
+            <label class="font-semibold">ANTHROPIC_BASE_URL (URL API ngoài)</label>
+            <input type="text" id="externalBaseUrl" placeholder="https://api.tuongtacfree.vn/" />
+          </div>
+          <div class="form-group">
+            <label class="font-semibold">ANTHROPIC_API_KEY / Auth Token</label>
+            <input type="password" id="externalApiKey" placeholder="sk-..." autocomplete="off" />
+          </div>
+          <div class="form-group">
+            <label class="font-semibold">Model Mặc Định (Default Model)</label>
+            <input type="text" id="externalDefaultModel" placeholder="opus" />
+          </div>
+          <div class="form-group">
+            <label class="text-xs font-semibold">Opus Model</label>
+            <input type="text" id="externalOpusModel" placeholder="claude-opus-5" />
+          </div>
+          <div class="form-group">
+            <label class="text-xs font-semibold">Sonnet Model</label>
+            <input type="text" id="externalSonnetModel" placeholder="claude-sonnet-4.5" />
+          </div>
+          <div class="form-group">
+            <label class="text-xs font-semibold">Haiku Model</label>
+            <input type="text" id="externalHaikuModel" placeholder="claude-haiku-4.5" />
+          </div>
+          <div class="flex flex-wrap gap-2 mt-4" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem;">
+            <button class="btn btn-primary" id="saveExternalApiBtn"><i class="fa-solid fa-floppy-disk"></i> Lưu Cấu Hình Model & API</button>
+            <button class="btn btn-outline" id="applyTuongTacFreePresetBtn" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i> Áp Dụng Preset TuongTacFree (không gồm API key)</button>
+          </div>
+        </div>
+
         <!-- Thinking settings -->
         <div class="card">
           <div class="card-header"><span class="card-title" data-i18n="settings.thinkingSettings"></span></div>
