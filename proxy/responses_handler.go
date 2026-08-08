@@ -239,7 +239,8 @@ func (h *Handler) handleResponsesNonStream(
 		return
 	}
 	h.recordFailureWithDetails("responses", model, "", lastErr)
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendOpenAIError(w, upstreamErrorHTTPStatus(lastErr), "server_error", lastErr.Error())
 }
 
 func mapResponsesCompletion(reason string) (status, incompleteReason string) {

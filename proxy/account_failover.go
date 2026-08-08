@@ -4,10 +4,90 @@ import (
 	"errors"
 	"kiro-go/config"
 	"kiro-go/logger"
+	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const maxAccountRetryAttempts = 3
+
+const (
+	defaultQuotaCooldown = time.Hour
+	minQuotaCooldown     = 10 * time.Second
+	maxQuotaCooldown     = 24 * time.Hour
+)
+
+type upstreamQuotaError struct {
+	endpoint   string
+	retryAfter string
+	retryFor   time.Duration
+}
+
+func (e *upstreamQuotaError) Error() string {
+	if e == nil || e.endpoint == "" {
+		return "quota exhausted"
+	}
+	return "quota exhausted on " + e.endpoint
+}
+
+func retryAfterDuration(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultQuotaCooldown
+	}
+	var duration time.Duration
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		duration = time.Duration(seconds) * time.Second
+	} else if retryAt, err := http.ParseTime(value); err == nil {
+		duration = retryAt.Sub(now)
+	} else {
+		return defaultQuotaCooldown
+	}
+	if duration < minQuotaCooldown {
+		return minQuotaCooldown
+	}
+	if duration > maxQuotaCooldown {
+		return maxQuotaCooldown
+	}
+	return duration
+}
+
+func retryAfterHeader(err error) string {
+	var quotaErr *upstreamQuotaError
+	if errors.As(err, &quotaErr) {
+		if quotaErr.retryFor > 0 {
+			seconds := int64((quotaErr.retryFor + time.Second - 1) / time.Second)
+			return strconv.FormatInt(seconds, 10)
+		}
+		return strings.TrimSpace(quotaErr.retryAfter)
+	}
+	return ""
+}
+
+func upstreamErrorHTTPStatus(err error) int {
+	if err == nil {
+		return http.StatusServiceUnavailable
+	}
+	msg := err.Error()
+	switch {
+	case isQuotaErrorMessage(msg):
+		return http.StatusTooManyRequests
+	case isAuthErrorMessage(msg):
+		return http.StatusUnauthorized
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+func setRetryAfterHeader(w http.ResponseWriter, err error) {
+	if w == nil {
+		return
+	}
+	if value := retryAfterHeader(err); value != "" {
+		w.Header().Set("Retry-After", value)
+	}
+}
 
 // maxSameAccountStreamRetries bounds same-account recovery of a truncated
 // stream. Kiro IDE caps its truncation retry at one (Dt3 = 1 in extension.js),
@@ -167,7 +247,16 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 		h.disableAccountOverage(account)
 		h.pool.RecordError(account.ID, false)
 	case isQuotaErrorMessage(errMsg):
-		h.pool.RecordError(account.ID, true)
+		cooldown := defaultQuotaCooldown
+		var quotaErr *upstreamQuotaError
+		if errors.As(err, &quotaErr) {
+			if quotaErr.retryFor > 0 {
+				cooldown = quotaErr.retryFor
+			} else {
+				cooldown = retryAfterDuration(quotaErr.retryAfter, time.Now())
+			}
+		}
+		h.pool.RecordErrorWithCooldown(account.ID, cooldown)
 	case isSuspensionErrorMessage(errMsg):
 		h.disableAccount(account, "BANNED", "AWS temporarily suspended - unusual user activity detected")
 	case isProfileUnavailableErrorMessage(errMsg):

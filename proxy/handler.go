@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -864,6 +866,39 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
 	}
+	normalizeStopHookJSON := isClaudeCodeStopHookEvaluatorRequest(&req)
+
+	// Prefer the configured external provider. Keep the original request
+	// immutable so a retryable external failure falls back to Kiro with the
+	// client's model rather than a provider-specific mapped model.
+	ext := config.GetExternalAPIConfig()
+	if ext.Enabled && strings.TrimSpace(ext.BaseURL) != "" {
+		externalReq := req
+		origModel := strings.ToLower(externalReq.Model)
+		switch {
+		case strings.Contains(origModel, "opus") && ext.DefaultOpusModel != "":
+			externalReq.Model = ext.DefaultOpusModel
+		case strings.Contains(origModel, "sonnet") && ext.DefaultSonnetModel != "":
+			externalReq.Model = ext.DefaultSonnetModel
+		case strings.Contains(origModel, "haiku") && ext.DefaultHaikuModel != "":
+			externalReq.Model = ext.DefaultHaikuModel
+		case strings.Contains(origModel, "fable") && ext.DefaultSonnetModel != "":
+			externalReq.Model = ext.DefaultSonnetModel
+		case ext.DefaultModel != "":
+			externalReq.Model = ext.DefaultModel
+		}
+		mappedLower := strings.ToLower(externalReq.Model)
+		isOpenAICompatible := strings.Contains(ext.BaseURL, "localhost:5100") ||
+			strings.Contains(mappedLower, "kimi") || strings.Contains(mappedLower, "gpt") ||
+			strings.Contains(mappedLower, "gemini") || strings.Contains(mappedLower, "deepseek")
+		if isOpenAICompatible {
+			if h.proxyExternalClaudeToOpenAI(w, r, &externalReq, ext) {
+				return
+			}
+		} else if h.proxyExternalClaude(w, r, body, &externalReq, ext, normalizeStopHookJSON) {
+			return
+		}
+	}
 
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
@@ -899,6 +934,360 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	} else {
 		h.handleClaudeNonStream(r.Context(), w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	}
+}
+
+func (h *Handler) proxyExternalClaude(w http.ResponseWriter, r *http.Request, body []byte, req *ClaudeRequest, ext config.ExternalAPIConfig, normalizeStopHookJSON bool) bool {
+	reqStart := time.Now()
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	estimatedInputTokens := estimateClaudeRequestInputTokens(req)
+	baseURL := strings.TrimSuffix(ext.BaseURL, "/")
+	targetURL := baseURL
+	displayURL := strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://")
+	allowed, releaseProbe := externalCircuitAcquire(baseURL, time.Now())
+	if !allowed {
+		logger.Debugf("[ExternalAPI] Circuit open for %s; using Kiro account pool", displayURL)
+		return false
+	}
+	defer releaseProbe()
+	if strings.HasSuffix(targetURL, "/v1") {
+		targetURL += "/messages"
+	} else if !strings.HasSuffix(targetURL, "/v1/messages") && !strings.HasSuffix(targetURL, "/messages") {
+		targetURL += "/v1/messages"
+	}
+
+	origModel := strings.ToLower(req.Model)
+	mappedModel := req.Model
+	if strings.Contains(origModel, "opus") && ext.DefaultOpusModel != "" {
+		mappedModel = ext.DefaultOpusModel
+	} else if strings.Contains(origModel, "sonnet") && ext.DefaultSonnetModel != "" {
+		mappedModel = ext.DefaultSonnetModel
+	} else if strings.Contains(origModel, "haiku") && ext.DefaultHaikuModel != "" {
+		mappedModel = ext.DefaultHaikuModel
+	} else if strings.Contains(origModel, "fable") && ext.DefaultSonnetModel != "" {
+		mappedModel = ext.DefaultSonnetModel
+	} else if ext.DefaultModel != "" {
+		if ext.DefaultModel == "opus" && ext.DefaultOpusModel != "" {
+			mappedModel = ext.DefaultOpusModel
+		} else if ext.DefaultModel == "sonnet" && ext.DefaultSonnetModel != "" {
+			mappedModel = ext.DefaultSonnetModel
+		} else if ext.DefaultModel == "haiku" && ext.DefaultHaikuModel != "" {
+			mappedModel = ext.DefaultHaikuModel
+		} else {
+			mappedModel = ext.DefaultModel
+		}
+	}
+
+	originalStream := req.Stream
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err == nil {
+		payload["model"] = mappedModel
+		payload["reasoning_effort"] = "xhigh"
+		delete(payload, "thinking")
+		if normalizeStopHookJSON {
+			payload["stream"] = false
+		}
+		if updated, err := json.Marshal(payload); err == nil {
+			body = updated
+		}
+	}
+
+	clientTimeout := 10 * time.Minute
+	if ext.TimeoutMS > 0 {
+		clientTimeout = time.Duration(ext.TimeoutMS) * time.Millisecond
+	}
+
+	outReq, err := http.NewRequestWithContext(r.Context(), "POST", targetURL, bytes.NewReader(body))
+	if err != nil {
+		logger.Errorf("[ExternalAPI] Failed to create request: %v", err)
+		return false
+	}
+
+	copyExternalClaudeHeaders(outReq.Header, r.Header)
+	outReq.Header.Set("Content-Type", "application/json")
+	apiKey := ext.APIKey
+	if apiKey == "" {
+		apiKey = ext.AuthToken
+	}
+	if apiKey != "" {
+		outReq.Header.Set("x-api-key", apiKey)
+		outReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	client := &http.Client{Timeout: clientTimeout}
+	resp, err := client.Do(outReq)
+	if err != nil {
+		logger.Warnf("[ExternalAPI] Request to external URL %s failed: %v", targetURL, err)
+		if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
+			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated transport failures", displayURL, cooldown)
+		}
+		return false
+	}
+	defer resp.Body.Close()
+	if isRetryableExternalStatus(resp.StatusCode) {
+		if cooldown, opened := externalCircuitFailure(baseURL, resp.Header.Get("Retry-After"), clientTimeout); opened {
+			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated HTTP %d responses", displayURL, cooldown, resp.StatusCode)
+		}
+		return false
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		externalCircuitSuccess(baseURL)
+	}
+
+	if normalizeStopHookJSON {
+		inputTokens, outputTokens := h.writeNormalizedExternalClaudeResponse(w, resp, mappedModel, originalStream)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if inputTokens <= 0 {
+				inputTokens = estimatedInputTokens
+			}
+			h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, 0)
+			h.recordSuccessLog("claude", req.Model, displayURL, inputTokens+outputTokens, 0, time.Since(reqStart).Milliseconds())
+		} else {
+			h.recordFailureWithDuration("claude", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
+		}
+		return true
+	}
+
+	for k, v := range resp.Header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	var externalInputTokens, externalOutputTokens int
+	if req.Stream {
+		flusher, _ := w.(http.Flusher)
+		reader := bufio.NewReader(resp.Body)
+		targetPattern := []byte(`"model":"` + mappedModel + `"`)
+		replacementPattern := []byte(`"model":"` + req.Model + `"`)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				if inTok, outTok := externalClaudeUsageFromSSELine(line); inTok > 0 || outTok > 0 {
+					externalInputTokens, externalOutputTokens = mergeExternalUsage(externalInputTokens, externalOutputTokens, inTok, outTok)
+				}
+				if bytes.Contains(line, targetPattern) {
+					line = bytes.ReplaceAll(line, targetPattern, replacementPattern)
+				}
+				w.Write(line)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+	} else {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err == nil {
+			externalInputTokens, externalOutputTokens = externalClaudeUsageFromBody(bodyBytes)
+			bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"model":"`+mappedModel+`"`), []byte(`"model":"`+req.Model+`"`))
+			w.Write(bodyBytes)
+		}
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if externalInputTokens <= 0 {
+			externalInputTokens = estimatedInputTokens
+		}
+		h.recordSuccessForApiKey(apiKeyID, externalInputTokens, externalOutputTokens, 0)
+		h.recordSuccessLog("claude", req.Model, displayURL, externalInputTokens+externalOutputTokens, 0, time.Since(reqStart).Milliseconds())
+	} else {
+		h.recordFailureWithDuration("claude", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
+	}
+	return true
+}
+
+func copyExternalClaudeHeaders(dst, src http.Header) {
+	for k, v := range src {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "anthropic-") {
+			dst[k] = v
+		}
+	}
+}
+
+func copyExternalOpenAIHeaders(dst, src http.Header) {
+	for _, name := range []string{
+		"User-Agent",
+		"Openai-Organization",
+		"Openai-Project",
+		"Idempotency-Key",
+		"X-Request-Id",
+	} {
+		if values := src.Values(name); len(values) > 0 {
+			dst[name] = append([]string(nil), values...)
+		}
+	}
+}
+
+func (h *Handler) writeNormalizedExternalClaudeResponse(w http.ResponseWriter, resp *http.Response, model string, stream bool) (int, int) {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return 0, 0
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.sendClaudeError(w, 502, "api_error", "Failed to read external API response: "+err.Error())
+		return 0, 0
+	}
+
+	claudeResp := normalizeClaudeStopHookResponseBody(body, model)
+	if stream {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			h.sendClaudeError(w, 500, "api_error", "Streaming not supported")
+			return claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens
+		}
+		h.sendClaudeBufferedTextStream(
+			w,
+			flusher,
+			claudeResp.ID,
+			claudeResp.Model,
+			claudeResponseText(claudeResp),
+			claudeResp.Usage.InputTokens,
+			claudeResp.Usage.OutputTokens,
+			promptCacheUsage{},
+			false,
+		)
+		return claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(claudeResp)
+	return claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens
+}
+
+func externalClaudeUsageFromBody(body []byte) (int, int) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return 0, 0
+	}
+	return externalClaudeUsageFromMap(payload)
+}
+
+func externalClaudeUsageFromSSELine(line []byte) (int, int) {
+	line = bytes.TrimSpace(line)
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return 0, 0
+	}
+	data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return 0, 0
+	}
+	return externalClaudeUsageFromBody(data)
+}
+
+func externalClaudeUsageFromMap(payload map[string]interface{}) (int, int) {
+	if payload == nil {
+		return 0, 0
+	}
+	if message, ok := payload["message"].(map[string]interface{}); ok {
+		if inTok, outTok := externalClaudeUsageFromMap(message); inTok > 0 || outTok > 0 {
+			return inTok, outTok
+		}
+	}
+	usage, ok := payload["usage"].(map[string]interface{})
+	if !ok {
+		return 0, 0
+	}
+	inputTokens := firstExternalUsageInt(usage, "input_tokens", "prompt_tokens", "inputTokens", "promptTokens")
+	outputTokens := firstExternalUsageInt(usage, "output_tokens", "completion_tokens", "outputTokens", "completionTokens")
+	if inputTokens <= 0 || outputTokens <= 0 {
+		totalTokens := firstExternalUsageInt(usage, "total_tokens", "totalTokens")
+		if inputTokens <= 0 && totalTokens > outputTokens {
+			inputTokens = totalTokens - outputTokens
+		}
+		if outputTokens <= 0 && totalTokens > inputTokens {
+			outputTokens = totalTokens - inputTokens
+		}
+	}
+	return inputTokens, outputTokens
+}
+
+func firstExternalUsageInt(m map[string]interface{}, keys ...string) int {
+	for _, key := range keys {
+		if value, ok := m[key]; ok {
+			switch v := value.(type) {
+			case float64:
+				return int(v)
+			case int:
+				return v
+			case json.Number:
+				if n, err := v.Int64(); err == nil {
+					return int(n)
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func mergeExternalUsage(currentInput, currentOutput, newInput, newOutput int) (int, int) {
+	if newInput > 0 {
+		currentInput = newInput
+	}
+	if newOutput > 0 {
+		currentOutput = newOutput
+	}
+	return currentInput, currentOutput
+}
+
+func normalizeClaudeStopHookResponseBody(body []byte, model string) *ClaudeResponse {
+	var resp ClaudeResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		text := normalizeClaudeStopHookEvaluatorText(string(body))
+		return KiroToClaudeResponse(text, "", false, nil, 1, estimateClaudeOutputTokens(text, "", nil), model, "end_turn")
+	}
+	normalizeClaudeStopHookResponse(&resp, model)
+	return &resp
+}
+
+func normalizeClaudeStopHookResponse(resp *ClaudeResponse, model string) {
+	text := normalizeClaudeStopHookEvaluatorText(claudeResponseText(resp))
+	resp.Content = []ClaudeContentBlock{{
+		Type: "text",
+		Text: text,
+	}}
+	resp.StopReason = "end_turn"
+	resp.StopSequence = nil
+	if resp.ID == "" {
+		resp.ID = "msg_" + uuid.New().String()
+	}
+	if resp.Type == "" {
+		resp.Type = "message"
+	}
+	if resp.Role == "" {
+		resp.Role = "assistant"
+	}
+	if resp.Model == "" {
+		resp.Model = model
+	}
+	if resp.Usage.InputTokens <= 0 {
+		resp.Usage.InputTokens = 1
+	}
+	resp.Usage.OutputTokens = estimateClaudeOutputTokens(text, "", nil)
+}
+
+func claudeResponseText(resp *ClaudeResponse) string {
+	if resp == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			b.WriteString(block.Text)
+		}
+	}
+	return b.String()
 }
 
 // handleClaudeStream Claude 流式响应
@@ -1376,7 +1765,52 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 	}
 
 	h.recordFailureWithDetails("claude", model, "", lastErr)
-	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendClaudeError(w, upstreamErrorHTTPStatus(lastErr), "api_error", lastErr.Error())
+}
+
+func (h *Handler) sendClaudeBufferedTextStream(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	msgID, model, text string,
+	inputTokens, outputTokens int,
+	cacheUsage promptCacheUsage,
+	includeCache bool,
+) {
+	if msgID == "" {
+		msgID = "msg_" + uuid.New().String()
+	}
+	if inputTokens <= 0 {
+		inputTokens = 1
+	}
+	if outputTokens <= 0 {
+		outputTokens = estimateClaudeOutputTokens(text, "", nil)
+	}
+	h.sendSSE(w, flusher, "message_start", map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id": msgID, "type": "message", "role": "assistant",
+			"content": []interface{}{}, "model": model,
+			"stop_reason": nil, "stop_sequence": nil,
+			"usage": buildClaudeUsageMap(inputTokens, 0, cacheUsage, includeCache),
+		},
+	})
+	if text != "" {
+		h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+			"type": "content_block_start", "index": 0,
+			"content_block": map[string]string{"type": "text", "text": ""},
+		})
+		h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+			"type": "content_block_delta", "index": 0,
+			"delta": map[string]string{"type": "text_delta", "text": text},
+		})
+		h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 0})
+	}
+	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
+		"type": "message_delta", "delta": map[string]interface{}{"stop_reason": "end_turn"},
+		"usage": buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, includeCache),
+	})
+	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }
 
 func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
@@ -1449,6 +1883,10 @@ func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTok
 
 // recordFailureWithDetails records a failure and stores it in the request logs.
 func (h *Handler) recordFailureWithDetails(endpoint, model, accountID string, err error) {
+	h.recordFailureWithDuration(endpoint, model, accountID, err, 0)
+}
+
+func (h *Handler) recordFailureWithDuration(endpoint, model, accountID string, err error, durationMs int64) {
 	atomic.AddInt64(&h.totalRequests, 1)
 	atomic.AddInt64(&h.failedRequests, 1)
 
@@ -1467,6 +1905,7 @@ func (h *Handler) recordFailureWithDetails(endpoint, model, accountID string, er
 		Status:    "error",
 		Error:     errMsg,
 		ErrorType: errType,
+		Duration:  durationMs,
 	}
 
 	h.appendRequestLog(entry)
@@ -1677,7 +2116,8 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 	}
 
 	h.recordFailureWithDetails("claude", model, "", lastErr)
-	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendClaudeError(w, upstreamErrorHTTPStatus(lastErr), "api_error", lastErr.Error())
 }
 
 func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, message string) {
@@ -1690,6 +2130,132 @@ func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, me
 			"message": message,
 		},
 	})
+}
+
+func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, body []byte, req *OpenAIRequest, ext config.ExternalAPIConfig) bool {
+	reqStart := time.Now()
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	estimatedInputTokens := estimateOpenAIRequestInputTokens(req)
+	baseURL := strings.TrimSuffix(ext.BaseURL, "/")
+	targetURL := baseURL
+	displayURL := strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://")
+	allowed, releaseProbe := externalCircuitAcquire(baseURL, time.Now())
+	if !allowed {
+		logger.Debugf("[ExternalAPI] Circuit open for %s; using Kiro account pool", displayURL)
+		return false
+	}
+	defer releaseProbe()
+	if strings.HasSuffix(targetURL, "/v1") {
+		targetURL += "/chat/completions"
+	} else if !strings.HasSuffix(targetURL, "/v1/chat/completions") && !strings.HasSuffix(targetURL, "/chat/completions") {
+		targetURL += "/v1/chat/completions"
+	}
+
+	mappedModel := req.Model
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err == nil {
+		payload["model"] = mappedModel
+		if updated, err := json.Marshal(payload); err == nil {
+			body = updated
+		}
+	}
+
+	clientTimeout := 10 * time.Minute
+	if ext.TimeoutMS > 0 {
+		clientTimeout = time.Duration(ext.TimeoutMS) * time.Millisecond
+	}
+
+	outReq, err := http.NewRequestWithContext(r.Context(), "POST", targetURL, bytes.NewReader(body))
+	if err != nil {
+		logger.Errorf("[ExternalAPI] Failed to create OpenAI request: %v", err)
+		return false
+	}
+
+	outReq.Header.Set("Content-Type", "application/json")
+	if ext.AuthToken != "" {
+		outReq.Header.Set("Authorization", "Bearer "+ext.AuthToken)
+	} else if ext.APIKey != "" {
+		outReq.Header.Set("Authorization", "Bearer "+ext.APIKey)
+	}
+
+	copyExternalOpenAIHeaders(outReq.Header, r.Header)
+
+	client := &http.Client{Timeout: clientTimeout}
+	resp, err := client.Do(outReq)
+	if err != nil {
+		if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
+			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated transport failures", displayURL, cooldown)
+		}
+		h.recordFailureWithDuration("openai", req.Model, displayURL, err, time.Since(reqStart).Milliseconds())
+		return false
+	}
+	defer resp.Body.Close()
+	if isRetryableExternalStatus(resp.StatusCode) {
+		if cooldown, opened := externalCircuitFailure(baseURL, resp.Header.Get("Retry-After"), clientTimeout); opened {
+			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated HTTP %d responses", displayURL, cooldown, resp.StatusCode)
+		}
+		h.recordFailureWithDuration("openai", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
+		return false
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		externalCircuitSuccess(baseURL)
+	}
+
+	if resp.StatusCode >= 400 {
+		h.recordFailureWithDuration("openai", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(bodyBytes)
+		return true
+	}
+
+	for k, v := range resp.Header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	var externalInputTokens, externalOutputTokens int
+	if req.Stream {
+		flusher, _ := w.(http.Flusher)
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				w.Write(line)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+	} else {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err == nil {
+			var respObj map[string]interface{}
+			if err := json.Unmarshal(bodyBytes, &respObj); err == nil {
+				if usage, ok := respObj["usage"].(map[string]interface{}); ok {
+					if pTok, ok := usage["prompt_tokens"].(float64); ok {
+						externalInputTokens = int(pTok)
+					}
+					if cTok, ok := usage["completion_tokens"].(float64); ok {
+						externalOutputTokens = int(cTok)
+					}
+				}
+			}
+			bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"model":"`+mappedModel+`"`), []byte(`"model":"`+req.Model+`"`))
+			w.Write(bodyBytes)
+		}
+	}
+
+	if externalInputTokens <= 0 {
+		externalInputTokens = estimatedInputTokens
+	}
+	h.recordSuccessForApiKey(apiKeyID, externalInputTokens, externalOutputTokens, 0)
+	h.recordSuccessLog("openai", req.Model, displayURL, externalInputTokens+externalOutputTokens, 0, time.Since(reqStart).Milliseconds())
+	return true
 }
 
 // handleOpenAIChat OpenAI API 处理
@@ -2164,7 +2730,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	}
 
 	h.recordFailureWithDetails("openai", model, "", lastErr)
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendOpenAIError(w, upstreamErrorHTTPStatus(lastErr), "server_error", lastErr.Error())
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
@@ -2275,7 +2842,8 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 	}
 
 	h.recordFailureWithDetails("openai", model, "", lastErr)
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendOpenAIError(w, upstreamErrorHTTPStatus(lastErr), "server_error", lastErr.Error())
 }
 
 func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, message string) {
@@ -4764,4 +5332,253 @@ func clampInt(v, min, max int) int {
 		return max
 	}
 	return v
+}
+
+// proxyExternalClaudeToOpenAI intercepts a Claude API request, transforms it into a basic OpenAI request,
+// sends it to external URL with stream=false, and mocks a Claude SSE stream response.
+func (h *Handler) proxyExternalClaudeToOpenAI(w http.ResponseWriter, r *http.Request, req *ClaudeRequest, ext config.ExternalAPIConfig) bool {
+	reqStart := time.Now()
+	apiKeyID := apiKeyIDFromContext(r.Context())
+
+	baseURL := strings.TrimSuffix(ext.BaseURL, "/")
+	targetURL := baseURL
+	displayURL := strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://")
+	allowed, releaseProbe := externalCircuitAcquire(baseURL, time.Now())
+	if !allowed {
+		logger.Debugf("[ExternalAPI] Circuit open for %s; using Kiro account pool", displayURL)
+		return false
+	}
+	defer releaseProbe()
+	if strings.HasSuffix(targetURL, "/v1") {
+		targetURL += "/chat/completions"
+	} else if !strings.HasSuffix(targetURL, "/v1/chat/completions") && !strings.HasSuffix(targetURL, "/chat/completions") {
+		targetURL += "/v1/chat/completions"
+	}
+
+	// 1. Transform ClaudeRequest to simple OpenAI request
+	var openaiMessages []map[string]interface{}
+
+	// System prompt
+	if req.System != nil {
+		sysStr := ""
+		switch v := req.System.(type) {
+		case string:
+			sysStr = v
+		case []interface{}:
+			for _, b := range v {
+				if bm, ok := b.(map[string]interface{}); ok {
+					if txt, ok := bm["text"].(string); ok {
+						sysStr += txt + "\n"
+					}
+				}
+			}
+		}
+		if sysStr != "" {
+			openaiMessages = append(openaiMessages, map[string]interface{}{
+				"role":    "system",
+				"content": sysStr,
+			})
+		}
+	}
+
+	// Messages
+	for _, m := range req.Messages {
+		contentStr := ""
+		switch v := m.Content.(type) {
+		case string:
+			contentStr = v
+		case []interface{}:
+			for _, b := range v {
+				if bm, ok := b.(map[string]interface{}); ok {
+					if txt, ok := bm["text"].(string); ok {
+						contentStr += txt + "\n"
+					} else if bType, ok := bm["type"].(string); ok && bType == "tool_use" {
+						contentStr += fmt.Sprintf("[Tool Use: %v]\n", bm["name"])
+					} else if bType == "tool_result" {
+						contentStr += fmt.Sprintf("[Tool Result: %v]\n", bm["content"])
+					}
+				}
+			}
+		}
+		openaiMessages = append(openaiMessages, map[string]interface{}{
+			"role":    m.Role,
+			"content": contentStr,
+		})
+	}
+
+	mappedModel := req.Model
+	openaiReq := map[string]interface{}{
+		"model":    mappedModel,
+		"messages": openaiMessages,
+		"stream":   false, // Force stream=false to avoid tokenrouter freeze
+	}
+
+	bodyBytes, _ := json.Marshal(openaiReq)
+
+	outReq, err := http.NewRequestWithContext(r.Context(), "POST", targetURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		h.sendClaudeError(w, 500, "api_error", "Failed to create internal request")
+		return false
+	}
+
+	outReq.Header.Set("Content-Type", "application/json")
+	if ext.AuthToken != "" {
+		outReq.Header.Set("Authorization", "Bearer "+ext.AuthToken)
+	} else if ext.APIKey != "" {
+		outReq.Header.Set("Authorization", "Bearer "+ext.APIKey)
+	}
+
+	clientTimeout := 10 * time.Minute
+	if ext.TimeoutMS > 0 {
+		clientTimeout = time.Duration(ext.TimeoutMS) * time.Millisecond
+	}
+	client := &http.Client{Timeout: clientTimeout}
+
+	resp, err := client.Do(outReq)
+	if err != nil {
+		if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
+			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated transport failures", displayURL, cooldown)
+		}
+		h.recordFailureWithDuration("claude", req.Model, displayURL, err, time.Since(reqStart).Milliseconds())
+		return false
+	}
+	defer resp.Body.Close()
+	if isRetryableExternalStatus(resp.StatusCode) {
+		if cooldown, opened := externalCircuitFailure(baseURL, resp.Header.Get("Retry-After"), clientTimeout); opened {
+			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated HTTP %d responses", displayURL, cooldown, resp.StatusCode)
+		}
+		h.recordFailureWithDuration("claude", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
+		return false
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		externalCircuitSuccess(baseURL)
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		h.recordFailureWithDuration("claude", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return true
+	}
+
+	// Parse OpenAI response
+	var openaiResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	json.Unmarshal(respBody, &openaiResp)
+
+	replyText := ""
+	if len(openaiResp.Choices) > 0 {
+		replyText = openaiResp.Choices[0].Message.Content
+	}
+
+	inTokens := openaiResp.Usage.PromptTokens
+	outTokens := openaiResp.Usage.CompletionTokens
+
+	// Mock Claude response
+	if req.Stream {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, _ := w.(http.Flusher)
+
+		msgID := "msg_" + uuid.New().String()
+
+		// message_start
+		startEv := map[string]interface{}{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"id":            msgID,
+				"type":          "message",
+				"role":          "assistant",
+				"model":         mappedModel,
+				"content":       []interface{}{},
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage":         map[string]interface{}{"input_tokens": inTokens, "output_tokens": 0},
+			},
+		}
+		startBytes, _ := json.Marshal(startEv)
+		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", startBytes)
+
+		// content_block_start
+		cbStart := map[string]interface{}{
+			"type":          "content_block_start",
+			"index":         0,
+			"content_block": map[string]interface{}{"type": "text", "text": ""},
+		}
+		cbStartBytes, _ := json.Marshal(cbStart)
+		fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", cbStartBytes)
+
+		// Stream content in chunks to mimic real stream
+		chunkSize := 20
+		for i := 0; i < len(replyText); i += chunkSize {
+			end := i + chunkSize
+			if end > len(replyText) {
+				end = len(replyText)
+			}
+			chunk := replyText[i:end]
+			cbDelta := map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]interface{}{"type": "text_delta", "text": chunk},
+			}
+			cbDeltaBytes, _ := json.Marshal(cbDelta)
+			fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", cbDeltaBytes)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		// content_block_stop
+		cbStop := map[string]interface{}{"type": "content_block_stop", "index": 0}
+		cbStopBytes, _ := json.Marshal(cbStop)
+		fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", cbStopBytes)
+
+		// message_delta
+		msgDelta := map[string]interface{}{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
+			"usage": map[string]interface{}{"output_tokens": outTokens},
+		}
+		msgDeltaBytes, _ := json.Marshal(msgDelta)
+		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", msgDeltaBytes)
+
+		// message_stop
+		msgStop := map[string]interface{}{"type": "message_stop"}
+		msgStopBytes, _ := json.Marshal(msgStop)
+		fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", msgStopBytes)
+
+	} else {
+		// Non-stream response
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		respData := map[string]interface{}{
+			"id":    "msg_" + uuid.New().String(),
+			"type":  "message",
+			"role":  "assistant",
+			"model": mappedModel,
+			"content": []map[string]interface{}{
+				{"type": "text", "text": replyText},
+			},
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+			"usage":         map[string]interface{}{"input_tokens": inTokens, "output_tokens": outTokens},
+		}
+		json.NewEncoder(w).Encode(respData)
+	}
+
+	h.recordSuccessForApiKey(apiKeyID, inTokens, outTokens, 0)
+	h.recordSuccessLog("claude", req.Model, displayURL, inTokens+outTokens, 0, time.Since(reqStart).Milliseconds())
+	return true
 }

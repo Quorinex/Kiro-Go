@@ -242,3 +242,41 @@ func TestAccountAllowOverageMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestExternalAPIConfigDefaultsUseOpus5(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "")
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	if err := UpdateExternalAPIConfig(ExternalAPIConfig{
+		Enabled: true,
+		BaseURL: "https://api.tuongtacfree.vn/",
+		APIKey:  "sk-test",
+	}); err != nil {
+		t.Fatalf("update external API config: %v", err)
+	}
+
+	got := GetExternalAPIConfig()
+	if got.DefaultModel != "opus" {
+		t.Fatalf("default model = %q, want opus", got.DefaultModel)
+	}
+	if got.DefaultOpusModel != "claude-opus-5" {
+		t.Fatalf("opus model = %q, want claude-opus-5", got.DefaultOpusModel)
+	}
+	if got.DefaultSonnetModel != "claude-sonnet-4.5" {
+		t.Fatalf("sonnet model = %q, want claude-sonnet-4.5", got.DefaultSonnetModel)
+	}
+	if got.DefaultHaikuModel != "claude-haiku-4.5" {
+		t.Fatalf("haiku model = %q, want claude-haiku-4.5", got.DefaultHaikuModel)
+	}
+	if got.APIKey != got.AuthToken {
+		t.Fatalf("expected APIKey/AuthToken to stay in sync, got api=%q token=%q", got.APIKey, got.AuthToken)
+	}
+	if got.BaseURL != "https://api.tuongtacfree.vn" {
+		t.Fatalf("base URL = %q, want trimmed URL", got.BaseURL)
+	}
+}
