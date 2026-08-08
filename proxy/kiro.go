@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -152,9 +153,78 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 			t.ForceAttemptHTTP2 = false
 		}
 	} else {
-		t.Proxy = http.ProxyFromEnvironment
+		t.Proxy = proxyFromCurrentEnvironment()
 	}
 	return t
+}
+
+func proxyFromCurrentEnvironment() func(*http.Request) (*url.URL, error) {
+	return func(req *http.Request) (*url.URL, error) {
+		if req == nil || req.URL == nil {
+			return nil, nil
+		}
+		noProxy := firstProxyEnv("NO_PROXY", "no_proxy")
+		if shouldBypassEnvProxy(req.URL.Hostname(), noProxy) {
+			return nil, nil
+		}
+
+		rawProxy := ""
+		switch strings.ToLower(req.URL.Scheme) {
+		case "https":
+			rawProxy = firstNonEmpty(firstProxyEnv("HTTPS_PROXY", "https_proxy"), firstProxyEnv("ALL_PROXY", "all_proxy"))
+		case "http":
+			rawProxy = firstNonEmpty(firstProxyEnv("HTTP_PROXY", "http_proxy"), firstProxyEnv("ALL_PROXY", "all_proxy"))
+		default:
+			rawProxy = firstProxyEnv("ALL_PROXY", "all_proxy")
+		}
+		if rawProxy == "" {
+			return nil, nil
+		}
+		if !strings.Contains(rawProxy, "://") {
+			rawProxy = "http://" + rawProxy
+		}
+		return url.Parse(rawProxy)
+	}
+}
+
+func firstProxyEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func shouldBypassEnvProxy(host, noProxy string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	noProxy = strings.ToLower(strings.TrimSpace(noProxy))
+	if host == "" || noProxy == "" {
+		return false
+	}
+	if noProxy == "*" {
+		return true
+	}
+	for _, entry := range strings.Split(noProxy, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		entry = strings.TrimPrefix(entry, ".")
+		if host == entry || strings.HasSuffix(host, "."+entry) {
+			return true
+		}
+	}
+	return false
 }
 
 // InitKiroHttpClient initializes (or reinitializes) the HTTP clients used for Kiro API requests.
