@@ -13,14 +13,13 @@ const (
 	externalCircuitDefaultCooldown  = 30 * time.Second
 	externalCircuitMinCooldown      = 5 * time.Second
 	externalCircuitMaxCooldown      = 5 * time.Minute
-	externalCircuitProbeLease       = 30 * time.Second
 )
 
 type externalCircuitState struct {
-	failures    int
-	openUntil   time.Time
-	probing     bool
-	probeLeased time.Time
+	failures   int
+	openUntil  time.Time
+	probing    bool
+	probeToken uint64
 }
 
 var externalCircuits = struct {
@@ -58,31 +57,48 @@ func externalCircuitOpenAt(baseURL string, now time.Time) bool {
 	return true
 }
 
-// externalCircuitAllowProbe is an atomic circuit admission check. A closed
+// externalCircuitAcquire is an atomic circuit admission check. A closed
 // circuit admits all traffic; an open circuit admits none; after cooldown only
-// one half-open probe is leased at a time. The lease expires so a canceled
-// request cannot leave the upstream permanently suppressed.
-func externalCircuitAllowProbe(baseURL string, now time.Time) bool {
+// one half-open probe is admitted at a time. The returned release callback must
+// be called on every terminal path; a generation token prevents an old request
+// from releasing a newer probe.
+func externalCircuitAcquire(baseURL string, now time.Time) (bool, func()) {
 	key := normalizeExternalCircuitKey(baseURL)
 	if key == "" {
-		return true
+		return true, func() {}
 	}
 	externalCircuits.Lock()
-	defer externalCircuits.Unlock()
 	state, ok := externalCircuits.states[key]
 	if !ok || state.openUntil.IsZero() {
-		return true
+		externalCircuits.Unlock()
+		return true, func() {}
 	}
 	if now.Before(state.openUntil) {
-		return false
+		externalCircuits.Unlock()
+		return false, func() {}
 	}
-	if state.probing && now.Sub(state.probeLeased) < externalCircuitProbeLease {
-		return false
+	if state.probing {
+		externalCircuits.Unlock()
+		return false, func() {}
 	}
 	state.probing = true
-	state.probeLeased = now
+	state.probeToken++
+	token := state.probeToken
 	externalCircuits.states[key] = state
-	return true
+	externalCircuits.Unlock()
+
+	var once sync.Once
+	return true, func() {
+		once.Do(func() {
+			externalCircuits.Lock()
+			current := externalCircuits.states[key]
+			if current.probing && current.probeToken == token {
+				current.probing = false
+				externalCircuits.states[key] = current
+			}
+			externalCircuits.Unlock()
+		})
+	}
 }
 
 func externalCircuitFailure(baseURL, retryAfter string, fallbackCooldown time.Duration) (time.Duration, bool) {
@@ -113,7 +129,6 @@ func externalCircuitFailureAt(baseURL, retryAfter string, fallbackCooldown time.
 	state := externalCircuits.states[key]
 	state.failures++
 	state.probing = false
-	state.probeLeased = time.Time{}
 	opened := false
 	if state.failures >= externalCircuitFailureThreshold {
 		state.openUntil = now.Add(cooldown)

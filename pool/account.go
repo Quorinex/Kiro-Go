@@ -23,6 +23,20 @@ type AccountPool struct {
 	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
 }
 
+// NewTestPool constructs an isolated account pool for cross-package tests.
+// Production code should use GetPool.
+func NewTestPool(accounts ...config.Account) *AccountPool {
+	isolated := make([]config.Account, len(accounts))
+	copy(isolated, accounts)
+	return &AccountPool{
+		accounts:      isolated,
+		totalAccounts: len(isolated),
+		cooldowns:     make(map[string]time.Time),
+		errorCounts:   make(map[string]int),
+		modelLists:    make(map[string]map[string]bool),
+	}
+}
+
 var (
 	pool     *AccountPool
 	poolOnce sync.Once
@@ -258,10 +272,17 @@ func (p *AccountPool) RecordErrorWithCooldown(id string, cooldown time.Duration)
 	p.errorCounts[id]++
 
 	if cooldown > 0 {
-		p.cooldowns[id] = time.Now().Add(cooldown)
+		candidate := time.Now().Add(cooldown)
+		if current, ok := p.cooldowns[id]; !ok || candidate.After(current) {
+			p.cooldowns[id] = candidate
+		}
 	} else if p.errorCounts[id] >= 3 {
-		// 连续 3 次错误，冷却 1 分钟
-		p.cooldowns[id] = time.Now().Add(time.Minute)
+		// 连续 3 次错误，冷却 1 分钟. Never shorten an existing cooldown
+		// that may have come from a concurrent quota response.
+		candidate := time.Now().Add(time.Minute)
+		if current, ok := p.cooldowns[id]; !ok || candidate.After(current) {
+			p.cooldowns[id] = candidate
+		}
 	}
 }
 

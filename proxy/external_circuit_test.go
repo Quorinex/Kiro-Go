@@ -102,27 +102,35 @@ func TestIsRetryableExternalStatus(t *testing.T) {
 	}
 }
 
-func TestExternalCircuitAllowProbeReflectsOpenState(t *testing.T) {
+func TestExternalCircuitAcquireReflectsOpenState(t *testing.T) {
 	resetExternalCircuits()
 	base := "https://custom.example/v1"
 	now := time.Unix(5_000, 0)
-	if !externalCircuitAllowProbe(base, now) {
+	allowed, release := externalCircuitAcquire(base, now)
+	if !allowed {
 		t.Fatal("closed circuit should allow a probe")
 	}
+	release()
 	_, _ = externalCircuitFailureAt(base, "", 20*time.Second, now)
 	_, _ = externalCircuitFailureAt(base, "", 20*time.Second, now.Add(time.Second))
-	if externalCircuitAllowProbe(base, now.Add(2*time.Second)) {
+	if allowed, _ := externalCircuitAcquire(base, now.Add(2*time.Second)); allowed {
 		t.Fatal("open circuit should suppress normal probes")
 	}
-	if !externalCircuitAllowProbe(base, now.Add(22*time.Second)) {
+	allowed, release = externalCircuitAcquire(base, now.Add(22*time.Second))
+	if !allowed {
 		t.Fatal("expired circuit should allow a probe")
 	}
-	if externalCircuitAllowProbe(base, now.Add(22*time.Second)) {
+	if allowed, _ := externalCircuitAcquire(base, now.Add(22*time.Second)); allowed {
 		t.Fatal("only one half-open probe may run at a time")
 	}
+	release()
+	if allowed, release = externalCircuitAcquire(base, now.Add(22*time.Second)); !allowed {
+		t.Fatal("released half-open probe should allow the next probe")
+	}
+	release()
 }
 
-func TestExternalCircuitHalfOpenProbeLeaseRecoversFromAbandonedProbe(t *testing.T) {
+func TestExternalCircuitAcquireAllowsOnlyOneProbeUntilRelease(t *testing.T) {
 	resetExternalCircuits()
 	base := "https://custom.example/v1"
 	now := time.Unix(5_500, 0)
@@ -130,15 +138,18 @@ func TestExternalCircuitHalfOpenProbeLeaseRecoversFromAbandonedProbe(t *testing.
 	_, _ = externalCircuitFailureAt(base, "", 20*time.Second, now.Add(time.Second))
 
 	probeAt := now.Add(22 * time.Second)
-	if !externalCircuitAllowProbe(base, probeAt) {
+	allowed, release := externalCircuitAcquire(base, probeAt)
+	if !allowed {
 		t.Fatal("expired circuit should allow first half-open probe")
 	}
-	if externalCircuitAllowProbe(base, probeAt.Add(externalCircuitProbeLease-time.Second)) {
-		t.Fatal("active half-open probe lease should suppress another probe")
+	if allowed, _ := externalCircuitAcquire(base, probeAt.Add(24*time.Hour)); allowed {
+		t.Fatal("active half-open probe should suppress another probe regardless of duration")
 	}
-	if !externalCircuitAllowProbe(base, probeAt.Add(externalCircuitProbeLease+time.Second)) {
-		t.Fatal("abandoned half-open probe lease should eventually recover")
+	release()
+	if allowed, release = externalCircuitAcquire(base, probeAt.Add(24*time.Hour)); !allowed {
+		t.Fatal("released half-open probe should permit recovery")
 	}
+	release()
 }
 
 func TestExternalCircuitFailureUsesMinimumCooldown(t *testing.T) {
@@ -182,8 +193,10 @@ func TestExternalCircuitEmptyKeyIsAlwaysClosed(t *testing.T) {
 	if externalCircuitOpenAt("", time.Unix(9_000, 0)) {
 		t.Fatal("empty base URL must not open a circuit")
 	}
-	if !externalCircuitAllowProbe("", time.Unix(9_000, 0)) {
+	if allowed, release := externalCircuitAcquire("", time.Unix(9_000, 0)); !allowed {
 		t.Fatal("empty base URL should allow probe")
+	} else {
+		release()
 	}
 }
 
@@ -203,10 +216,12 @@ func TestExternalCircuitExpiredOpenStateAllowsSingleHalfOpenProbe(t *testing.T) 
 	if failures != 2 {
 		t.Fatalf("half-open circuit lost failure history before probe: %d", failures)
 	}
-	if !externalCircuitAllowProbe(base, now.Add(22*time.Second)) {
+	allowed, release := externalCircuitAcquire(base, now.Add(22*time.Second))
+	if !allowed {
 		t.Fatal("expired circuit should allow a half-open probe")
 	}
-	if externalCircuitAllowProbe(base, now.Add(22*time.Second)) {
+	if allowed, _ := externalCircuitAcquire(base, now.Add(22*time.Second)); allowed {
 		t.Fatal("concurrent half-open probe should be suppressed")
 	}
+	release()
 }

@@ -884,8 +884,9 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// 优先检查外部 URL API 配置
 	ext := config.GetExternalAPIConfig()
 	if ext.Enabled && strings.TrimSpace(ext.BaseURL) != "" {
-		origModel := strings.ToLower(req.Model)
-		mappedReqModel := req.Model
+		externalReq := req
+		origModel := strings.ToLower(externalReq.Model)
+		mappedReqModel := externalReq.Model
 		if strings.Contains(origModel, "opus") && ext.DefaultOpusModel != "" {
 			mappedReqModel = ext.DefaultOpusModel
 		} else if strings.Contains(origModel, "sonnet") && ext.DefaultSonnetModel != "" {
@@ -897,15 +898,16 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		} else if ext.DefaultModel != "" {
 			mappedReqModel = ext.DefaultModel
 		}
-		req.Model = mappedReqModel
+		externalReq.Model = mappedReqModel
 
-		isNonClaude := strings.Contains(ext.BaseURL, "localhost:5100") || strings.Contains(strings.ToLower(req.Model), "kimi") || strings.Contains(strings.ToLower(req.Model), "gpt") || strings.Contains(strings.ToLower(req.Model), "gemini") || strings.Contains(strings.ToLower(req.Model), "deepseek")
+		mappedModelLower := strings.ToLower(externalReq.Model)
+		isNonClaude := strings.Contains(ext.BaseURL, "localhost:5100") || strings.Contains(mappedModelLower, "kimi") || strings.Contains(mappedModelLower, "gpt") || strings.Contains(mappedModelLower, "gemini") || strings.Contains(mappedModelLower, "deepseek")
 		if isNonClaude {
-			if h.proxyExternalClaudeToOpenAI(w, r, &req, ext) {
+			if h.proxyExternalClaudeToOpenAI(w, r, &externalReq, ext) {
 				return
 			}
 		} else {
-			if h.proxyExternalClaude(w, r, body, &req, ext, normalizeStopHookJSON) {
+			if h.proxyExternalClaude(w, r, body, &externalReq, ext, normalizeStopHookJSON) {
 				return
 			}
 		}
@@ -960,10 +962,12 @@ func (h *Handler) proxyExternalClaude(w http.ResponseWriter, r *http.Request, bo
 	baseURL := strings.TrimSuffix(ext.BaseURL, "/")
 	targetURL := baseURL
 	displayURL := strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://")
-	if !externalCircuitAllowProbe(baseURL, time.Now()) {
+	allowed, releaseProbe := externalCircuitAcquire(baseURL, time.Now())
+	if !allowed {
 		logger.Debugf("[ExternalAPI] Circuit open for %s; using Kiro account pool", displayURL)
 		return false
 	}
+	defer releaseProbe()
 	if strings.HasSuffix(targetURL, "/v1") {
 		targetURL += "/messages"
 	} else if !strings.HasSuffix(targetURL, "/v1/messages") && !strings.HasSuffix(targetURL, "/messages") {
@@ -1117,6 +1121,20 @@ func copyExternalClaudeHeaders(dst, src http.Header) {
 		lk := strings.ToLower(k)
 		if strings.HasPrefix(lk, "anthropic-") {
 			dst[k] = v
+		}
+	}
+}
+
+func copyExternalOpenAIHeaders(dst, src http.Header) {
+	for _, name := range []string{
+		"User-Agent",
+		"Openai-Organization",
+		"Openai-Project",
+		"Idempotency-Key",
+		"X-Request-Id",
+	} {
+		if values := src.Values(name); len(values) > 0 {
+			dst[name] = append([]string(nil), values...)
 		}
 	}
 }
@@ -1768,11 +1786,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, raw
 	if h.fallbackToCLIProxyAPI(w, r, rawBody, req, normalizeStopHookJSON) {
 		return
 	}
-	status := http.StatusBadGateway
-	if isQuotaErrorMessage(lastErr.Error()) {
-		status = http.StatusTooManyRequests
-	}
-	h.sendClaudeError(w, status, "api_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendClaudeError(w, upstreamErrorHTTPStatus(lastErr), "api_error", lastErr.Error())
 }
 
 // closeClaudeStreamAfterError terminates an in-progress Claude SSE stream after
@@ -2170,11 +2185,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 	if h.fallbackToCLIProxyAPI(w, r, rawBody, req, normalizeStopHookJSON) {
 		return
 	}
-	status := http.StatusBadGateway
-	if isQuotaErrorMessage(lastErr.Error()) {
-		status = http.StatusTooManyRequests
-	}
-	h.sendClaudeError(w, status, "api_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendClaudeError(w, upstreamErrorHTTPStatus(lastErr), "api_error", lastErr.Error())
 }
 
 func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, message string) {
@@ -2197,10 +2209,12 @@ func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, bo
 	baseURL := strings.TrimSuffix(ext.BaseURL, "/")
 	targetURL := baseURL
 	displayURL := strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://")
-	if !externalCircuitAllowProbe(baseURL, time.Now()) {
+	allowed, releaseProbe := externalCircuitAcquire(baseURL, time.Now())
+	if !allowed {
 		logger.Debugf("[ExternalAPI] Circuit open for %s; using Kiro account pool", displayURL)
 		return false
 	}
+	defer releaseProbe()
 	if strings.HasSuffix(targetURL, "/v1") {
 		targetURL += "/chat/completions"
 	} else if !strings.HasSuffix(targetURL, "/v1/chat/completions") && !strings.HasSuffix(targetURL, "/chat/completions") {
@@ -2234,12 +2248,7 @@ func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, bo
 		outReq.Header.Set("Authorization", "Bearer "+ext.APIKey)
 	}
 
-	for k, v := range r.Header {
-		lk := strings.ToLower(k)
-		if strings.HasPrefix(lk, "x-") || lk == "user-agent" {
-			outReq.Header[k] = v
-		}
-	}
+	copyExternalOpenAIHeaders(outReq.Header, r.Header)
 
 	client := &http.Client{Timeout: clientTimeout}
 	resp, err := client.Do(outReq)
@@ -2757,7 +2766,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	h.recordFailureWithDetails("openai", model, "", lastErr)
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendOpenAIError(w, upstreamErrorHTTPStatus(lastErr), "server_error", lastErr.Error())
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
@@ -2844,7 +2854,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	h.recordFailureWithDetails("openai", model, "", lastErr)
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	setRetryAfterHeader(w, lastErr)
+	h.sendOpenAIError(w, upstreamErrorHTTPStatus(lastErr), "server_error", lastErr.Error())
 }
 
 func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, message string) {
@@ -5365,10 +5376,12 @@ func (h *Handler) proxyExternalClaudeToOpenAI(w http.ResponseWriter, r *http.Req
 	baseURL := strings.TrimSuffix(ext.BaseURL, "/")
 	targetURL := baseURL
 	displayURL := strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://")
-	if !externalCircuitAllowProbe(baseURL, time.Now()) {
+	allowed, releaseProbe := externalCircuitAcquire(baseURL, time.Now())
+	if !allowed {
 		logger.Debugf("[ExternalAPI] Circuit open for %s; using Kiro account pool", displayURL)
 		return false
 	}
+	defer releaseProbe()
 	if strings.HasSuffix(targetURL, "/v1") {
 		targetURL += "/chat/completions"
 	} else if !strings.HasSuffix(targetURL, "/v1/chat/completions") && !strings.HasSuffix(targetURL, "/chat/completions") {

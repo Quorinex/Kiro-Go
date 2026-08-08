@@ -530,6 +530,7 @@ func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeReque
 			status = 429
 			errType = "rate_limit_error"
 		}
+		setRetryAfterHeader(w, err)
 		h.sendClaudeError(w, status, errType, "Web search failed: "+err.Error())
 		return
 	}

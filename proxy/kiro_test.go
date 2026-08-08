@@ -338,6 +338,52 @@ func TestCallKiroAPI429CarriesRetryAfter(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIPreservesLongestRetryAfterAcrossEndpoints(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	serverLong := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer serverLong.Close()
+	serverShort := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "10")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer serverShort.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{URL: serverLong.URL, Origin: "AI_EDITOR", Name: "long"},
+		{URL: serverShort.URL, Origin: "AI_EDITOR", Name: "short"},
+		{URL: serverShort.URL, Origin: "AI_EDITOR", Name: "short-duplicate"},
+	}
+	defer func() { kiroEndpoints = oldEndpoints }()
+	oldClient := kiroHttpStore.Load()
+	kiroHttpStore.Store(&http.Client{Timeout: time.Second, Transport: &http.Transport{}})
+	defer kiroHttpStore.Store(oldClient)
+
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "hello", ModelID: "claude-opus-5", Origin: "AI_EDITOR",
+	}
+	err := CallKiroAPI(&config.Account{
+		ID: "quota", Enabled: true, AccessToken: "token",
+		ProfileArn: "arn:aws:codewhisperer:profile/test",
+	}, payload, &KiroStreamCallback{})
+	var quotaErr *upstreamQuotaError
+	if !errors.As(err, &quotaErr) {
+		t.Fatalf("error=%v, want upstreamQuotaError", err)
+	}
+	if quotaErr.retryFor != time.Hour {
+		t.Fatalf("retryFor=%s, want 1h", quotaErr.retryFor)
+	}
+	if got := retryAfterHeader(err); got != "3600" {
+		t.Fatalf("Retry-After=%q, want 3600", got)
+	}
+}
+
 type rewriteRoundTripper struct {
 	target *url.URL
 	base   http.RoundTripper

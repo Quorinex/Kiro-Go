@@ -303,6 +303,24 @@ func TestGetNextForModelExcludingReturnsNilWhileAllMatchingAccountsAreCoolingDow
 	}
 }
 
+func TestRecordErrorWithCooldownNeverShortensExistingCooldown(t *testing.T) {
+	p := newTestPool(config.Account{ID: "a", Enabled: true})
+	p.RecordErrorWithCooldown("a", time.Hour)
+	first := p.cooldowns["a"]
+
+	p.RecordErrorWithCooldown("a", 10*time.Second)
+	if got := p.cooldowns["a"]; got.Before(first) {
+		t.Fatalf("shorter quota hint reduced cooldown: first=%v got=%v", first, got)
+	}
+
+	p.RecordErrorWithCooldown("a", 0)
+	p.RecordErrorWithCooldown("a", 0)
+	p.RecordErrorWithCooldown("a", 0)
+	if got := p.cooldowns["a"]; got.Before(first) {
+		t.Fatalf("transient-error cooldown reduced quota cooldown: first=%v got=%v", first, got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Reload over-usage filtering
 // ---------------------------------------------------------------------------

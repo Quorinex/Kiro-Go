@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -51,5 +52,21 @@ func TestRetryAfterDurationParsesHTTPDate(t *testing.T) {
 	retryAt := now.Add(30 * time.Second).UTC().Format(http.TimeFormat)
 	if got := retryAfterDuration(retryAt, now); got != 30*time.Second {
 		t.Fatalf("retryAfterDuration(%q) = %s, want 30s", retryAt, got)
+	}
+}
+
+func TestUpstreamErrorHTTPStatusAndRetryAfter(t *testing.T) {
+	err := &upstreamQuotaError{endpoint: "Kiro CLI", retryAfter: "45"}
+	if got := upstreamErrorHTTPStatus(err); got != http.StatusTooManyRequests {
+		t.Fatalf("quota status = %d, want 429", got)
+	}
+	if got := retryAfterHeader(err); got != "45" {
+		t.Fatalf("Retry-After = %q, want 45", got)
+	}
+	if got := upstreamErrorHTTPStatus(errors.New("HTTP 401 unauthorized")); got != http.StatusUnauthorized {
+		t.Fatalf("auth status = %d, want 401", got)
+	}
+	if got := upstreamErrorHTTPStatus(errors.New("temporary upstream failure")); got != http.StatusBadGateway {
+		t.Fatalf("generic status = %d, want 502", got)
 	}
 }

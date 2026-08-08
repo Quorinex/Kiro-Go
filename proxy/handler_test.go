@@ -237,6 +237,55 @@ func TestExternalClaudeRetryableStatusFallsBackBeforeWritingResponse(t *testing.
 	}
 }
 
+func TestExternalModelMappingDoesNotMutateKiroFallbackRequest(t *testing.T) {
+	resetExternalCircuits()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	h := &Handler{}
+	req := &ClaudeRequest{Model: "auto", Messages: []ClaudeMessage{{Role: "user", Content: "hello"}}}
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`)
+	externalReq := *req
+	externalReq.Model = "provider-specific-model"
+
+	if h.proxyExternalClaude(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)), body, &externalReq, config.ExternalAPIConfig{BaseURL: server.URL}, false) {
+		t.Fatal("retryable external status should fall back")
+	}
+	if req.Model != "auto" {
+		t.Fatalf("original Kiro fallback model mutated to %q", req.Model)
+	}
+}
+
+func TestCopyExternalOpenAIHeadersDoesNotForwardLocalAuth(t *testing.T) {
+	src := http.Header{
+		"X-Api-Key":            []string{"local-secret"},
+		"Authorization":        []string{"Bearer local-secret"},
+		"X-Admin-Password":     []string{"admin-secret"},
+		"X-Arbitrary-Metadata": []string{"private"},
+		"User-Agent":           []string{"claude-cli"},
+		"Openai-Organization":  []string{"org-test"},
+		"Idempotency-Key":      []string{"idem-test"},
+	}
+	dst := http.Header{}
+	copyExternalOpenAIHeaders(dst, src)
+	for _, forbidden := range []string{"X-Api-Key", "Authorization", "X-Admin-Password", "X-Arbitrary-Metadata"} {
+		if got := dst.Get(forbidden); got != "" {
+			t.Fatalf("forwarded forbidden header %s=%q", forbidden, got)
+		}
+	}
+	if got := dst.Get("User-Agent"); got != "claude-cli" {
+		t.Fatalf("User-Agent=%q, headers=%#v", got, dst)
+	}
+	if got := dst.Get("Openai-Organization"); got != "org-test" {
+		t.Fatalf("OpenAI-Organization=%q, headers=%#v", got, dst)
+	}
+	if got := dst.Get("Idempotency-Key"); got != "idem-test" {
+		t.Fatalf("Idempotency-Key=%q, headers=%#v", got, dst)
+	}
+}
+
 func TestExternalClaudeTransportErrorFallsBackBeforeWritingResponse(t *testing.T) {
 	resetExternalCircuits()
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
