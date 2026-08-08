@@ -404,6 +404,8 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 	isAPIKey := config.IsAPIKeyAccount(account)
 
 	var lastErr error
+	longestRetryAfter := time.Duration(0)
+	longestRetryAfterValue := ""
 endpointLoop:
 	for epIndex, ep := range endpoints {
 		// Update the origin field for the selected endpoint.
@@ -470,9 +472,19 @@ endpointLoop:
 			}
 
 			if resp.StatusCode == 429 {
+				retryAfterValue := strings.TrimSpace(resp.Header.Get("Retry-After"))
+				retryFor := retryAfterDuration(retryAfterValue, time.Now())
+				if retryFor > longestRetryAfter {
+					longestRetryAfter = retryFor
+					longestRetryAfterValue = retryAfterValue
+				}
 				resp.Body.Close()
 				logger.Warnf("[KiroAPI] Endpoint %s quota exhausted (429), trying next...", ep.Name)
-				lastErr = fmt.Errorf("quota exhausted on %s", ep.Name)
+				lastErr = &upstreamQuotaError{
+					endpoint:   ep.Name,
+					retryAfter: longestRetryAfterValue,
+					retryFor:   longestRetryAfter,
+				}
 				continue endpointLoop
 			}
 
