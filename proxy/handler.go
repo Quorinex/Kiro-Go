@@ -1029,6 +1029,35 @@ func (h *Handler) proxyExternalClaude(w http.ResponseWriter, r *http.Request, bo
 		}
 		return false
 	}
+	if !req.Stream && !normalizeStopHookJSON {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
+				logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after response read failure", displayURL, cooldown)
+			}
+			return false
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			externalCircuitSuccess(baseURL)
+		}
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		externalInputTokens, externalOutputTokens := externalClaudeUsageFromBody(bodyBytes)
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"model":"`+mappedModel+`"`), []byte(`"model":"`+req.Model+`"`))
+		_, _ = w.Write(bodyBytes)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if externalInputTokens <= 0 {
+				externalInputTokens = estimatedInputTokens
+			}
+			h.recordSuccessForApiKey(apiKeyID, externalInputTokens, externalOutputTokens, 0)
+			h.recordSuccessLog("claude", req.Model, displayURL, externalInputTokens+externalOutputTokens, 0, time.Since(reqStart).Milliseconds())
+		} else {
+			h.recordFailureWithDuration("claude", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
+		}
+		return true
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		externalCircuitSuccess(baseURL)
 	}
@@ -2196,6 +2225,49 @@ func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, bo
 		}
 		h.recordFailureWithDuration("openai", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
 		return false
+	}
+	if !req.Stream {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
+				logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after response read failure", displayURL, cooldown)
+			}
+			return false
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			externalCircuitSuccess(baseURL)
+		}
+		if resp.StatusCode >= 400 {
+			h.recordFailureWithDuration("openai", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(bodyBytes)
+			return true
+		}
+		var externalInputTokens, externalOutputTokens int
+		var respObj map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &respObj); err == nil {
+			if usage, ok := respObj["usage"].(map[string]interface{}); ok {
+				if pTok, ok := usage["prompt_tokens"].(float64); ok {
+					externalInputTokens = int(pTok)
+				}
+				if cTok, ok := usage["completion_tokens"].(float64); ok {
+					externalOutputTokens = int(cTok)
+				}
+			}
+		}
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"model":"`+mappedModel+`"`), []byte(`"model":"`+req.Model+`"`))
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(bodyBytes)
+		if externalInputTokens <= 0 {
+			externalInputTokens = estimatedInputTokens
+		}
+		h.recordSuccessForApiKey(apiKeyID, externalInputTokens, externalOutputTokens, 0)
+		h.recordSuccessLog("openai", req.Model, displayURL, externalInputTokens+externalOutputTokens, 0, time.Since(reqStart).Milliseconds())
+		return true
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		externalCircuitSuccess(baseURL)
