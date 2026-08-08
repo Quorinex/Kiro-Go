@@ -1058,10 +1058,6 @@ func (h *Handler) proxyExternalClaude(w http.ResponseWriter, r *http.Request, bo
 		}
 		return true
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		externalCircuitSuccess(baseURL)
-	}
-
 	if normalizeStopHookJSON {
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
@@ -1097,6 +1093,7 @@ func (h *Handler) proxyExternalClaude(w http.ResponseWriter, r *http.Request, bo
 		reader := bufio.NewReader(resp.Body)
 		targetPattern := []byte(`"model":"` + mappedModel + `"`)
 		replacementPattern := []byte(`"model":"` + req.Model + `"`)
+		var streamReadErr error
 		for {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
@@ -1112,8 +1109,19 @@ func (h *Handler) proxyExternalClaude(w http.ResponseWriter, r *http.Request, bo
 				}
 			}
 			if err != nil {
+				if err != io.EOF {
+					streamReadErr = err
+				}
 				break
 			}
+		}
+		if streamReadErr != nil {
+			externalCircuitFailure(baseURL, "", clientTimeout)
+			h.recordFailureWithDuration("claude", req.Model, displayURL, streamReadErr, time.Since(reqStart).Milliseconds())
+			return true
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			externalCircuitSuccess(baseURL)
 		}
 	} else {
 		bodyBytes, err := io.ReadAll(resp.Body)
@@ -2271,10 +2279,6 @@ func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, bo
 		h.recordSuccessLog("openai", req.Model, displayURL, externalInputTokens+externalOutputTokens, 0, time.Since(reqStart).Milliseconds())
 		return true
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		externalCircuitSuccess(baseURL)
-	}
-
 	if resp.StatusCode >= 400 {
 		h.recordFailureWithDuration("openai", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -2293,6 +2297,7 @@ func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, bo
 	if req.Stream {
 		flusher, _ := w.(http.Flusher)
 		reader := bufio.NewReader(resp.Body)
+		var streamReadErr error
 		for {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
@@ -2302,8 +2307,19 @@ func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, bo
 				}
 			}
 			if err != nil {
+				if err != io.EOF {
+					streamReadErr = err
+				}
 				break
 			}
+		}
+		if streamReadErr != nil {
+			externalCircuitFailure(baseURL, "", clientTimeout)
+			h.recordFailureWithDuration("openai", req.Model, displayURL, streamReadErr, time.Since(reqStart).Milliseconds())
+			return true
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			externalCircuitSuccess(baseURL)
 		}
 	} else {
 		bodyBytes, err := io.ReadAll(resp.Body)
