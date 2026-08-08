@@ -2215,7 +2215,6 @@ func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, bo
 		if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
 			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated transport failures", displayURL, cooldown)
 		}
-		h.recordFailureWithDuration("openai", req.Model, displayURL, err, time.Since(reqStart).Milliseconds())
 		return false
 	}
 	defer resp.Body.Close()
@@ -2223,7 +2222,6 @@ func (h *Handler) proxyExternalOpenAI(w http.ResponseWriter, r *http.Request, bo
 		if cooldown, opened := externalCircuitFailure(baseURL, resp.Header.Get("Retry-After"), clientTimeout); opened {
 			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated HTTP %d responses", displayURL, cooldown, resp.StatusCode)
 		}
-		h.recordFailureWithDuration("openai", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
 		return false
 	}
 	if !req.Stream {
@@ -5511,7 +5509,6 @@ func (h *Handler) proxyExternalClaudeToOpenAI(w http.ResponseWriter, r *http.Req
 		if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
 			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated transport failures", displayURL, cooldown)
 		}
-		h.recordFailureWithDuration("claude", req.Model, displayURL, err, time.Since(reqStart).Milliseconds())
 		return false
 	}
 	defer resp.Body.Close()
@@ -5519,7 +5516,6 @@ func (h *Handler) proxyExternalClaudeToOpenAI(w http.ResponseWriter, r *http.Req
 		if cooldown, opened := externalCircuitFailure(baseURL, resp.Header.Get("Retry-After"), clientTimeout); opened {
 			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after repeated HTTP %d responses", displayURL, cooldown, resp.StatusCode)
 		}
-		h.recordFailureWithDuration("claude", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
 		return false
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
