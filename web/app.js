@@ -11,10 +11,8 @@
     localStorage.removeItem('admin_login_time');
   }
   let password = sessionStorage.getItem('admin_password') || localStorage.getItem('admin_password') || '';
-  const supportedLangs = ['zh', 'en', 'vi'];
   let currentLang = localStorage.getItem('kiro_lang') || 'zh';
-  if (!supportedLangs.includes(currentLang)) currentLang = 'zh';
-  const dict = { en: null, zh: null, vi: null };
+  const dict = { en: null, zh: null };
   let accountsData = [];
   const selectedAccounts = new Set();
   let filterKeyword = '';
@@ -132,7 +130,6 @@
     refreshCustomSelects();
   }
   async function setLang(lang) {
-    if (!supportedLangs.includes(lang)) lang = 'zh';
     currentLang = lang;
     localStorage.setItem('kiro_lang', lang);
     await loadLocale(lang);
@@ -146,12 +143,11 @@
     qsa('.lang-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.lang === currentLang));
     qsa('.lang-toggle').forEach(btn => {
       const label = btn.querySelector('.lang-toggle-label');
-      if (label) label.textContent = t('lang.' + currentLang);
+      if (label) label.textContent = currentLang === 'zh' ? t('lang.zh') : t('lang.en');
     });
   }
   function toggleLang() {
-    const next = supportedLangs[(supportedLangs.indexOf(currentLang) + 1) % supportedLangs.length];
-    setLang(next);
+    setLang(currentLang === 'zh' ? 'en' : 'zh');
   }
 
   // Custom select
@@ -1582,8 +1578,79 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
-    await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
+    await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys(), loadExternalApiConfig()]);
     refreshCustomSelects();
+  }
+
+  async function loadExternalApiConfig() {
+    try {
+      const res = await api('/external-api');
+      const d = await res.json();
+      if ($('externalApiPriority')) $('externalApiPriority').checked = d.enabled || false;
+      if ($('externalBaseUrl')) $('externalBaseUrl').value = d.baseUrl || '';
+      if ($('externalApiKey')) $('externalApiKey').value = d.apiKey || d.authToken || '';
+      if ($('externalDefaultModel')) $('externalDefaultModel').value = d.defaultModel || 'opus';
+      if ($('externalOpusModel')) $('externalOpusModel').value = d.defaultOpusModel || 'claude-opus-5';
+      if ($('externalSonnetModel')) $('externalSonnetModel').value = d.defaultSonnetModel || 'claude-sonnet-4.5';
+      if ($('externalHaikuModel')) $('externalHaikuModel').value = d.defaultHaikuModel || 'claude-haiku-4.5';
+      updateExternalRoutingStatus();
+    } catch (e) {
+      console.error('Failed to load external API config', e);
+    }
+  }
+
+  function updateExternalRoutingStatus() {
+    const el = $('externalRoutingStatus');
+    if (!el) return;
+    const enabled = $('externalApiPriority') && $('externalApiPriority').checked;
+    const baseUrl = $('externalBaseUrl') ? $('externalBaseUrl').value.trim() : '';
+    if (enabled && baseUrl) {
+      el.textContent = 'Routing hiện tại: External API (' + baseUrl + '). Nếu lỗi mạng sẽ fallback về Account List Kiro.';
+    } else if (enabled) {
+      el.textContent = 'Routing hiện tại: External API đang bật nhưng chưa có URL.';
+    } else {
+      el.textContent = 'Routing hiện tại: Account List Kiro.';
+    }
+  }
+
+  async function saveExternalApiConfig() {
+    try {
+      const payload = {
+        enabled: $('externalApiPriority') ? $('externalApiPriority').checked : false,
+        baseUrl: $('externalBaseUrl') ? $('externalBaseUrl').value.trim() : '',
+        apiKey: $('externalApiKey') ? $('externalApiKey').value.trim() : '',
+        authToken: $('externalApiKey') ? $('externalApiKey').value.trim() : '',
+        defaultModel: $('externalDefaultModel') && $('externalDefaultModel').value.trim() ? $('externalDefaultModel').value.trim() : 'opus',
+        defaultOpusModel: $('externalOpusModel') && $('externalOpusModel').value.trim() ? $('externalOpusModel').value.trim() : 'claude-opus-5',
+        defaultSonnetModel: $('externalSonnetModel') && $('externalSonnetModel').value.trim() ? $('externalSonnetModel').value.trim() : 'claude-sonnet-4.5',
+        defaultHaikuModel: $('externalHaikuModel') && $('externalHaikuModel').value.trim() ? $('externalHaikuModel').value.trim() : 'claude-haiku-4.5',
+        disableNonessentialTraffic: true,
+        timeoutMs: 600000
+      };
+      const res = await api('/external-api', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      const d = await res.json();
+      if (d.success) {
+        updateExternalRoutingStatus();
+        toast('Lưu cấu hình Model & External API thành công!', 'success');
+      }
+      else toast('Lưu cấu hình thất bại: ' + (d.error || ''), 'error');
+    } catch (e) {
+      toast('Lưu cấu hình thất bại: ' + e.message, 'error');
+    }
+  }
+
+  function applyTuongTacFreePreset() {
+    if ($('externalApiPriority')) $('externalApiPriority').checked = true;
+    if ($('externalBaseUrl')) $('externalBaseUrl').value = 'https://api.tuongtacfree.vn/';
+    if ($('externalDefaultModel')) $('externalDefaultModel').value = 'opus';
+    if ($('externalOpusModel')) $('externalOpusModel').value = 'claude-opus-5';
+    if ($('externalSonnetModel')) $('externalSonnetModel').value = 'claude-sonnet-4.5';
+    if ($('externalHaikuModel')) $('externalHaikuModel').value = 'claude-haiku-4.5';
+    updateExternalRoutingStatus();
+    saveExternalApiConfig();
   }
   async function loadThinkingConfig() {
     const res = await api('/thinking');
@@ -3230,6 +3297,10 @@
   function bindSettingsEvents() {
     $('saveRequireApiKeyBtn').addEventListener('click', saveRequireApiKey);
     $('saveOverUsageBtn').addEventListener('click', saveOverUsageConfig);
+    if ($('saveExternalApiBtn')) $('saveExternalApiBtn').addEventListener('click', saveExternalApiConfig);
+    if ($('applyTuongTacFreePresetBtn')) $('applyTuongTacFreePresetBtn').addEventListener('click', applyTuongTacFreePreset);
+    if ($('externalApiPriority')) $('externalApiPriority').addEventListener('change', updateExternalRoutingStatus);
+    if ($('externalBaseUrl')) $('externalBaseUrl').addEventListener('input', updateExternalRoutingStatus);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
     $('saveEndpointBtn').addEventListener('click', saveEndpointConfig);
     $('changePasswordBtn').addEventListener('click', changePassword);

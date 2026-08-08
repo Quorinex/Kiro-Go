@@ -71,6 +71,7 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 				status = 429
 				errType = "rate_limit_error"
 			}
+			setRetryAfterHeader(w, err)
 			h.sendClaudeError(w, status, errType, err.Error())
 			return
 		}
@@ -87,7 +88,8 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 			if searchErr != nil {
 				logger.Warnf("[WebSearchLoop] MCP search failed: %v", searchErr)
 				h.recordFailureWithDetails("claude", req.Model, lastAccountID, searchErr)
-				h.sendClaudeError(w, 502, "api_error", "Web search failed: "+searchErr.Error())
+				setRetryAfterHeader(w, searchErr)
+				h.sendClaudeError(w, upstreamErrorHTTPStatus(searchErr), "api_error", "Web search failed: "+searchErr.Error())
 				return
 			}
 			searchCount += roundSearchN
@@ -111,7 +113,8 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 			if sErr != nil {
 				logger.Warnf("[WebSearchLoop] final-round MCP search failed: %v", sErr)
 				h.recordFailureWithDetails("claude", req.Model, lastAccountID, sErr)
-				h.sendClaudeError(w, 502, "api_error", "Web search failed: "+sErr.Error())
+				setRetryAfterHeader(w, sErr)
+				h.sendClaudeError(w, upstreamErrorHTTPStatus(sErr), "api_error", "Web search failed: "+sErr.Error())
 				return
 			}
 			searched[i] = results

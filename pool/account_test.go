@@ -275,6 +275,52 @@ func TestGetNextForModelExcludingSkipsExcludedAccount(t *testing.T) {
 	}
 }
 
+func TestGetNextExcludingReturnsNilWhileAllAccountsAreCoolingDown(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "a", Enabled: true},
+		config.Account{ID: "b", Enabled: true},
+	)
+	p.cooldowns["a"] = time.Now().Add(time.Hour)
+	p.cooldowns["b"] = time.Now().Add(30 * time.Minute)
+
+	if got := p.GetNextExcluding(nil); got != nil {
+		t.Fatalf("expected nil while every account is cooling down, got %q", got.ID)
+	}
+}
+
+func TestGetNextForModelExcludingReturnsNilWhileAllMatchingAccountsAreCoolingDown(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "a", Enabled: true},
+		config.Account{ID: "b", Enabled: true},
+	)
+	p.SetModelList("a", []string{"claude-opus-5"})
+	p.SetModelList("b", []string{"claude-opus-5"})
+	p.cooldowns["a"] = time.Now().Add(time.Hour)
+	p.cooldowns["b"] = time.Now().Add(30 * time.Minute)
+
+	if got := p.GetNextForModelExcluding("claude-opus-5", nil); got != nil {
+		t.Fatalf("expected nil while every matching account is cooling down, got %q", got.ID)
+	}
+}
+
+func TestRecordErrorWithCooldownNeverShortensExistingCooldown(t *testing.T) {
+	p := newTestPool(config.Account{ID: "a", Enabled: true})
+	p.RecordErrorWithCooldown("a", time.Hour)
+	first := p.cooldowns["a"]
+
+	p.RecordErrorWithCooldown("a", 10*time.Second)
+	if got := p.cooldowns["a"]; got.Before(first) {
+		t.Fatalf("shorter quota hint reduced cooldown: first=%v got=%v", first, got)
+	}
+
+	p.RecordErrorWithCooldown("a", 0)
+	p.RecordErrorWithCooldown("a", 0)
+	p.RecordErrorWithCooldown("a", 0)
+	if got := p.cooldowns["a"]; got.Before(first) {
+		t.Fatalf("transient-error cooldown reduced quota cooldown: first=%v got=%v", first, got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Reload over-usage filtering
 // ---------------------------------------------------------------------------
