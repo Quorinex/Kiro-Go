@@ -1063,7 +1063,17 @@ func (h *Handler) proxyExternalClaude(w http.ResponseWriter, r *http.Request, bo
 	}
 
 	if normalizeStopHookJSON {
-		inputTokens, outputTokens := h.writeNormalizedExternalClaudeResponse(w, resp, mappedModel, originalStream)
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
+				logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after response read failure", displayURL, cooldown)
+			}
+			return false
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			externalCircuitSuccess(baseURL)
+		}
+		inputTokens, outputTokens := h.writeNormalizedExternalClaudeResponse(w, resp, bodyBytes, mappedModel, originalStream)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			if inputTokens <= 0 {
 				inputTokens = estimatedInputTokens
@@ -1149,19 +1159,13 @@ func copyExternalOpenAIHeaders(dst, src http.Header) {
 	}
 }
 
-func (h *Handler) writeNormalizedExternalClaudeResponse(w http.ResponseWriter, resp *http.Response, model string, stream bool) (int, int) {
+func (h *Handler) writeNormalizedExternalClaudeResponse(w http.ResponseWriter, resp *http.Response, body []byte, model string, stream bool) (int, int) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		for k, v := range resp.Header {
 			w.Header()[k] = v
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-		return 0, 0
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		h.sendClaudeError(w, 502, "api_error", "Failed to read external API response: "+err.Error())
+		_, _ = w.Write(body)
 		return 0, 0
 	}
 
@@ -5518,11 +5522,16 @@ func (h *Handler) proxyExternalClaudeToOpenAI(w http.ResponseWriter, r *http.Req
 		}
 		return false
 	}
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		if cooldown, opened := externalCircuitFailure(baseURL, "", clientTimeout); opened {
+			logger.Warnf("[ExternalAPI] Circuit opened for %s for %s after response read failure", displayURL, cooldown)
+		}
+		return false
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		externalCircuitSuccess(baseURL)
 	}
-
-	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
 		h.recordFailureWithDuration("claude", req.Model, displayURL, fmt.Errorf("HTTP %d", resp.StatusCode), time.Since(reqStart).Milliseconds())
 		w.Header().Set("Content-Type", "application/json")
