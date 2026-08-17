@@ -1173,9 +1173,10 @@ type OpenAIChoice struct {
 }
 
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens       int                 `json:"prompt_tokens"`
+	CompletionTokens   int                 `json:"completion_tokens"`
+	TotalTokens        int                 `json:"total_tokens"`
+	PromptTokenDetails *OpenAITokenDetails `json:"prompt_tokens_details,omitempty"`
 }
 
 // ==================== OpenAI -> Kiro 转换 ====================
@@ -2196,7 +2197,7 @@ func extractThinkingFromContent(content string) (string, string) {
 }
 
 // KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
-func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat, upstreamStopReason string) map[string]interface{} {
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat, upstreamStopReason string, cacheDetails *OpenAITokenDetails) map[string]interface{} {
 	finishReason := mapOpenAIFinishReason(upstreamStopReason, len(toolUses))
 
 	message := map[string]interface{}{
@@ -2245,10 +2246,6 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			"message":       message,
 			"finish_reason": finishReason,
 		}},
-		"usage": map[string]int{
-			"prompt_tokens":     inputTokens,
-			"completion_tokens": outputTokens,
-			"total_tokens":      inputTokens + outputTokens,
-		},
+		"usage": buildOpenAIUsage(inputTokens, outputTokens, cacheDetails),
 	}
 }

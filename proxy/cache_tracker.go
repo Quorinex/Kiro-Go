@@ -125,6 +125,69 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	}
 }
 
+// BuildOpenAIProfile creates a conservative, local-only cache profile for an
+// OpenAI request after it has been translated to Kiro's wire payload. Only
+// stable conversation material is fingerprinted: model, previous history,
+// tool definitions, and inference configuration. The current user message,
+// images, and current tool-result bodies are deliberately excluded so they are
+// never reported as cache hits.
+func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInputTokens int) *promptCacheProfile {
+	if t == nil || payload == nil || totalInputTokens <= 0 {
+		return nil
+	}
+
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	stable := map[string]interface{}{
+		"model":            current.ModelID,
+		"inference_config": payload.InferenceConfig,
+	}
+	if current.UserInputMessageContext != nil {
+		// Tools are stable prompt material. Tool results belong to the current
+		// dynamic turn and must not participate in a cache-hit estimate.
+		stable["tools"] = current.UserInputMessageContext.Tools
+	}
+
+	// Keep a cumulative breakpoint after every historic message. A follow-up
+	// request may append new history, but it can still reuse an earlier stable
+	// prefix. The current dynamic message is intentionally never appended.
+	hasher := sha256.New()
+	cumulativeTokens := 0
+	appendStableBlock := func(value interface{}) {
+		canonical := canonicalizeCacheValue(value)
+		writeHashChunk(hasher, canonical)
+		cumulativeTokens += estimateApproxTokens(canonical)
+	}
+	appendStableBlock(stable)
+
+	breakpoints := make([]promptCacheBreakpoint, 0, len(payload.ConversationState.History)+1)
+	appendBreakpoint := func() {
+		if cumulativeTokens < minCacheableTokensForModel(current.ModelID) {
+			return
+		}
+		fingerprint := [32]byte{}
+		copy(fingerprint[:], hasher.Sum(nil))
+		breakpoints = append(breakpoints, promptCacheBreakpoint{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: minInt(cumulativeTokens, totalInputTokens),
+			TTL:              defaultPromptCacheTTL,
+		})
+	}
+	appendBreakpoint()
+	for _, historyMessage := range payload.ConversationState.History {
+		appendStableBlock(historyMessage)
+		appendBreakpoint()
+	}
+	if len(breakpoints) == 0 {
+		return nil
+	}
+
+	return &promptCacheProfile{
+		Breakpoints:      breakpoints,
+		TotalInputTokens: totalInputTokens,
+		Model:            current.ModelID,
+	}
+}
+
 func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
 	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
 		return promptCacheUsage{}

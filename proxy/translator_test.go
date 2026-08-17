@@ -378,7 +378,7 @@ func TestToolResultsContinuationIncludesInstructionPrefix(t *testing.T) {
 }
 
 func TestKiroToOpenAIResponseWithReasoningPreservesFinishReason(t *testing.T) {
-	response := KiroToOpenAIResponseWithReasoning("partial answer", "", nil, 10, 20, "claude-sonnet-4.5", "reasoning_content", "MAX_TOKENS")
+	response := KiroToOpenAIResponseWithReasoning("partial answer", "", nil, 10, 20, "claude-sonnet-4.5", "reasoning_content", "MAX_TOKENS", nil)
 	choices, ok := response["choices"].([]map[string]interface{})
 	if !ok || len(choices) != 1 {
 		t.Fatalf("unexpected choices: %#v", response["choices"])

@@ -51,9 +51,10 @@ type ResponseContentPart struct {
 }
 
 type ResponsesUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens       int                 `json:"input_tokens"`
+	OutputTokens      int                 `json:"output_tokens"`
+	TotalTokens       int                 `json:"total_tokens"`
+	InputTokenDetails *OpenAITokenDetails `json:"input_tokens_details,omitempty"`
 }
 
 type ResponsesError struct {

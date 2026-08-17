@@ -217,9 +217,10 @@ func (h *Handler) handleResponsesNonStream(
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		cacheDetails := resolveOpenAICacheUsage(h.promptCache, account.ID, payload, inputTokens)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheDetails)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
 
@@ -255,7 +256,7 @@ func mapResponsesCompletion(reason string) (status, incompleteReason string) {
 
 func buildResponsesObject(
 	id, model, content string, toolUses []KiroToolUse,
-	inputTokens, outputTokens int, req *ResponsesRequest, upstreamStopReason string,
+	inputTokens, outputTokens int, req *ResponsesRequest, upstreamStopReason string, cacheDetails *OpenAITokenDetails,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
 
@@ -310,7 +311,7 @@ func buildResponsesObject(
 		Status:             status,
 		Model:              model,
 		Output:             output,
-		Usage:              ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens},
+		Usage:              ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens, InputTokenDetails: cacheDetails},
 		PreviousResponseID: req.PreviousResponseID,
 		Metadata:           req.Metadata,
 		IncompleteDetails:  incompleteDetails,
@@ -612,9 +613,10 @@ func (h *Handler) handleResponsesStream(
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		cacheDetails := resolveOpenAICacheUsage(h.promptCache, account.ID, payload, inputTokens)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheDetails)
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
