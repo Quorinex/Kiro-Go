@@ -271,6 +271,12 @@ type KiroStreamCallback struct {
 	OnCredits      func(credits float64)
 	OnContextUsage func(percentage float64)
 	OnStopReason   func(reason string)
+
+	// OnMetering fires when a meteringEvent frame arrives, regardless of the
+	// usage value it carries. Separate from OnCredits, which only fires once at
+	// end of stream and only for a non-zero total: integrity checks need to know
+	// that upstream closed the books on the turn, not how much it billed.
+	OnMetering func()
 }
 
 // ==================== API Call ====================
@@ -666,6 +672,9 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 				return emitted, toolErr
 			}
 		case "meteringEvent":
+			if callback.OnMetering != nil {
+				callback.OnMetering()
+			}
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}

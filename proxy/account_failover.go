@@ -49,30 +49,43 @@ var errUpstreamTruncatedResponse = errors.New("upstream truncated response witho
 // match Kiro IDE, whose empty and truncation predicates each require
 // toolCallCount === 0.
 //
-// Truncated when content arrived without any terminal signal.
+// Also complete when answer content arrived and upstream billed the turn.
+// stopReason rides inside metadataEvent, and some accounts (observed on
+// authMethod=idc) never send that event on any turn: the stream carries a full
+// answer, then contextUsageEvent + meteringEvent, then EOFs cleanly. Requiring
+// metadataEvent there rejected every complete answer as truncated. meteringEvent
+// is upstream closing the books on the turn, so it stands in as the terminal
+// signal those accounts do send.
 //
-// Reasoning-only with no answer is STRICTER THAN THE IDE, deliberately. The
-// IDE's truncation predicate ends in (contentChars > 0 || !reasoningSeen), so
-// reasoning with no answer and no stopReason is treated as complete there and
-// is never retried. That is the exact shape of the production symptom this
-// proxy exists to fix: thinking streams in full, then the turn dies before the
-// answer or the tool call. Handing a client reasoning with no answer as a
-// successful turn is what made the failure invisible, so it is classified as
-// truncated here.
-func classifyStreamIntegrity(contentChars, toolCallCount int, stopReason string, sawReasoning bool) error {
+// Truncated when content arrived with neither a terminal signal nor metering:
+// upstream never finished the turn, so a retry can still recover it.
+//
+// Reasoning with no answer stays truncated even when metering arrived, and
+// remains STRICTER THAN THE IDE. The IDE's truncation predicate ends in
+// (contentChars > 0 || !reasoningSeen), so reasoning with no answer and no
+// stopReason is treated as complete there and is never retried. That is the
+// exact shape of the production symptom this proxy exists to fix: thinking
+// streams in full, then the turn dies before the answer or the tool call.
+// Upstream bills for the thinking tokens it did produce, so metering cannot
+// distinguish that from a finished turn and must not be allowed to clear it.
+func classifyStreamIntegrity(contentChars, toolCallCount int, stopReason string, sawReasoning, sawMetering bool) error {
 	if strings.TrimSpace(stopReason) != "" {
 		return nil
 	}
 	if toolCallCount > 0 {
 		return nil
 	}
-	if contentChars > 0 || sawReasoning {
+	if contentChars == 0 {
+		// Reasoning-only is truncated per the doc comment above. No content, no
+		// reasoning, no tools is unreachable through the wired paths
+		// (errEmptyKiroStream fires first, see above) and is likewise treated as
+		// truncated so a future caller that bypasses that guard still cannot
+		// ship an empty turn as a success.
 		return errUpstreamTruncatedResponse
 	}
-	// No content, no reasoning, no tools: unreachable through the wired paths
-	// (errEmptyKiroStream fires first, see above). Treated as truncated rather
-	// than complete so a future caller that bypasses that guard still cannot
-	// ship an empty turn as a success.
+	if sawMetering {
+		return nil
+	}
 	return errUpstreamTruncatedResponse
 }
 

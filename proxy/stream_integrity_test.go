@@ -14,11 +14,13 @@ import (
 
 // classifyStreamIntegrity is the completeness rule: a stream that returned no
 // transport error is still incomplete when it carries no terminal signal.
-// A stopReason of any value, or a delivered tool call, means complete.
+// A stopReason of any value, or a delivered tool call, means complete. So does
+// answer content plus a meteringEvent, which is the only terminal signal
+// accounts that never emit metadataEvent do send.
 //
 // The reasoning-only case deliberately differs from Kiro IDE, which treats it
 // as complete. See classifyStreamIntegrity's doc comment for why this proxy is
-// stricter.
+// stricter, and why metering does not clear it.
 func TestClassifyStreamIntegrity(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -26,17 +28,21 @@ func TestClassifyStreamIntegrity(t *testing.T) {
 		tools        int
 		stopReason   string
 		sawReasoning bool
+		sawMetering  bool
 		wantErr      error
 	}{
-		{"complete with stop", 12, 0, "end_turn", false, nil},
-		{"complete with tools", 0, 1, "", false, nil},
-		{"complete with tools despite content", 12, 1, "", false, nil},
-		{"truncated content", 8, 0, "", false, errUpstreamTruncatedResponse},
-		{"reasoning only stricter than ide", 0, 0, "", true, errUpstreamTruncatedResponse},
-		{"no signal at all", 0, 0, "", false, errUpstreamTruncatedResponse},
+		{"complete with stop", 12, 0, "end_turn", false, false, nil},
+		{"complete with tools", 0, 1, "", false, false, nil},
+		{"complete with tools despite content", 12, 1, "", false, false, nil},
+		{"complete with content and metering", 8, 0, "", false, true, nil},
+		{"complete with content after reasoning when metered", 8, 0, "", true, true, nil},
+		{"truncated content without metering", 8, 0, "", false, false, errUpstreamTruncatedResponse},
+		{"reasoning only stricter than ide", 0, 0, "", true, false, errUpstreamTruncatedResponse},
+		{"reasoning only stays truncated when metered", 0, 0, "", true, true, errUpstreamTruncatedResponse},
+		{"no signal at all", 0, 0, "", false, false, errUpstreamTruncatedResponse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyStreamIntegrity(tc.content, tc.tools, tc.stopReason, tc.sawReasoning)
+			got := classifyStreamIntegrity(tc.content, tc.tools, tc.stopReason, tc.sawReasoning, tc.sawMetering)
 			if tc.wantErr == nil {
 				if got != nil {
 					t.Fatalf("got %v, want nil", got)
@@ -155,6 +161,105 @@ func TestRunKiroWithIntegrityRetryRecoversTruncatedThenComplete(t *testing.T) {
 	// "partial" from the first attempt must not survive into the final result.
 	if content != "recovered" || stopReason != "end_turn" {
 		t.Fatalf("content=%q stopReason=%q", content, stopReason)
+	}
+}
+
+// An account that never sends metadataEvent still closes every turn with
+// contextUsageEvent + meteringEvent. That metering is the terminal signal, so a
+// complete answer must be accepted on the first attempt instead of burning the
+// whole retry budget and failing.
+func TestRunKiroWithIntegrityRetryAcceptsMeteredContentWithoutMetadataEvent(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "complete answer",
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+			"contextUsagePercentage": 13.29,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{
+			"usage": 0.0196,
+		}))
+	}))
+	defer server.Close()
+	defer setupIntegrityTestUpstream(t, server)()
+
+	var content string
+	var metered int
+	err := runKiroWithIntegrityRetry(context.Background(), integrityTestAccount(), integrityTestPayload(),
+		&KiroStreamCallback{
+			OnText:     func(s string, _ bool) { content += s },
+			OnMetering: func() { metered++ },
+		},
+		func() (int, int, string, bool) { return len(content), 0, "", false },
+		func() { content = "" },
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("metered content must count as complete, got %v", err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected no retry, got %d upstream hits", got)
+	}
+	if content != "complete answer" {
+		t.Fatalf("content=%q", content)
+	}
+	// Wrapping OnMetering for integrity must not swallow a caller's own handler.
+	if metered != 1 {
+		t.Fatalf("caller OnMetering must still fire, got %d", metered)
+	}
+}
+
+// sawMetering must be cleared before each attempt. A metered but still
+// truncated attempt (reasoning with no answer) followed by an unmetered attempt
+// that did produce content must not be accepted on the strength of the earlier
+// attempt's billing: that would resurrect the exact silent-success this check
+// exists to prevent, one attempt removed.
+func TestRunKiroWithIntegrityRetryDoesNotReuseStaleMetering(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			// Metered, but reasoning only: truncated, and sets the flag.
+			_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+				"text": "thinking",
+			}))
+			_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{
+				"usage": 0.01,
+			}))
+			return
+		}
+		// Content, no metering: truncated unless the stale flag leaks through.
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "answer",
+		}))
+	}))
+	defer server.Close()
+	defer setupIntegrityTestUpstream(t, server)()
+
+	var content, reasoning string
+	err := runKiroWithIntegrityRetry(context.Background(), integrityTestAccount(), integrityTestPayload(),
+		&KiroStreamCallback{
+			OnText: func(s string, isThinking bool) {
+				if isThinking {
+					reasoning += s
+					return
+				}
+				content += s
+			},
+		},
+		func() (int, int, string, bool) { return len(content), 0, "", reasoning != "" },
+		func() { content = ""; reasoning = "" },
+		nil,
+	)
+	if !isStreamIntegrityError(err) {
+		t.Fatalf("stale metering must not clear a later unmetered attempt, got %v", err)
+	}
+	if got := hits.Load(); got != maxSameAccountStreamRetries+1 {
+		t.Fatalf("expected the full retry budget (%d hits), got %d", maxSameAccountStreamRetries+1, got)
 	}
 }
 

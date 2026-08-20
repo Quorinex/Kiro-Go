@@ -12,8 +12,11 @@ import (
 //
 // callback is reused across attempts. Both CallKiroAPIContext and
 // parseEventStreamTracked copy the struct before wrapping any field, so a retry
-// cannot double-wrap it; per-attempt state is cleared by reset instead.
-// measure reports the integrity inputs after a transport-successful call.
+// cannot double-wrap it; per-attempt state is cleared by reset instead. This
+// function wraps OnMetering the same way, once before the loop, to observe
+// upstream billing without asking callers to report it.
+// measure reports the remaining integrity inputs after a transport-successful
+// call.
 // reset clears per-attempt state before a same-account retry; may be nil.
 // canRetry reports whether a retry is still safe (for streaming: nothing has
 // been flushed to the client yet). nil means always retryable.
@@ -42,10 +45,30 @@ func runKiroWithIntegrityRetry(
 		return canRetry()
 	}
 
+	if callback == nil {
+		callback = &KiroStreamCallback{}
+	}
+
+	// meteringEvent arrival is tracked here rather than threaded through every
+	// caller's measure func: upstream billing is an integrity signal, and no
+	// handler has a use for it. Wrapped once outside the loop so a retry cannot
+	// double-wrap the callback; the flag is cleared per attempt instead.
+	var sawMetering bool
+	tracked := *callback
+	callerOnMetering := tracked.OnMetering
+	tracked.OnMetering = func() {
+		sawMetering = true
+		if callerOnMetering != nil {
+			callerOnMetering()
+		}
+	}
+	callback = &tracked
+
 	for attempt := 0; attempt <= maxSameAccountStreamRetries; attempt++ {
 		if attempt > 0 && reset != nil {
 			reset()
 		}
+		sawMetering = false
 
 		err := CallKiroAPIContext(ctx, account, payload, callback)
 		if err != nil {
@@ -53,7 +76,7 @@ func runKiroWithIntegrityRetry(
 		}
 
 		contentChars, toolCount, stopReason, sawReasoning := measure()
-		integrityErr := classifyStreamIntegrity(contentChars, toolCount, stopReason, sawReasoning)
+		integrityErr := classifyStreamIntegrity(contentChars, toolCount, stopReason, sawReasoning, sawMetering)
 		if integrityErr == nil {
 			return nil
 		}
