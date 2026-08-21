@@ -210,6 +210,100 @@ func TestCanonicalCacheValuePreservesSemanticPositionKeys(t *testing.T) {
 	}
 }
 
+// TestPromptCacheOpenAIImplicitBreakpointAcrossTurns verifies that the OpenAI
+// wire format, which has no cache_control marker at all, still gets a cache
+// hit on repeated history: every message end is an unconditional implicit
+// breakpoint (5-minute TTL) rather than requiring an explicit breakpoint
+// first as on the Claude path.
+func TestPromptCacheOpenAIImplicitBreakpointAcrossTurns(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	systemText := strings.Repeat("You are a helpful coding assistant with deep knowledge of Go, Rust, Python, and TypeScript. ", 80)
+
+	req1 := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: systemText},
+			{Role: "user", Content: "question one"},
+		},
+	}
+	profile1 := tracker.BuildOpenAIProfile(req1, 2048)
+	if profile1 == nil {
+		t.Fatalf("profile1 should be built")
+	}
+	first := tracker.Compute("acct-1", profile1)
+	if first.CacheReadInputTokens != 0 {
+		t.Fatalf("expected no cache read on first request, got %+v", first)
+	}
+	if first.CacheCreationInputTokens <= 0 {
+		t.Fatalf("expected first request to create cache tokens, got %+v", first)
+	}
+	tracker.Update("acct-1", profile1)
+
+	req2 := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: systemText},
+			{Role: "user", Content: "question one"},
+			{Role: "assistant", Content: "answer one"},
+			{Role: "user", Content: "follow-up question"},
+		},
+	}
+	profile2 := tracker.BuildOpenAIProfile(req2, 4096)
+	if profile2 == nil {
+		t.Fatalf("profile2 should be built")
+	}
+	second := tracker.Compute("acct-1", profile2)
+	if second.CacheReadInputTokens == 0 {
+		t.Fatalf("expected cache read via unconditional implicit breakpoint, got %+v", second)
+	}
+}
+
+// TestBuildOpenAIUsageMapIncludesCacheFields mirrors the Claude-side usage
+// map test but for the OpenAI response shape.
+func TestBuildOpenAIUsageMapIncludesCacheFields(t *testing.T) {
+	usage := promptCacheUsage{
+		CacheCreationInputTokens:   30,
+		CacheReadInputTokens:       20,
+		CacheCreation5mInputTokens: 10,
+		CacheCreation1hInputTokens: 20,
+	}
+
+	m := buildOpenAIUsageMap(100, 50, usage, true)
+
+	if got := m["prompt_tokens"]; got != 50 {
+		t.Fatalf("expected billed prompt tokens 50, got %#v", got)
+	}
+	if got := m["completion_tokens"]; got != 50 {
+		t.Fatalf("expected completion tokens 50, got %#v", got)
+	}
+	if got := m["total_tokens"]; got != 100 {
+		t.Fatalf("expected total tokens 100, got %#v", got)
+	}
+	if got := m["cache_creation_input_tokens"]; got != 30 {
+		t.Fatalf("expected cache creation tokens 30, got %#v", got)
+	}
+	if got := m["cache_read_input_tokens"]; got != 20 {
+		t.Fatalf("expected cache read tokens 20, got %#v", got)
+	}
+	creation, ok := m["cache_creation"].(map[string]int)
+	if !ok {
+		t.Fatalf("expected typed cache creation map, got %#v", m["cache_creation"])
+	}
+	if creation["ephemeral_5m_input_tokens"] != 10 || creation["ephemeral_1h_input_tokens"] != 20 {
+		t.Fatalf("unexpected ttl breakdown: %#v", creation)
+	}
+}
+
+func TestBuildOpenAIUsageMapOmitsCacheFieldsWhenNoProfile(t *testing.T) {
+	m := buildOpenAIUsageMap(100, 50, promptCacheUsage{}, false)
+	if _, ok := m["cache_creation_input_tokens"]; ok {
+		t.Fatalf("expected no cache fields when includeCache is false, got %#v", m)
+	}
+	if _, ok := m["cache_creation"]; ok {
+		t.Fatalf("expected no cache_creation field when includeCache is false, got %#v", m)
+	}
+}
+
 // TestPromptCacheImplicitBreakpointAtMessageEnd verifies that once any
 // explicit cache_control breakpoint has been seen, subsequent message-end
 // boundaries act as implicit breakpoints. This allows multi-turn conversations

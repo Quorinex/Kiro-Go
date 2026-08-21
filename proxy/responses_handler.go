@@ -97,6 +97,12 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		Stream:   req.Stream,
 		Tools:    req.Tools,
 	}
+	if len(req.ToolChoice) > 0 {
+		var toolChoice interface{}
+		if err := json.Unmarshal(req.ToolChoice, &toolChoice); err == nil {
+			openaiReq.ToolChoice = toolChoice
+		}
+	}
 	if req.Temperature != nil {
 		openaiReq.Temperature = *req.Temperature
 	}

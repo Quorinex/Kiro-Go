@@ -524,9 +524,9 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	// 添加别名模型
 	models = append(models,
-		buildModelInfo("auto", "kiro-proxy", true),
-		buildModelInfo("gpt-4o", "kiro-proxy", true),
-		buildModelInfo("gpt-4", "kiro-proxy", true),
+		buildModelInfoWithTools("auto", "kiro-proxy", true, true),
+		buildModelInfoWithTools("gpt-4o", "kiro-proxy", true, true),
+		buildModelInfoWithTools("gpt-4", "kiro-proxy", true, true),
 	)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -584,6 +584,14 @@ func modelSupportsImage(inputTypes []string) bool {
 }
 
 func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface{} {
+	return buildModelInfoWithTools(id, ownedBy, supportsImage, false)
+}
+
+// buildModelInfoWithTools 在 buildModelInfo 基础上可选声明 function_calling/tools 能力。
+// supportsTools 仅应对 gpt 别名分支（ownedBy=="kiro-proxy"）传 true，
+// 用于让 ChatGPT/Codex 等客户端在拉取 /v1/models 时能探测到工具调用能力，
+// 不影响 Claude/anthropic 分支现有的能力声明。
+func buildModelInfoWithTools(id, ownedBy string, supportsImage, supportsTools bool) map[string]interface{} {
 	modalities := []string{"text"}
 	if supportsImage {
 		modalities = append(modalities, "image")
@@ -593,27 +601,41 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 		"output": []string{"text"},
 	}
 
-	return map[string]interface{}{
+	capabilities := map[string]bool{
+		"vision":       supportsImage,
+		"image":        supportsImage,
+		"image_vision": supportsImage,
+	}
+	metaCapabilities := map[string]bool{
+		"vision":       supportsImage,
+		"image_vision": supportsImage,
+	}
+	if supportsTools {
+		capabilities["function_calling"] = true
+		capabilities["tools"] = true
+		metaCapabilities["function_calling"] = true
+		metaCapabilities["tools"] = true
+	}
+
+	info := map[string]interface{}{
 		"id":               id,
 		"object":           "model",
 		"owned_by":         ownedBy,
 		"supports_image":   supportsImage,
 		"input_modalities": modalities,
 		"modalities":       modalitiesMap,
-		"capabilities": map[string]bool{
-			"vision":       supportsImage,
-			"image":        supportsImage,
-			"image_vision": supportsImage,
-		},
+		"capabilities":     capabilities,
 		"info": map[string]interface{}{
 			"meta": map[string]interface{}{
-				"capabilities": map[string]bool{
-					"vision":       supportsImage,
-					"image_vision": supportsImage,
-				},
+				"capabilities": metaCapabilities,
 			},
 		},
 	}
+	if supportsTools {
+		info["supports_tools"] = true
+		info["supports_function_calling"] = true
+	}
+	return info
 }
 
 // refreshModelsCache 从 Kiro API 拉取模型列表并缓存
@@ -1720,19 +1742,20 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
+	cacheProfile := h.promptCache.BuildOpenAIProfile(&req, estimatedInputTokens)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
-		h.handleOpenAIStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAIStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheProfile, apiKeyID)
 	} else {
-		h.handleOpenAINonStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAINonStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheProfile, apiKeyID)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1762,6 +1785,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 			h.handleAccountFailure(account, err)
 			continue
 		}
+
+		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
 		var upstreamStopReason string
 		var toolCalls []ToolCall
@@ -2132,6 +2157,7 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(account.ID, cacheProfile)
 		h.recordSuccessLog("openai", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 		finishReason := mapOpenAIFinishReason(upstreamStopReason, len(toolCalls))
 
@@ -2145,11 +2171,7 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 				"delta":         map[string]interface{}{},
 				"finish_reason": finishReason,
 			}},
-			"usage": map[string]int{
-				"prompt_tokens":     inputTokens,
-				"completion_tokens": outputTokens,
-				"total_tokens":      inputTokens + outputTokens,
-			},
+			"usage": buildOpenAIUsageMap(inputTokens, outputTokens, cacheUsage, cacheProfile != nil),
 		}
 		data, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", string(data))
@@ -2168,7 +2190,7 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	reqStart := time.Now()
@@ -2184,6 +2206,8 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 			h.handleAccountFailure(account, err)
 			continue
 		}
+
+		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
 		var content string
 		var reasoningContent string
@@ -2260,10 +2284,11 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(account.ID, cacheProfile)
 		h.recordSuccessLog("openai", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
-		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat, upstreamStopReason)
+		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat, upstreamStopReason, cacheUsage, cacheProfile != nil)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(resp)
 		return
