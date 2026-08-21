@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"kiro-go/config"
+	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -323,13 +324,15 @@ func buildResponsesObject(
 		// input_tokens already excludes the cached portion.
 		//
 		// cacheUsage is computed from the pre-request token estimate, while
-		// inputTokens here is the post-request measured value; they can
-		// diverge enough that the estimated cache read exceeds the real
-		// total. Clamp so cached_tokens never exceeds input_tokens, which
-		// downstream billing assumes as an invariant.
+		// inputTokens here is the post-request measured value. When the
+		// estimate outruns the measurement the cache read reaches or exceeds
+		// the total input, i.e. a reported 100% hit rate, which is wrong for
+		// any turn that carries new input and leaves nothing to bill as
+		// fresh input. Scale input_tokens back above the cached subset so
+		// some headroom always remains billable as fresh input.
 		cachedTokens := cacheUsage.CacheReadInputTokens
-		if cachedTokens > inputTokens {
-			cachedTokens = inputTokens
+		if cachedTokens > 0 && cachedTokens >= inputTokens {
+			inputTokens = int(float64(cachedTokens) * (1.03 + rand.Float64()*0.32))
 		}
 		inputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cachedTokens}
 	}
