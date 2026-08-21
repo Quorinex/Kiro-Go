@@ -321,7 +321,17 @@ func buildResponsesObject(
 		// (cached tokens included), with input_tokens_details.cached_tokens
 		// as a subset of that total — unlike Anthropic's shape where
 		// input_tokens already excludes the cached portion.
-		inputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cacheUsage.CacheReadInputTokens}
+		//
+		// cacheUsage is computed from the pre-request token estimate, while
+		// inputTokens here is the post-request measured value; they can
+		// diverge enough that the estimated cache read exceeds the real
+		// total. Clamp so cached_tokens never exceeds input_tokens, which
+		// downstream billing assumes as an invariant.
+		cachedTokens := cacheUsage.CacheReadInputTokens
+		if cachedTokens > inputTokens {
+			cachedTokens = inputTokens
+		}
+		inputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cachedTokens}
 	}
 
 	return &ResponsesObject{
