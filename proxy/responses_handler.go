@@ -315,10 +315,12 @@ func buildResponsesObject(
 		incompleteDetails = &ResponsesIncompleteDetails{Reason: incompleteReason}
 	}
 
-	billedInputTokens := inputTokens
 	var inputTokensDetails *ResponsesInputTokensDetails
 	if includeCache {
-		billedInputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
+		// OpenAI's native usage shape reports input_tokens as the raw total
+		// (cached tokens included), with input_tokens_details.cached_tokens
+		// as a subset of that total — unlike Anthropic's shape where
+		// input_tokens already excludes the cached portion.
 		inputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cacheUsage.CacheReadInputTokens}
 	}
 
@@ -330,10 +332,10 @@ func buildResponsesObject(
 		Model:     model,
 		Output:    output,
 		Usage: ResponsesUsage{
-			InputTokens:        billedInputTokens,
+			InputTokens:        inputTokens,
 			InputTokensDetails: inputTokensDetails,
 			OutputTokens:       outputTokens,
-			TotalTokens:        billedInputTokens + outputTokens,
+			TotalTokens:        inputTokens + outputTokens,
 		},
 		PreviousResponseID: req.PreviousResponseID,
 		Metadata:           req.Metadata,
