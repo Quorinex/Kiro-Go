@@ -116,24 +116,26 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
+	cacheProfile := h.promptCache.BuildOpenAIProfile(openaiReq, estimatedInputTokens)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	respID := generateResponseID()
 
 	if req.Stream {
 		h.handleResponsesStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-			apiKeyID, respID, &req, storedInputCopy, storeResponse)
+			apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
 		return
 	}
 
 	h.handleResponsesNonStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-		apiKeyID, respID, &req, storedInputCopy, storeResponse)
+		apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
 }
 
 func (h *Handler) handleResponsesNonStream(
 	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	cacheProfile *promptCacheProfile,
 ) {
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -150,6 +152,8 @@ func (h *Handler) handleResponsesNonStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
+
+		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
 		var content, reasoningContent string
 		var toolUses []KiroToolUse
@@ -224,8 +228,9 @@ func (h *Handler) handleResponsesNonStream(
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
+		h.promptCache.Update(account.ID, cacheProfile)
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheUsage, cacheProfile != nil)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
 
@@ -262,6 +267,7 @@ func mapResponsesCompletion(reason string) (status, incompleteReason string) {
 func buildResponsesObject(
 	id, model, content string, toolUses []KiroToolUse,
 	inputTokens, outputTokens int, req *ResponsesRequest, upstreamStopReason string,
+	cacheUsage promptCacheUsage, includeCache bool,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
 
@@ -309,14 +315,26 @@ func buildResponsesObject(
 		incompleteDetails = &ResponsesIncompleteDetails{Reason: incompleteReason}
 	}
 
+	billedInputTokens := inputTokens
+	var inputTokensDetails *ResponsesInputTokensDetails
+	if includeCache {
+		billedInputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
+		inputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cacheUsage.CacheReadInputTokens}
+	}
+
 	return &ResponsesObject{
-		ID:                 id,
-		Object:             "response",
-		CreatedAt:          time.Now().Unix(),
-		Status:             status,
-		Model:              model,
-		Output:             output,
-		Usage:              ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens},
+		ID:        id,
+		Object:    "response",
+		CreatedAt: time.Now().Unix(),
+		Status:    status,
+		Model:     model,
+		Output:    output,
+		Usage: ResponsesUsage{
+			InputTokens:        billedInputTokens,
+			InputTokensDetails: inputTokensDetails,
+			OutputTokens:       outputTokens,
+			TotalTokens:        billedInputTokens + outputTokens,
+		},
 		PreviousResponseID: req.PreviousResponseID,
 		Metadata:           req.Metadata,
 		IncompleteDetails:  incompleteDetails,
@@ -327,6 +345,7 @@ func (h *Handler) handleResponsesStream(
 	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	cacheProfile *promptCacheProfile,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -380,6 +399,8 @@ func (h *Handler) handleResponsesStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
+
+		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
 		send("response.in_progress", map[string]interface{}{
 			"type":     "response.in_progress",
@@ -619,8 +640,9 @@ func (h *Handler) handleResponsesStream(
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
+		h.promptCache.Update(account.ID, cacheProfile)
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheUsage, cacheProfile != nil)
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
