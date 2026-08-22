@@ -6,6 +6,62 @@ import (
 	"strings"
 )
 
+// responsesAdditionalToolsType is the input item Codex Responses Lite (gpt-5.6
+// and newer) uses to carry tool definitions instead of the top-level tools
+// array. On that path the request arrives with tools omitted entirely.
+const responsesAdditionalToolsType = "additional_tools"
+
+// responsesInputItems splits an input payload into its individual items,
+// tolerating both the array form and a single bare object. Malformed input
+// yields no items rather than an error; parseResponsesInput reports shape
+// problems to the caller.
+func responsesInputItems(raw json.RawMessage) []json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil
+	}
+	switch trimmed[0] {
+	case '[':
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil
+		}
+		return items
+	case '{':
+		return []json.RawMessage{raw}
+	}
+	return nil
+}
+
+// extractResponsesAdditionalTools pulls tool definitions out of the
+// additional_tools input item:
+//
+//	{"type":"additional_tools","role":"developer","tools":[...]}
+//
+// The item carries no content field, so handling it as an ordinary developer
+// message discards every tool it holds and the model then reports having no
+// tools available at all.
+func extractResponsesAdditionalTools(raw json.RawMessage) []OpenAITool {
+	var tools []OpenAITool
+	for _, item := range responsesInputItems(raw) {
+		var probe struct {
+			Type  string       `json:"type"`
+			Tools []OpenAITool `json:"tools"`
+		}
+		if err := json.Unmarshal(item, &probe); err != nil {
+			continue
+		}
+		if probe.Type != responsesAdditionalToolsType {
+			continue
+		}
+		tools = append(tools, probe.Tools...)
+	}
+	return tools
+}
+
 func parseResponsesInput(raw json.RawMessage) ([]OpenAIMessage, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -67,6 +123,11 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 		role, _ := obj["role"].(string)
 
 		switch {
+		case typ == responsesAdditionalToolsType:
+			// Tool definitions rather than conversational content; the caller
+			// reads them via extractResponsesAdditionalTools. Emitting nothing
+			// keeps the developer-role wrapper out of the prompt.
+
 		case typ == "message" || (typ == "" && role != ""):
 			flushPendingUser()
 			msg := buildMessageFromInputItem(obj, role)
@@ -74,7 +135,7 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 				messages = append(messages, *msg)
 			}
 
-		case typ == "function_call_output" || typ == "tool_result":
+		case typ == "function_call_output" || typ == "tool_result" || typ == "custom_tool_call_output":
 			flushPendingUser()
 			callID, _ := obj["call_id"].(string)
 			if callID == "" {
@@ -90,14 +151,21 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 				ToolCallID: callID,
 			})
 
-		case typ == "function_call":
+		case typ == "function_call" || typ == responsesCustomToolCallType:
 			flushPendingUser()
 			tc := ToolCall{
 				ID:   stringField(obj, "call_id", "id"),
 				Type: "function",
 			}
 			tc.Function.Name, _ = obj["name"].(string)
-			tc.Function.Arguments = stringifyArbitrary(obj["arguments"])
+			if typ == responsesCustomToolCallType {
+				// Freeform calls replay their payload under "input". Re-wrap it
+				// in the single-argument schema convertOpenAITools advertises so
+				// the replayed call still matches its tool definition.
+				tc.Function.Arguments = wrapCustomToolArguments(stringifyArbitrary(obj["input"]))
+			} else {
+				tc.Function.Arguments = stringifyArbitrary(obj["arguments"])
+			}
 			// Merge consecutive function_call items into a single assistant
 			// message so parallel tool calls stay grouped in one turn. The
 			// Responses API emits each parallel call as a separate input item;

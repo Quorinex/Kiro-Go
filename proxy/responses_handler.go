@@ -98,6 +98,18 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		Stream:   req.Stream,
 		Tools:    req.Tools,
 	}
+	// Codex Responses Lite (gpt-5.6 and newer) omits the top-level tools array
+	// and ships tool definitions inside an additional_tools input item instead.
+	// Without this merge the request reaches Kiro carrying no tools at all, and
+	// the model correctly reports that it has no shell available.
+	if extra := extractResponsesAdditionalTools(req.Input); len(extra) > 0 {
+		openaiReq.Tools = append(openaiReq.Tools, extra...)
+	}
+	// Unwrap Codex namespace wrappers up front so the token estimator and cache
+	// profile see the real tool schemas rather than just the wrapper name. Tool
+	// schemas are large, so leaving them nested materially skews both.
+	openaiReq.Tools = flattenOpenAITools(openaiReq.Tools, 0)
+	customTools := collectCustomToolNames(openaiReq.Tools)
 	if len(req.ToolChoice) > 0 {
 		var toolChoice interface{}
 		if err := json.Unmarshal(req.ToolChoice, &toolChoice); err == nil {
@@ -124,19 +136,19 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	if req.Stream {
 		h.handleResponsesStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-			apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
+			apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile, customTools)
 		return
 	}
 
 	h.handleResponsesNonStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-		apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
+		apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile, customTools)
 }
 
 func (h *Handler) handleResponsesNonStream(
 	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
-	cacheProfile *promptCacheProfile,
+	cacheProfile *promptCacheProfile, customTools map[string]bool,
 ) {
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -231,7 +243,7 @@ func (h *Handler) handleResponsesNonStream(
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 		h.promptCache.Update(account.ID, cacheProfile)
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheUsage, cacheProfile != nil)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheUsage, cacheProfile != nil, customTools)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
 
@@ -268,7 +280,7 @@ func mapResponsesCompletion(reason string) (status, incompleteReason string) {
 func buildResponsesObject(
 	id, model, content string, toolUses []KiroToolUse,
 	inputTokens, outputTokens int, req *ResponsesRequest, upstreamStopReason string,
-	cacheUsage promptCacheUsage, includeCache bool,
+	cacheUsage promptCacheUsage, includeCache bool, customTools map[string]bool,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
 
@@ -286,15 +298,20 @@ func buildResponsesObject(
 	}
 
 	for _, tu := range toolUses {
-		args, _ := json.Marshal(tu.Input)
-		output = append(output, ResponseOutputItem{
-			ID:        generateOutputItemID("fc"),
-			Type:      "function_call",
-			Status:    "completed",
-			CallID:    tu.ToolUseID,
-			Name:      tu.Name,
-			Arguments: string(args),
-		})
+		shape := shapeResponsesToolCall(tu, customTools)
+		item := ResponseOutputItem{
+			ID:     generateOutputItemID("fc"),
+			Type:   shape.Type,
+			Status: "completed",
+			CallID: tu.ToolUseID,
+			Name:   tu.Name,
+		}
+		if shape.Type == responsesCustomToolCallType {
+			item.Input = shape.Input
+		} else {
+			item.Arguments = shape.Arguments
+		}
+		output = append(output, item)
 	}
 
 	if len(output) == 0 {
@@ -360,7 +377,7 @@ func (h *Handler) handleResponsesStream(
 	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
-	cacheProfile *promptCacheProfile,
+	cacheProfile *promptCacheProfile, customTools map[string]bool,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -517,37 +534,20 @@ func (h *Handler) handleResponsesStream(
 				}
 
 				toolUses = append(toolUses, tu)
-				args, _ := json.Marshal(tu.Input)
+				shape := shapeResponsesToolCall(tu, customTools)
 				fcID := generateOutputItemID("fc")
 				send("response.output_item.added", map[string]interface{}{
 					"type":         "response.output_item.added",
 					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "in_progress",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": "",
-					},
+					"item":         shape.outputItem(fcID, tu, "in_progress", false),
 				})
-				send("response.function_call_arguments.delta", map[string]interface{}{
-					"type":         "response.function_call_arguments.delta",
-					"item_id":      fcID,
-					"output_index": outputIndex,
-					"delta":        string(args),
-				})
+				send(shape.deltaEvent(), shape.deltaPayload(fcID, outputIndex))
+				// Codex reads tool calls only from output_item.done, ignoring the
+				// delta events above, so this event must carry the complete call.
 				send("response.output_item.done", map[string]interface{}{
 					"type":         "response.output_item.done",
 					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "completed",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": string(args),
-					},
+					"item":         shape.outputItem(fcID, tu, "completed", true),
 				})
 				outputIndex++
 				responseStarted = true
@@ -657,7 +657,7 @@ func (h *Handler) handleResponsesStream(
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 		h.promptCache.Update(account.ID, cacheProfile)
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheUsage, cacheProfile != nil)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheUsage, cacheProfile != nil, customTools)
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions

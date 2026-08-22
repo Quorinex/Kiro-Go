@@ -1101,6 +1101,21 @@ type ToolCall struct {
 	} `json:"function"`
 }
 
+const (
+	openAIToolTypeFunction  = "function"
+	openAIToolTypeCustom    = "custom"
+	openAIToolTypeNamespace = "namespace"
+
+	// customToolInputKey is the single argument freeform (grammar) tools are
+	// exposed through, since Kiro only accepts JSON-schema tool definitions.
+	customToolInputKey = "input"
+
+	// maxToolNamespaceDepth bounds namespace unwrapping. Codex nests one level
+	// in practice; the cap only exists so malformed input cannot recurse away
+	// the stack.
+	maxToolNamespaceDepth = 4
+)
+
 type OpenAITool struct {
 	Type     string `json:"type"`
 	Function struct {
@@ -1108,6 +1123,17 @@ type OpenAITool struct {
 		Description string      `json:"description"`
 		Parameters  interface{} `json:"parameters"`
 	} `json:"function"`
+	// Tools carries the children of a Codex namespace wrapper:
+	//
+	//	{"type":"namespace","name":"functions","tools":[...]}
+	//
+	// Codex wraps tools this way for every provider that leaves
+	// namespace_tools enabled, which is the default for custom providers.
+	Tools []OpenAITool `json:"tools,omitempty"`
+	// Format carries the grammar of a Codex freeform tool:
+	//
+	//	{"type":"custom","name":"apply_patch","format":{"type":"grammar",...}}
+	Format map[string]interface{} `json:"format,omitempty"`
 }
 
 // UnmarshalJSON accepts both the Chat Completions tool shape, where the tool
@@ -1124,10 +1150,12 @@ type OpenAITool struct {
 // which Kiro rejects with HTTP 400 "Improperly formed request".
 func (t *OpenAITool) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Type        string      `json:"type"`
-		Name        string      `json:"name"`
-		Description string      `json:"description"`
-		Parameters  interface{} `json:"parameters"`
+		Type        string                 `json:"type"`
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		Parameters  interface{}            `json:"parameters"`
+		Tools       []OpenAITool           `json:"tools"`
+		Format      map[string]interface{} `json:"format"`
 		Function    *struct {
 			Name        string      `json:"name"`
 			Description string      `json:"description"`
@@ -1139,6 +1167,8 @@ func (t *OpenAITool) UnmarshalJSON(data []byte) error {
 	}
 
 	t.Type = raw.Type
+	t.Tools = raw.Tools
+	t.Format = raw.Format
 	if raw.Function != nil {
 		t.Function.Name = raw.Function.Name
 		t.Function.Description = raw.Function.Description
@@ -2097,17 +2127,94 @@ func parseBase64Image(data, format string) *KiroImage {
 	}
 }
 
+// flattenOpenAITools unwraps Codex namespace wrappers into a flat list of leaf
+// tools. Codex sends {"type":"namespace","name":"functions","tools":[...]} to
+// any provider with namespace_tools enabled (the default for custom
+// providers), so without unwrapping every tool inside the wrapper is lost.
+func flattenOpenAITools(tools []OpenAITool, depth int) []OpenAITool {
+	if len(tools) == 0 {
+		return nil
+	}
+	flat := make([]OpenAITool, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Type == openAIToolTypeNamespace || (tool.Type == "" && len(tool.Tools) > 0) {
+			if depth >= maxToolNamespaceDepth {
+				continue
+			}
+			flat = append(flat, flattenOpenAITools(tool.Tools, depth+1)...)
+			continue
+		}
+		flat = append(flat, tool)
+	}
+	return flat
+}
+
+// customToolSchema exposes a freeform (grammar) tool as a single-string-argument
+// function, the closest shape Kiro's JSON-schema-only tool specs can express.
+// The grammar itself is folded into the description so the model still knows
+// what to emit; responses_handler restores the custom_tool_call shape on the
+// way back out.
+func customToolSchema() interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			customToolInputKey: map[string]interface{}{
+				"type":        "string",
+				"description": "The complete raw payload for this tool, emitted verbatim as plain text.",
+			},
+		},
+		"required": []interface{}{customToolInputKey},
+	}
+}
+
+// describeCustomToolFormat appends the grammar definition of a freeform tool to
+// its description. Kiro cannot carry a lark grammar in an inputSchema, so the
+// grammar has to travel as prose or the model has no idea what syntax to emit.
+func describeCustomToolFormat(desc string, format map[string]interface{}) string {
+	if len(format) == 0 {
+		return desc
+	}
+	definition, _ := format["definition"].(string)
+	if strings.TrimSpace(definition) == "" {
+		return desc
+	}
+	syntax, _ := format["syntax"].(string)
+	if syntax == "" {
+		syntax = "grammar"
+	}
+	var b strings.Builder
+	b.WriteString(desc)
+	if strings.TrimSpace(desc) != "" {
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Emit the payload in the following ")
+	b.WriteString(syntax)
+	b.WriteString(" syntax:\n")
+	b.WriteString(definition)
+	return b.String()
+}
+
 func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 	if len(tools) == 0 {
 		return nil
 	}
 
-	result := make([]KiroToolWrapper, 0, len(tools))
-	for _, tool := range tools {
-		if tool.Type != "function" {
+	flat := flattenOpenAITools(tools, 0)
+	result := make([]KiroToolWrapper, 0, len(flat))
+	for _, tool := range flat {
+		// Server-side tool types (web_search, tool_search, image_generation,
+		// local_shell) are executed by the model host, not by Kiro. Forward
+		// only the types Kiro can actually describe, and drop the rest rather
+		// than letting them fail the whole request upstream.
+		if tool.Type != openAIToolTypeFunction && tool.Type != openAIToolTypeCustom && tool.Type != "" {
 			continue
 		}
 		desc := tool.Function.Description
+		schema := ensureObjectSchema(tool.Function.Parameters)
+		if tool.Type == openAIToolTypeCustom {
+			desc = describeCustomToolFormat(desc, tool.Format)
+			schema = customToolSchema()
+		}
 		if len(desc) > maxToolDescLen {
 			desc = desc[:maxToolDescLen] + "..."
 		}
@@ -2119,10 +2226,32 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
-		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: schema}
 		result = append(result, wrapper)
 	}
 	return result
+}
+
+// collectCustomToolNames records which tools arrived as Codex freeform tools so
+// the response path can emit custom_tool_call instead of function_call for
+// them. Codex abandons a freeform call that comes back as a plain function_call.
+func collectCustomToolNames(tools []OpenAITool) map[string]bool {
+	flat := flattenOpenAITools(tools, 0)
+	var names map[string]bool
+	for _, tool := range flat {
+		if tool.Type != openAIToolTypeCustom {
+			continue
+		}
+		name := shortenToolName(tool.Function.Name)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		if names == nil {
+			names = make(map[string]bool)
+		}
+		names[name] = true
+	}
+	return names
 }
 
 // ==================== Kiro -> OpenAI 转换 ====================
