@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"kiro-go/config"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,6 +22,33 @@ func TestExtractOpenAIMessageTextStructured(t *testing.T) {
 	}
 	if got := extractOpenAIMessageText(nested); got != "nested" {
 		t.Fatalf("expected nested content extraction, got %q", got)
+	}
+}
+
+func TestParseModelAndThinkingUsesConfiguredMapping(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateModelMappings([]config.ModelMapping{
+		{Source: "kiro-opus-5", Target: "claude-opus-5"},
+		{Source: "gpt-4o", Target: "claude-opus-5"},
+		{Source: "literal-thinking", Target: "claude-sonnet-4.5"},
+	}); err != nil {
+		t.Fatalf("UpdateModelMappings: %v", err)
+	}
+	t.Cleanup(func() { _ = config.UpdateModelMappings(nil) })
+
+	gotModel, gotThinking := ParseModelAndThinking("KIRO-OPUS-5-thinking", "-thinking")
+	if gotModel != "claude-opus-5" || !gotThinking {
+		t.Fatalf("configured mapping with thinking suffix = (%q, %v)", gotModel, gotThinking)
+	}
+	gotModel, gotThinking = ParseModelAndThinking("gpt-4o", "-thinking")
+	if gotModel != "claude-opus-5" || gotThinking {
+		t.Fatalf("configured mapping must override built-in aliases, got (%q, %v)", gotModel, gotThinking)
+	}
+	gotModel, gotThinking = ParseModelAndThinking("literal-thinking", "-thinking")
+	if gotModel != "claude-sonnet-4.5" || !gotThinking {
+		t.Fatalf("exact mapping whose source ends in the thinking suffix = (%q, %v)", gotModel, gotThinking)
 	}
 }
 

@@ -70,28 +70,44 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	lower := strings.ToLower(model)
 	thinking := false
 
-	// Strip the configured thinking suffix (e.g. "-thinking") if present.
+	// Detect the configured thinking suffix (e.g. "-thinking") before resolving
+	// aliases. An exact configured source wins even when its own name ends with
+	// the suffix; otherwise the suffix is stripped and the base alias is tried.
 	suffixLower := strings.ToLower(thinkingSuffix)
-	if strings.HasSuffix(lower, suffixLower) {
+	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
 		thinking = true
+	}
+
+	// 1) Operator-configured exact aliases take precedence over suffix-derived
+	// aliases and built-in compatibility mappings.
+	if mapped, ok := config.ResolveModelMapping(model); ok {
+		return mapped, thinking
+	}
+
+	if thinking {
 		model = model[:len(model)-len(thinkingSuffix)]
 		lower = strings.ToLower(model)
 	}
 
-	// 1) Explicit aliases: dated snapshots, cross-family legacy IDs, non-Anthropic fallbacks.
+	// 2) A configured base alias also exposes its thinking-suffix variant.
+	if mapped, ok := config.ResolveModelMapping(model); ok {
+		return mapped, thinking
+	}
+
+	// 3) Explicit aliases: dated snapshots, cross-family legacy IDs, non-Anthropic fallbacks.
 	for _, m := range modelAliases {
 		if strings.Contains(lower, m.key) {
 			return m.value, thinking
 		}
 	}
 
-	// 2) Format normalization: claude-{family}-N-M → claude-{family}-N.M.
+	// 4) Format normalization: claude-{family}-N-M → claude-{family}-N.M.
 	//    New versions (claude-opus-4-8, etc.) flow through here without code changes.
 	if claudeVersionPattern.MatchString(lower) {
 		return claudeVersionPattern.ReplaceAllString(lower, "claude-$1-$2.$3"), thinking
 	}
 
-	// 3) Already a valid Kiro model (dot form or bare family like claude-sonnet-4): pass through.
+	// 5) Already a valid Kiro model (dot form or bare family like claude-sonnet-4): pass through.
 	if strings.HasPrefix(lower, "claude-") {
 		return model, thinking
 	}

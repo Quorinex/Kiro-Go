@@ -528,6 +528,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		buildModelInfo("gpt-4o", "kiro-proxy", true),
 		buildModelInfo("gpt-4", "kiro-proxy", true),
 	)
+	models = appendConfiguredModelMappings(models, config.GetModelMappings(), thinkingSuffix)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -614,6 +615,59 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 			},
 		},
 	}
+}
+
+func appendConfiguredModelMappings(models []map[string]interface{}, mappings []config.ModelMapping, thinkingSuffix string) []map[string]interface{} {
+	if len(mappings) == 0 {
+		return models
+	}
+	modelIndexByID := make(map[string]int, len(models)+len(mappings))
+	supportsImageByID := make(map[string]bool, len(models))
+	for i, model := range models {
+		id, _ := model["id"].(string)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(id))
+		modelIndexByID[key] = i
+		supportsImage, _ := model["supports_image"].(bool)
+		supportsImageByID[key] = supportsImage
+	}
+	explicitSources := make(map[string]struct{}, len(mappings))
+	for _, mapping := range mappings {
+		explicitSources[strings.ToLower(mapping.Source)] = struct{}{}
+	}
+	upsertMapping := func(id, target string) {
+		key := strings.ToLower(id)
+		supportsImage := supportsImageByID[strings.ToLower(target)]
+		mappedModel := buildModelInfo(id, "kiro-proxy", supportsImage)
+		if index, exists := modelIndexByID[key]; exists {
+			models[index] = mappedModel
+			return
+		}
+		modelIndexByID[key] = len(models)
+		models = append(models, mappedModel)
+	}
+
+	// Add every exact source first so an explicitly configured source such as
+	// "custom-thinking" wins over a suffix-derived variant of "custom".
+	for _, mapping := range mappings {
+		upsertMapping(mapping.Source, mapping.Target)
+	}
+	if thinkingSuffix == "" {
+		return models
+	}
+	for _, mapping := range mappings {
+		if strings.HasSuffix(strings.ToLower(mapping.Source), strings.ToLower(thinkingSuffix)) {
+			continue
+		}
+		variant := mapping.Source + thinkingSuffix
+		if _, explicit := explicitSources[strings.ToLower(variant)]; explicit {
+			continue
+		}
+		upsertMapping(variant, mapping.Target)
+	}
+	return models
 }
 
 // refreshModelsCache 从 Kiro API 拉取模型列表并缓存
@@ -2498,6 +2552,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetThinkingConfig(w, r)
 	case path == "/thinking" && r.Method == "POST":
 		h.apiUpdateThinkingConfig(w, r)
+	case path == "/model-mappings" && r.Method == "GET":
+		h.apiGetModelMappings(w, r)
+	case path == "/model-mappings" && r.Method == "POST":
+		h.apiUpdateModelMappings(w, r)
 	case path == "/endpoint" && r.Method == "GET":
 		h.apiGetEndpointConfig(w, r)
 	case path == "/endpoint" && r.Method == "POST":
@@ -4463,6 +4521,38 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (h *Handler) apiGetModelMappings(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"mappings": config.GetModelMappings(),
+	})
+}
+
+func (h *Handler) apiUpdateModelMappings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mappings *[]config.ModelMapping `json:"mappings"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.Mappings == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "mappings is required"})
+		return
+	}
+	if err := config.UpdateModelMappings(*req.Mappings); err != nil {
+		if errors.Is(err, config.ErrInvalidModelMapping) {
+			w.WriteHeader(http.StatusBadRequest)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 

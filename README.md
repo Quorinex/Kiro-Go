@@ -17,6 +17,7 @@ If this project helps you, a Star would mean a lot.
 - Auto token refresh, SSE streaming, Web admin panel
 - Multiple auth: AWS Builder ID, IAM Identity Center (Enterprise SSO), Microsoft Enterprise SSO, SSO Token, local cache, credentials JSON, Kiro API Key
 - Usage tracking, account import/export, i18n (CN / EN / VI)
+- Configurable client model mappings, advertised through `/v1/models`
 - Support configuring outbound proxy (SOCKS5 / HTTP)
 
 ## Quick Start
@@ -110,6 +111,10 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
 ```
 
 API Key accounts call the Kiro CLI runtime (`https://runtime.{region}.kiro.dev/`) with `tokentype: API_KEY`. They skip OAuth refresh and do not use `profileArn`.
+
+### Model mappings
+
+Configure client-facing aliases under **Settings - Model Mappings**, for example `kiro-opus-5` → `claude-opus-5`. Mappings apply to the Anthropic, OpenAI Chat Completions, and OpenAI Responses APIs. Each alias and its configured thinking-suffix variant are included in `/v1/models`. Source IDs match case-insensitively and resolve directly to one upstream model ID; mapping chains are rejected.
 
 ## Thinking Mode
 
