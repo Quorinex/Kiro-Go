@@ -17,6 +17,7 @@
 - 自动 Token 刷新、SSE 流式输出、Web 管理面板
 - 多种认证方式：AWS Builder ID、IAM Identity Center (企业 SSO)、Microsoft 企业 SSO、SSO Token、本地缓存、凭证 JSON、Kiro API Key
 - 用量追踪、账号导入导出、中英越三语
+- 可配置客户端模型映射，并通过 `/v1/models` 对外展示
 - 支持设置出站代理（SOCKS5 / HTTP）
 
 ## 快速开始
@@ -110,6 +111,10 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
 ```
 
 API Key 账号会走 Kiro CLI runtime（`https://runtime.{region}.kiro.dev/`），请求头带 `tokentype: API_KEY`，无需 OAuth 刷新，也不使用 `profileArn`。
+
+### 模型映射
+
+可在管理面板「设置 - 模型映射」中配置客户端别名，例如 `kiro-opus-5` → `claude-opus-5`。映射同时作用于 Anthropic、OpenAI Chat Completions 和 OpenAI Responses 接口；每个别名及其配置的 thinking 后缀变体都会出现在 `/v1/models`。客户端模型 ID 匹配不区分大小写，并直接解析到一条上游模型 ID；不允许链式映射。
 
 ## 思考模式
 

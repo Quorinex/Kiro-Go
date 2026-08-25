@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 var (
@@ -29,6 +30,7 @@ var (
 	ErrDuplicateRefreshToken = errors.New("account refresh token already exists")
 	ErrDuplicateAPIKey       = errors.New("account API key already exists")
 	ErrEmptyAPIKey           = errors.New("kiroApiKey is empty")
+	ErrInvalidModelMapping   = errors.New("invalid model mapping")
 )
 
 // GenerateMachineId generates a UUID v4 format machine identifier.
@@ -148,6 +150,13 @@ type PromptFilterRule struct {
 	Enabled bool   `json:"enabled"`           // Whether this rule is active
 }
 
+// ModelMapping maps a client-facing model ID to the exact Kiro upstream model ID.
+// Mappings are case-insensitive on Source and resolve in a single hop.
+type ModelMapping struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
 // ApiKeyEntry represents a single API key with optional usage limits and counters.
 // Limits with value 0 are treated as "no limit". Counters are cumulative and never reset
 // automatically; operators can use the admin endpoint to manually reset them.
@@ -188,6 +197,9 @@ type Config struct {
 	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
 	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
 	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
+
+	// ModelMappings exposes client-friendly model IDs while keeping upstream IDs internal.
+	ModelMappings []ModelMapping `json:"modelMappings,omitempty"`
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
@@ -299,6 +311,11 @@ func Load() error {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return err
 	}
+	normalizedMappings, err := normalizeModelMappings(c.ModelMappings)
+	if err != nil {
+		return fmt.Errorf("load modelMappings: %w", err)
+	}
+	c.ModelMappings = normalizedMappings
 	cfg = &c
 
 	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
@@ -1052,6 +1069,106 @@ func UpdatePromptFilterConfig(filterClaudeCode, filterEnvNoise, filterStripBound
 		cfg.PromptFilterRules = rules
 	}
 	return Save()
+}
+
+const (
+	maxModelMappings = 200
+	maxModelIDLength = 256
+)
+
+// GetModelMappings returns a detached copy of the configured model mappings.
+func GetModelMappings() []ModelMapping {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || len(cfg.ModelMappings) == 0 {
+		return []ModelMapping{}
+	}
+	mappings := make([]ModelMapping, len(cfg.ModelMappings))
+	copy(mappings, cfg.ModelMappings)
+	return mappings
+}
+
+// ResolveModelMapping resolves a client model ID using an exact,
+// case-insensitive match. Targets are returned as stored and are not remapped.
+func ResolveModelMapping(model string) (string, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", false
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return "", false
+	}
+	for _, mapping := range cfg.ModelMappings {
+		if strings.EqualFold(mapping.Source, model) {
+			return mapping.Target, true
+		}
+	}
+	return "", false
+}
+
+// UpdateModelMappings validates and atomically replaces all model mappings.
+func UpdateModelMappings(mappings []ModelMapping) error {
+	normalized, err := normalizeModelMappings(mappings)
+	if err != nil {
+		return err
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return fmt.Errorf("configuration is not initialized")
+	}
+	cfg.ModelMappings = normalized
+	return Save()
+}
+
+func normalizeModelMappings(mappings []ModelMapping) ([]ModelMapping, error) {
+	if len(mappings) > maxModelMappings {
+		return nil, fmt.Errorf("%w: at most %d mappings are allowed", ErrInvalidModelMapping, maxModelMappings)
+	}
+	normalized := make([]ModelMapping, 0, len(mappings))
+	sources := make([]string, 0, len(mappings))
+	for i, mapping := range mappings {
+		source := strings.TrimSpace(mapping.Source)
+		target := strings.TrimSpace(mapping.Target)
+		if source == "" || target == "" {
+			return nil, fmt.Errorf("%w at index %d: source and target are required", ErrInvalidModelMapping, i)
+		}
+		if !validModelMappingID(source) || !validModelMappingID(target) {
+			return nil, fmt.Errorf("%w at index %d: model IDs must be at most %d bytes and contain no whitespace or control characters", ErrInvalidModelMapping, i, maxModelIDLength)
+		}
+		if strings.EqualFold(source, target) {
+			return nil, fmt.Errorf("%w at index %d: source and target must differ", ErrInvalidModelMapping, i)
+		}
+		for _, existingSource := range sources {
+			if strings.EqualFold(existingSource, source) {
+				return nil, fmt.Errorf("%w at index %d: duplicate source %q", ErrInvalidModelMapping, i, source)
+			}
+		}
+		sources = append(sources, source)
+		normalized = append(normalized, ModelMapping{Source: source, Target: target})
+	}
+	for i, mapping := range normalized {
+		for _, source := range sources {
+			if strings.EqualFold(source, mapping.Target) {
+				return nil, fmt.Errorf("%w at index %d: target %q is another mapping source; mappings must resolve in one hop", ErrInvalidModelMapping, i, mapping.Target)
+			}
+		}
+	}
+	return normalized, nil
+}
+
+func validModelMappingID(model string) bool {
+	if len(model) > maxModelIDLength {
+		return false
+	}
+	for _, r := range model {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // GetPromptFilterRules returns the current prompt filter rules.

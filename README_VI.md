@@ -17,6 +17,7 @@ Nếu dự án này hữu ích với bạn, một Star sẽ rất có ý nghĩa.
 - Tự làm mới token, SSE streaming, bảng quản trị Web
 - Nhiều cách xác thực: AWS Builder ID, IAM Identity Center (Enterprise SSO), Microsoft Enterprise SSO, SSO Token, cache cục bộ, credentials JSON, Kiro API Key
 - Theo dõi mức dùng, nhập/xuất tài khoản, đa ngôn ngữ (CN / EN / VI)
+- Ánh xạ mô hình phía ứng dụng khách có thể cấu hình và được công khai qua `/v1/models`
 - Hỗ trợ cấu hình proxy ra ngoài (SOCKS5 / HTTP)
 
 ## Bắt đầu nhanh
@@ -110,6 +111,10 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
 ```
 
 Tài khoản API Key gọi Kiro CLI runtime (`https://runtime.{region}.kiro.dev/`) với `tokentype: API_KEY`. Chúng bỏ qua OAuth refresh và không dùng `profileArn`.
+
+### Ánh xạ mô hình
+
+Cấu hình bí danh phía ứng dụng khách tại **Cài đặt - Ánh xạ mô hình**, ví dụ `kiro-opus-5` → `claude-opus-5`. Ánh xạ áp dụng cho các API Anthropic, OpenAI Chat Completions và OpenAI Responses; mỗi bí danh và biến thể có hậu tố thinking đã cấu hình đều xuất hiện trong `/v1/models`. ID nguồn được so khớp không phân biệt chữ hoa chữ thường và phân giải trực tiếp đến một ID mô hình upstream; chuỗi ánh xạ không được phép.
 
 ## Chế độ Thinking
 

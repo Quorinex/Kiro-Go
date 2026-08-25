@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
 	"net/http"
@@ -528,6 +529,144 @@ func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
 	}
 	if supportsImage, ok := models[0]["supports_image"].(bool); !ok || !supportsImage {
 		t.Fatalf("expected image capability to be preserved, got %#v", models[0]["supports_image"])
+	}
+}
+
+func TestHandleModelsAdvertisesConfiguredModelMapping(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateModelMappings([]config.ModelMapping{{
+		Source: "kiro-opus-5",
+		Target: "claude-opus-5",
+	}}); err != nil {
+		t.Fatalf("UpdateModelMappings: %v", err)
+	}
+	h := &Handler{cachedModels: []ModelInfo{{
+		ModelId:    "claude-opus-5",
+		InputTypes: []string{"text", "image"},
+	}}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+
+	h.handleModels(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode models response: %v", err)
+	}
+	wantIDs := map[string]int{
+		"kiro-opus-5":          0,
+		"kiro-opus-5-thinking": 0,
+	}
+	for _, model := range response.Data {
+		id, _ := model["id"].(string)
+		if _, wanted := wantIDs[id]; wanted {
+			wantIDs[id]++
+			if supportsImage, ok := model["supports_image"].(bool); !ok || !supportsImage {
+				t.Fatalf("expected mapped model %q to inherit target image support, got %#v", id, model)
+			}
+		}
+	}
+	for id, count := range wantIDs {
+		if count != 1 {
+			t.Fatalf("expected /v1/models to advertise %q exactly once, got %d in %#v", id, count, response.Data)
+		}
+	}
+}
+
+func TestAppendConfiguredModelMappingsRespectsExplicitSourcesAndOverrides(t *testing.T) {
+	orders := [][]config.ModelMapping{
+		{
+			{Source: "custom", Target: "claude-vision"},
+			{Source: "custom-thinking", Target: "claude-text"},
+			{Source: "gpt-4o", Target: "claude-text"},
+		},
+		{
+			{Source: "gpt-4o", Target: "claude-text"},
+			{Source: "custom-thinking", Target: "claude-text"},
+			{Source: "custom", Target: "claude-vision"},
+		},
+	}
+
+	for i, mappings := range orders {
+		t.Run(fmt.Sprintf("order-%d", i), func(t *testing.T) {
+			models := appendConfiguredModelMappings([]map[string]interface{}{
+				buildModelInfo("claude-vision", "anthropic", true),
+				buildModelInfo("claude-text", "anthropic", false),
+				buildModelInfo("gpt-4o", "kiro-proxy", true),
+			}, mappings, "-thinking")
+
+			byID := make(map[string][]map[string]interface{})
+			for _, model := range models {
+				id, _ := model["id"].(string)
+				byID[id] = append(byID[id], model)
+			}
+
+			assertModel := func(id string, supportsImage bool) map[string]interface{} {
+				t.Helper()
+				matches := byID[id]
+				if len(matches) != 1 {
+					t.Fatalf("expected model %q exactly once, got %d in %#v", id, len(matches), models)
+				}
+				if got, _ := matches[0]["supports_image"].(bool); got != supportsImage {
+					t.Fatalf("model %q supports_image=%v, want %v", id, got, supportsImage)
+				}
+				return matches[0]
+			}
+
+			assertModel("custom", true)
+			assertModel("custom-thinking", false)
+			if matches := byID["custom-thinking-thinking"]; len(matches) != 0 {
+				t.Fatalf("source already ending in suffix must not get a double-suffix variant: %#v", matches)
+			}
+			if model := assertModel("gpt-4o", false); model["owned_by"] != "kiro-proxy" {
+				t.Fatalf("configured override should be owned by kiro-proxy, got %#v", model["owned_by"])
+			}
+		})
+	}
+}
+
+func TestModelMappingsAdminAPIRoundTrip(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{}
+
+	updateReq := httptest.NewRequest(http.MethodPost, "/admin/api/model-mappings", strings.NewReader(`{
+		"mappings":[{"source":"kiro-opus-5","target":"claude-opus-5"}]
+	}`))
+	updateReq.Header.Set("X-Admin-Password", config.GetPassword())
+	updateRec := httptest.NewRecorder()
+	h.handleAdminAPI(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updateRec.Code, updateRec.Body.String())
+	}
+	if target, ok := config.ResolveModelMapping("kiro-opus-5"); !ok || target != "claude-opus-5" {
+		t.Fatalf("saved mapping = (%q, %v)", target, ok)
+	}
+
+	getRec := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/admin/api/model-mappings", nil)
+	getReq.Header.Set("X-Admin-Password", config.GetPassword())
+	h.handleAdminAPI(getRec, getReq)
+	if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), `"source":"kiro-opus-5"`) {
+		t.Fatalf("get status=%d body=%s", getRec.Code, getRec.Body.String())
+	}
+
+	invalidReq := httptest.NewRequest(http.MethodPost, "/admin/api/model-mappings", strings.NewReader(`{
+		"mappings":[{"source":"same","target":"SAME"}]
+	}`))
+	invalidReq.Header.Set("X-Admin-Password", config.GetPassword())
+	invalidRec := httptest.NewRecorder()
+	h.handleAdminAPI(invalidRec, invalidReq)
+	if invalidRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid update status=%d body=%s", invalidRec.Code, invalidRec.Body.String())
 	}
 }
 

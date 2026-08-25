@@ -21,6 +21,7 @@
   let filterStatus = 'all';
   let privacyModeEnabled = true;
   let promptRules = [];
+  let modelMappings = [];
   let builderIdSession = '';
   let builderIdPollTimer = null;
   let iamSession = '';
@@ -139,6 +140,7 @@
     applyTranslations();
     renderVersionBadge();
     renderAccounts();
+    renderModelMappings();
     renderPromptRules();
     renderLogs(logsCache);
   }
@@ -1582,7 +1584,7 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
-    await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
+    await Promise.all([loadThinkingConfig(), loadModelMappings(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
   async function loadThinkingConfig() {
@@ -1603,6 +1605,58 @@
     const d = await res.json();
     if (d.success) toast(t('settings.thinkingSaved'), 'success');
     else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+  }
+  async function loadModelMappings() {
+    const res = await api('/model-mappings');
+    const d = await res.json();
+    modelMappings = Array.isArray(d.mappings) ? d.mappings : [];
+    renderModelMappings();
+  }
+  function renderModelMappings() {
+    const list = $('modelMappingsList');
+    if (!list) return;
+    if (!modelMappings.length) {
+      list.innerHTML = '<div class="muted-text model-mapping-empty">' + escapeHtml(t('modelMappings.empty')) + '</div>';
+      return;
+    }
+    list.innerHTML = modelMappings.map((mapping, index) => {
+      return '<div class="model-mapping-row">' +
+        '<label class="model-mapping-field"><span>' + escapeHtml(t('modelMappings.source')) + '</span>' +
+        '<input type="text" value="' + escapeAttr(mapping.source || '') + '" data-mapping-index="' + index + '" data-mapping-field="source" placeholder="' + escapeAttr(t('modelMappings.sourcePlaceholder')) + '" autocomplete="off" /></label>' +
+        '<span class="model-mapping-arrow" aria-hidden="true"><i class="fa-solid fa-arrow-right"></i></span>' +
+        '<label class="model-mapping-field"><span>' + escapeHtml(t('modelMappings.target')) + '</span>' +
+        '<input type="text" value="' + escapeAttr(mapping.target || '') + '" data-mapping-index="' + index + '" data-mapping-field="target" placeholder="' + escapeAttr(t('modelMappings.targetPlaceholder')) + '" autocomplete="off" /></label>' +
+        '<button class="rule-remove model-mapping-remove" type="button" data-mapping-remove="' + index + '" aria-label="' + escapeAttr(t('common.remove')) + '">&times;</button>' +
+        '</div>';
+    }).join('');
+  }
+  function addModelMapping() {
+    modelMappings.push({ source: '', target: '' });
+    renderModelMappings();
+    const input = $('modelMappingsList').querySelector('[data-mapping-index="' + (modelMappings.length - 1) + '"][data-mapping-field="source"]');
+    if (input) input.focus();
+  }
+  async function saveModelMappings() {
+    const mappings = modelMappings.map(mapping => ({
+      source: String(mapping.source || '').trim(),
+      target: String(mapping.target || '').trim()
+    }));
+    if (mappings.some(mapping => !mapping.source || !mapping.target)) {
+      toast(t('modelMappings.required'), 'warning');
+      return;
+    }
+    try {
+      const res = await api('/model-mappings', {
+        method: 'POST', body: JSON.stringify({ mappings })
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      modelMappings = mappings;
+      renderModelMappings();
+      toast(t('modelMappings.saved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
   }
   async function loadEndpointConfig() {
     const res = await api('/endpoint');
@@ -3231,6 +3285,21 @@
     $('saveRequireApiKeyBtn').addEventListener('click', saveRequireApiKey);
     $('saveOverUsageBtn').addEventListener('click', saveOverUsageConfig);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
+    $('addModelMappingBtn').addEventListener('click', addModelMapping);
+    $('saveModelMappingsBtn').addEventListener('click', saveModelMappings);
+    $('modelMappingsList').addEventListener('input', e => {
+      const index = Number(e.target.dataset.mappingIndex);
+      const field = e.target.dataset.mappingField;
+      if (Number.isInteger(index) && modelMappings[index] && (field === 'source' || field === 'target')) {
+        modelMappings[index][field] = e.target.value;
+      }
+    });
+    $('modelMappingsList').addEventListener('click', e => {
+      const remove = e.target.closest('[data-mapping-remove]');
+      if (!remove) return;
+      modelMappings.splice(Number(remove.dataset.mappingRemove), 1);
+      renderModelMappings();
+    });
     $('saveEndpointBtn').addEventListener('click', saveEndpointConfig);
     $('changePasswordBtn').addEventListener('click', changePassword);
     $('proxyType').addEventListener('change', onProxyTypeChange);

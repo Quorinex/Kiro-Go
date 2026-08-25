@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,6 +112,77 @@ func TestUpdateSettingsPatchCanExplicitlyDisableAPIKey(t *testing.T) {
 	}
 	if got := GetPassword(); got != "admin-password" {
 		t.Fatalf("expected password to be preserved, got %q", got)
+	}
+}
+
+func TestModelMappingsPersistAndResolve(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := UpdateModelMappings([]ModelMapping{
+		{Source: "  kiro-opus-5  ", Target: "  claude-opus-5  "},
+		{Source: "cursor-sonnet", Target: "claude-sonnet-4.5"},
+	}); err != nil {
+		t.Fatalf("update mappings: %v", err)
+	}
+
+	mappings := GetModelMappings()
+	if len(mappings) != 2 || mappings[0].Source != "kiro-opus-5" || mappings[0].Target != "claude-opus-5" {
+		t.Fatalf("unexpected normalized mappings: %#v", mappings)
+	}
+	mappings[0].Target = "mutated-copy"
+	if target, ok := ResolveModelMapping("KIRO-OPUS-5"); !ok || target != "claude-opus-5" {
+		t.Fatalf("case-insensitive resolution = (%q, %v)", target, ok)
+	}
+	if _, ok := ResolveModelMapping("unknown-model"); ok {
+		t.Fatal("unexpected mapping for unknown model")
+	}
+
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if target, ok := ResolveModelMapping("cursor-sonnet"); !ok || target != "claude-sonnet-4.5" {
+		t.Fatalf("persisted resolution = (%q, %v)", target, ok)
+	}
+}
+
+func TestUpdateModelMappingsRejectsInvalidEntries(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	tests := []struct {
+		name     string
+		mappings []ModelMapping
+	}{
+		{name: "empty source", mappings: []ModelMapping{{Target: "claude-opus-5"}}},
+		{name: "empty target", mappings: []ModelMapping{{Source: "kiro-opus-5"}}},
+		{name: "self mapping", mappings: []ModelMapping{{Source: "kiro-opus-5", Target: "KIRO-OPUS-5"}}},
+		{name: "whitespace in source", mappings: []ModelMapping{{Source: "kiro opus", Target: "claude-opus-5"}}},
+		{name: "duplicate source", mappings: []ModelMapping{
+			{Source: "kiro-opus-5", Target: "claude-opus-5"},
+			{Source: "KIRO-OPUS-5", Target: "claude-opus-4.7"},
+		}},
+		{name: "unicode case-folded duplicate source", mappings: []ModelMapping{
+			{Source: "S", Target: "claude-opus-5"},
+			{Source: "ſ", Target: "claude-opus-4.7"},
+		}},
+		{name: "mapping chain", mappings: []ModelMapping{
+			{Source: "cursor-opus", Target: "kiro-opus-5"},
+			{Source: "kiro-opus-5", Target: "claude-opus-5"},
+		}},
+		{name: "unicode case-folded mapping chain", mappings: []ModelMapping{
+			{Source: "S", Target: "claude-opus-5"},
+			{Source: "cursor-opus", Target: "ſ"},
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := UpdateModelMappings(tc.mappings); !errors.Is(err, ErrInvalidModelMapping) {
+				t.Fatalf("expected ErrInvalidModelMapping, got %v", err)
+			}
+		})
 	}
 }
 
