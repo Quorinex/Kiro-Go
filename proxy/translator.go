@@ -1220,7 +1220,13 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	var nonSystemMessages []OpenAIMessage
 
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
+		// "developer" is the Responses API name for what Chat Completions calls
+		// "system". Codex relies on it heavily: on the Responses Lite path it
+		// sends instructions as an empty string and ships its whole base prompt
+		// as a developer-role message instead. Anything not folded in here falls
+		// through the role switch below and is dropped outright, which silently
+		// removed the bulk of every Codex request.
+		if msg.Role == "system" || msg.Role == "developer" {
 			if s := extractOpenAIMessageText(msg.Content); s != "" {
 				systemPrompt += s + "\n"
 			}
