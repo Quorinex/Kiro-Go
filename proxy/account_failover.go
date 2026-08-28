@@ -49,13 +49,24 @@ var errUpstreamTruncatedResponse = errors.New("upstream truncated response witho
 // match Kiro IDE, whose empty and truncation predicates each require
 // toolCallCount === 0.
 //
-// Also complete when answer content arrived and upstream billed the turn.
+// Also complete when answer content arrived and upstream billed the turn — but
+// only for accounts that have never been seen delivering a stopReason.
 // stopReason rides inside metadataEvent, and some accounts (observed on
 // authMethod=idc) never send that event on any turn: the stream carries a full
 // answer, then contextUsageEvent + meteringEvent, then EOFs cleanly. Requiring
 // metadataEvent there rejected every complete answer as truncated. meteringEvent
 // is upstream closing the books on the turn, so it stands in as the terminal
 // signal those accounts do send.
+//
+// That substitution must stay scoped to those accounts. Upstream bills the
+// tokens it produced before dying, so on an account that normally does send
+// metadataEvent, "content + metering + no stopReason" is the signature of a
+// truncated turn, not a complete one. Accepting it there returned a stream with
+// no terminal signal as a success, and mapClaudeStopReason turns an empty
+// stopReason into "end_turn" — so a turn that died mid-task was reported to the
+// client as finished, which is exactly how an agent loop stalls with no error.
+// accountSendsStopReason carries that per-account observation; when it is true,
+// metering no longer clears a missing stopReason and the turn is retried.
 //
 // Truncated when content arrived with neither a terminal signal nor metering:
 // upstream never finished the turn, so a retry can still recover it.
@@ -68,8 +79,17 @@ var errUpstreamTruncatedResponse = errors.New("upstream truncated response witho
 // streams in full, then the turn dies before the answer or the tool call.
 // Upstream bills for the thinking tokens it did produce, so metering cannot
 // distinguish that from a finished turn and must not be allowed to clear it.
-func classifyStreamIntegrity(contentChars, toolCallCount int, stopReason string, sawReasoning, sawMetering bool) error {
+func classifyStreamIntegrity(contentChars, toolCallCount int, stopReason string, sawReasoning, sawMetering, accountSendsStopReason bool) error {
 	if strings.TrimSpace(stopReason) != "" {
+		// A tool_use stop reason with no tool delivered is upstream telling us the
+		// turn ended on a tool call whose frames we never received. Treating it as
+		// complete sends it to mapClaudeStopReason, where an unrecognized reason
+		// becomes "end_turn" — reporting "the model is done" for a turn whose whole
+		// point was the tool call, which stalls an agent loop with no error. Retry
+		// instead; the tool call is recoverable.
+		if isToolUseStopReason(stopReason) && toolCallCount == 0 {
+			return errUpstreamTruncatedResponse
+		}
 		return nil
 	}
 	if toolCallCount > 0 {
@@ -83,10 +103,22 @@ func classifyStreamIntegrity(contentChars, toolCallCount int, stopReason string,
 		// ship an empty turn as a success.
 		return errUpstreamTruncatedResponse
 	}
-	if sawMetering {
+	if sawMetering && !accountSendsStopReason {
 		return nil
 	}
 	return errUpstreamTruncatedResponse
+}
+
+// isToolUseStopReason reports whether an upstream stop reason means "the turn
+// ended because the model called a tool". Upstream has been seen using both the
+// snake_case and the SCREAMING_SNAKE form, so the comparison is normalized the
+// same way mapClaudeStopReason normalizes its input.
+func isToolUseStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "tool_use", "tool_calls", "tooluse":
+		return true
+	}
+	return false
 }
 
 // isStreamIntegrityError reports whether err is a soft integrity failure.

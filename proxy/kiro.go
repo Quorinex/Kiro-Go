@@ -426,6 +426,27 @@ endpointLoop:
 		}
 
 		reqBody, _ := json.Marshal(payload)
+		// The serialized body size is the only number that can be compared
+		// against an upstream CONTENT_LENGTH_EXCEEDS_THRESHOLD rejection. It was
+		// previously computed only inside the truncation path and never logged,
+		// so a 400 gave no way to tell an oversized request from a mis-sized
+		// budget.
+		//
+		// Every attempt logs at debug, but a body that has climbed into the top
+		// of its budget is the precursor to that 400 and has to be visible at
+		// the default info level — otherwise the one line worth having is the
+		// one production never prints.
+		bodyModel := currentMessageModelID(payload)
+		bodyBudget := maxPayloadBytesForModel(bodyModel)
+		sizeLog := logger.Debugf
+		if bodyBudget > 0 && len(reqBody)*10 >= bodyBudget*7 {
+			sizeLog = logger.Infof
+		}
+		sizeLog("[KiroAPI] Request to %s: body=%dKB model=%s historyTurns=%d tools=%d budget=%dKB",
+			ep.Name, len(reqBody)/1024, bodyModel,
+			len(payload.ConversationState.History),
+			currentMessageToolCount(payload),
+			bodyBudget/1024)
 		host := ""
 		if parsedURL, parseErr := url.Parse(epURL); parseErr == nil {
 			host = parsedURL.Host
@@ -486,6 +507,17 @@ endpointLoop:
 				errBody, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, ep.Name, string(errBody))
+				// A size rejection is only actionable next to the size we sent:
+				// without it there is no way to tell an oversized conversation
+				// apart from a payload our own conversion inflated. Report the
+				// measured body so the two can be distinguished from the log
+				// alone.
+				if bytes.Contains(errBody, []byte("CONTENT_LENGTH_EXCEEDS_THRESHOLD")) {
+					logger.Warnf("[KiroAPI] Endpoint %s rejected body as too long: model=%s sentBody=%dKB budget=%dKB historyTurns=%d",
+						ep.Name, payload.ConversationState.CurrentMessage.UserInputMessage.ModelID,
+						len(reqBody)/1024, maxPayloadBytesForModel(payload.ConversationState.CurrentMessage.UserInputMessage.ModelID)/1024,
+						len(payload.ConversationState.History))
+				}
 				// Authentication errors and payment errors are not retried across endpoints.
 				if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
 					return lastErr
@@ -788,8 +820,25 @@ func getContextWindowSize(model string) int {
 // classify correctly instead of falling through to the 200K default.
 var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[.-](\d+))?`)
 
+// gptVersionExtractor matches "gpt-<major>[.<minor>]" so the GPT models Kiro
+// exposes (gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, ...) are classified by
+// version rather than falling through to the 200K default. Without this every
+// GPT model was treated as a 200K-window model, which both under-reported
+// input tokens and — via maxPayloadBytesForModel — truncated requests at a
+// quarter of the context the model actually accepts.
+//
+// The legacy gpt-4* / gpt-3.5* identifiers never reach here: modelAliases
+// redirects them to Claude models before this point.
+var gptVersionExtractor = regexp.MustCompile(`gpt-(\d+)(?:[.-](\d+))?`)
+
 func isLargeContextModel(model string) bool {
 	m := strings.ToLower(model)
+	if match := gptVersionExtractor.FindStringSubmatch(m); match != nil {
+		if major, err := strconv.Atoi(match[1]); err == nil {
+			// 1M window for GPT-5 and newer (gpt-5.6-sol, gpt-5.6-terra, ...).
+			return major >= 5
+		}
+	}
 	if match := claudeVersionExtractor.FindStringSubmatch(m); match != nil {
 		major, errMaj := strconv.Atoi(match[1])
 		if errMaj == nil {
