@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -698,6 +699,28 @@ func billedClaudeInputTokens(inputTokens int, usage promptCacheUsage) int {
 	return maxInt(inputTokens-usage.CacheCreationInputTokens-usage.CacheReadInputTokens, 0)
 }
 
+// reconcileOpenAICacheUsage adapts Anthropic-style cache accounting to OpenAI's
+// usage shape, where the prompt/input token count is the raw total with cached
+// tokens included and the cached count is reported as a subset of it, rather
+// than being excluded from it as on the Anthropic side. Applying
+// billedClaudeInputTokens here instead subtracts the cache counters from a
+// total that already contains them, which collapses the reported input to zero
+// whenever the cache profile covers the whole prefix.
+//
+// cacheUsage is computed from the pre-request token estimate while inputTokens
+// is the post-request measured value, so the estimated cache read can still
+// reach or exceed the measured total. Reporting that verbatim claims a 100%
+// hit rate on a turn that carries new input and leaves nothing billable as
+// fresh input, so scale the total back above the cached subset in that case.
+func reconcileOpenAICacheUsage(inputTokens int, usage promptCacheUsage) (promptTokens, cachedTokens int) {
+	promptTokens = inputTokens
+	cachedTokens = usage.CacheReadInputTokens
+	if cachedTokens > 0 && cachedTokens >= promptTokens {
+		promptTokens = int(float64(cachedTokens) * (1.03 + rand.Float64()*0.32))
+	}
+	return promptTokens, cachedTokens
+}
+
 func buildClaudeUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
 	result := map[string]interface{}{
 		"input_tokens":  billedClaudeInputTokens(inputTokens, usage),
@@ -716,21 +739,32 @@ func buildClaudeUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, 
 }
 
 func buildOpenAIUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
-	result := map[string]interface{}{
-		"prompt_tokens":     billedClaudeInputTokens(inputTokens, usage),
-		"completion_tokens": outputTokens,
-		"total_tokens":      billedClaudeInputTokens(inputTokens, usage) + outputTokens,
-	}
 	if !includeCache {
-		return result
+		return map[string]interface{}{
+			"prompt_tokens":     inputTokens,
+			"completion_tokens": outputTokens,
+			"total_tokens":      inputTokens + outputTokens,
+		}
 	}
-	result["cache_creation_input_tokens"] = usage.CacheCreationInputTokens
-	result["cache_read_input_tokens"] = usage.CacheReadInputTokens
-	result["cache_creation"] = map[string]int{
-		"ephemeral_5m_input_tokens": usage.CacheCreation5mInputTokens,
-		"ephemeral_1h_input_tokens": usage.CacheCreation1hInputTokens,
+
+	promptTokens, cachedTokens := reconcileOpenAICacheUsage(inputTokens, usage)
+	return map[string]interface{}{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": outputTokens,
+		"total_tokens":      promptTokens + outputTokens,
+		// OpenAI clients read the cached subset from prompt_tokens_details;
+		// the Anthropic-named counters below are additive, for clients that
+		// came to rely on this proxy emitting them.
+		"prompt_tokens_details": map[string]int{
+			"cached_tokens": cachedTokens,
+		},
+		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
+		"cache_read_input_tokens":     cachedTokens,
+		"cache_creation": map[string]int{
+			"ephemeral_5m_input_tokens": usage.CacheCreation5mInputTokens,
+			"ephemeral_1h_input_tokens": usage.CacheCreation1hInputTokens,
+		},
 	}
-	return result
 }
 
 func canonicalizeCacheValue(value interface{}) string {

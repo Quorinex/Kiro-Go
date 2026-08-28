@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"kiro-go/config"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -335,22 +334,11 @@ func buildResponsesObject(
 
 	var inputTokensDetails *ResponsesInputTokensDetails
 	if includeCache {
-		// OpenAI's native usage shape reports input_tokens as the raw total
-		// (cached tokens included), with input_tokens_details.cached_tokens
-		// as a subset of that total — unlike Anthropic's shape where
-		// input_tokens already excludes the cached portion.
-		//
-		// cacheUsage is computed from the pre-request token estimate, while
-		// inputTokens here is the post-request measured value. When the
-		// estimate outruns the measurement the cache read reaches or exceeds
-		// the total input, i.e. a reported 100% hit rate, which is wrong for
-		// any turn that carries new input and leaves nothing to bill as
-		// fresh input. Scale input_tokens back above the cached subset so
-		// some headroom always remains billable as fresh input.
-		cachedTokens := cacheUsage.CacheReadInputTokens
-		if cachedTokens > 0 && cachedTokens >= inputTokens {
-			inputTokens = int(float64(cachedTokens) * (1.03 + rand.Float64()*0.32))
-		}
+		// Shared with the Chat Completions path: OpenAI reports input_tokens as
+		// the raw total with the cached portion as a subset of it, not excluded
+		// from it. See reconcileOpenAICacheUsage.
+		cachedTokens := 0
+		inputTokens, cachedTokens = reconcileOpenAICacheUsage(inputTokens, cacheUsage)
 		inputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cachedTokens}
 	}
 
