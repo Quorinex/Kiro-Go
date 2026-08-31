@@ -196,7 +196,7 @@ func TestResponsesPreviousResponseIDExpands(t *testing.T) {
 		},
 	}
 
-	expanded := expandPreviousResponseHistory(prev)
+	expanded := expandPreviousResponseHistory(prev, "claude-sonnet-4.5")
 	if len(expanded) != 3 {
 		t.Fatalf("expected 3 messages from history, got %d (%+v)", len(expanded), expanded)
 	}
@@ -256,7 +256,7 @@ func TestResponsesPreviousResponseIDExpandsFullChain(t *testing.T) {
 		t.Fatalf("save b: %v", err)
 	}
 
-	expanded := expandPreviousResponseHistory(b)
+	expanded := expandPreviousResponseHistory(b, "claude-sonnet-4.5")
 
 	var transcript []string
 	for _, m := range expanded {

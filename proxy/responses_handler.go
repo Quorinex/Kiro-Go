@@ -42,6 +42,13 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		storeResponse = *req.Store
 	}
 
+	// Resolved here rather than at the point of use further down: the replay
+	// budget below is sized from the model's context window, and a client-supplied
+	// name still carrying the thinking suffix matches no known model, so the
+	// window lookup would miss and fall back to the smallest tier.
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+
 	var historyMessages []OpenAIMessage
 	if req.PreviousResponseID != "" {
 		prev, loadErr := loadResponse(req.PreviousResponseID)
@@ -50,7 +57,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 				fmt.Sprintf("previous_response_id not found: %v", loadErr))
 			return
 		}
-		historyMessages = expandPreviousResponseHistory(prev)
+		historyMessages = expandPreviousResponseHistory(prev, actualModel)
 	}
 
 	inputMessages, err := parseResponsesInput(req.Input)
@@ -122,8 +129,6 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		openaiReq.MaxTokens = *req.MaxOutputTokens
 	}
 
-	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)

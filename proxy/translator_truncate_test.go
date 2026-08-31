@@ -90,7 +90,7 @@ func TestClaudeToKiroLargeContextModelKeepsHistoryUnderBudget(t *testing.T) {
 		Messages: messages,
 	}, false)
 	large := ClaudeToKiro(&ClaudeRequest{
-		Model:    "gpt-5.6-sol",
+		Model:    "claude-opus-4.6",
 		System:   "You are a helpful assistant.",
 		Messages: messages,
 	}, false)
@@ -117,7 +117,7 @@ func TestClaudeToKiroLargeContextModelKeepsHistoryUnderBudget(t *testing.T) {
 // must be trimmed rather than forwarded for the upstream to reject.
 func TestClaudeToKiroLargeContextModelStillTruncatesPastItsOwnBudget(t *testing.T) {
 	req := &ClaudeRequest{
-		Model:    "gpt-5.6-sol",
+		Model:    "claude-opus-4.6",
 		System:   "You are a helpful assistant.",
 		Messages: buildOversizedConversation(1400),
 	}

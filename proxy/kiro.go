@@ -800,15 +800,48 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 
 // getContextWindowSize returns the context window size (in tokens) for a model.
 //
-// Per Kiro's ListAvailableModels, the 1M-token context window applies to
-// Claude 4.6 and newer (sonnet-4.6, opus-4.6, opus-4.7, opus-4.8, and future
-// 4.x releases), while 4.5 and earlier (opus-4.5, sonnet-4.5, sonnet-4,
-// haiku-4.5) use a 200K window. This value is used to convert the upstream
-// contextUsagePercentage into an absolute input-token count that clients rely
-// on to decide when to compact; an undersized window under-reports tokens and
-// prevents clients from compacting in time.
+// This value converts the upstream contextUsagePercentage into the absolute
+// input-token count reported to clients, which agent clients divide by the
+// window they know for the model to decide when to compact. That makes it a
+// multiplier on every reported count, not a cosmetic default: a window that runs
+// high inflates the count by (used / real), and because compaction lowers the
+// percentage without changing the ratio, an inflated window makes a client
+// compact, still read an over-threshold count, and compact again indefinitely.
+//
+// So prefer the window the upstream itself reports for the model
+// (tokenLimits.maxInputTokens from ListAvailableModels), recorded on every model
+// refresh. The name-based classification below is only a fallback for models we
+// have not seen a refresh for — it cannot know a real limit and is wrong for any
+// model whose window does not match its version family.
 func getContextWindowSize(model string) int {
-	if isLargeContextModel(model) {
+	if limit, ok := lookupModelInputTokenLimit(model); ok {
+		return limit
+	}
+	return fallbackContextWindowSize(model)
+}
+
+// gptFallbackContextWindow is the window assumed for Kiro's GPT models until the
+// upstream reports one for them.
+//
+// Measured against Kiro's GPT models at roughly 256K, not the ~1M these models
+// carry on their vendor's own API. Kiro re-hosts them behind its own limit, and
+// the number that matters here is Kiro's. The previous 1M assumption inflated
+// every reported token count by about 4x, which is what drove clients into a
+// compaction loop they could not exit: compaction lowers the upstream usage
+// percentage, but the inflation ratio applies to the lowered value just the
+// same, so the count stayed over the client's threshold no matter how much it
+// discarded.
+const gptFallbackContextWindow = 256_000
+
+// fallbackContextWindowSize classifies a model's window by name, for models the
+// upstream has not reported a limit for. Every value here is a guess and should
+// be treated as one; lookupModelInputTokenLimit is the authority when present.
+func fallbackContextWindowSize(model string) int {
+	m := strings.ToLower(model)
+	if isGPT5OrNewer(m) {
+		return gptFallbackContextWindow
+	}
+	if isLargeContextModel(m) {
 		return 1_000_000
 	}
 	return 200_000
@@ -830,6 +863,20 @@ var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\
 // The legacy gpt-4* / gpt-3.5* identifiers never reach here: modelAliases
 // redirects them to Claude models before this point.
 var gptVersionExtractor = regexp.MustCompile(`gpt-(\d+)(?:[.-](\d+))?`)
+
+// isGPT5OrNewer reports whether the identifier names one of Kiro's GPT-5+
+// models. These get their own window tier (gptFallbackContextWindow) rather than
+// sharing Claude's 1M tier: Kiro re-hosts them behind a materially smaller limit
+// than their vendor's API advertises, and treating them as 1M models is what
+// inflated reported token counts into an inescapable compaction loop.
+func isGPT5OrNewer(model string) bool {
+	match := gptVersionExtractor.FindStringSubmatch(strings.ToLower(model))
+	if match == nil {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	return err == nil && major >= 5
+}
 
 func isLargeContextModel(model string) bool {
 	m := strings.ToLower(model)

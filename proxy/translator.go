@@ -64,12 +64,6 @@ const toolResultImagePlaceholder = "[Tool returned an image; the image is attach
 // quarters of a conversation the upstream would have accepted.
 const maxPayloadBytes = 900 * 1024
 
-// largeContextMaxPayloadTokens is the token budget allowed for models that
-// accept a ~1M-token context window (gpt-5.6-*, Claude 4.6+), held slightly
-// under the full window so a request that fits our budget still leaves the
-// model room to answer.
-const largeContextMaxPayloadTokens = 900_000
-
 // payloadBytesPerToken converts a token budget into a serialized-payload byte
 // budget. Tokens are not bytes: JSON escaping, tool schemas and non-ASCII text
 // all inflate the wire size per token, so this ratio is deliberately generous
@@ -77,22 +71,29 @@ const largeContextMaxPayloadTokens = 900_000
 // cutting context the upstream would have accepted is the worse failure.
 const payloadBytesPerToken = 4
 
-// largeContextMaxPayloadBytes is the serialized-body budget for large-context
-// models (900K tokens ~= 3.6MB).
-const largeContextMaxPayloadBytes = largeContextMaxPayloadTokens * payloadBytesPerToken
+// payloadTokenHeadroom is the fraction of a model's window we are willing to
+// fill with request payload, leaving the remainder for the model's answer. The
+// large tier's original 900K-of-1M budget is exactly this ratio.
+const payloadTokenHeadroom = 0.9
 
 // maxPayloadBytesForModel returns the serialized-body budget for a model.
 //
-// The byte budget has to track the model's context window: a single constant
-// sized for 200K models silently truncates most of a 1M-token conversation.
-// The window classification is shared with getContextWindowSize rather than
-// duplicated: a model's payload budget and its reported context window must not
-// disagree, or clients would be told they have room we then truncate away.
+// Derived from getContextWindowSize rather than from a separate tier test, so a
+// model's payload budget and its reported context window cannot disagree —
+// telling a client it has room we then truncate away is the failure this
+// function exists to avoid, and two independent classifications drift into
+// exactly that. The window itself prefers the upstream-reported limit and falls
+// back to a name-based guess; both flow through here unchanged.
+//
+// Never returns less than the 200K-tier budget: that floor is what today's
+// working models run on, so nothing here can tighten them.
 func maxPayloadBytesForModel(model string) int {
-	if isLargeContextModel(model) {
-		return largeContextMaxPayloadBytes
+	window := getContextWindowSize(model)
+	budget := int(float64(window)*payloadTokenHeadroom) * payloadBytesPerToken
+	if budget < maxPayloadBytes {
+		return maxPayloadBytes
 	}
-	return maxPayloadBytes
+	return budget
 }
 
 // truncationPlaceholder is inserted in history where older turns were dropped to
