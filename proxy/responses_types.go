@@ -34,6 +34,11 @@ type ResponsesObject struct {
 	StoredAt           int64                       `json:"stored_at,omitempty"`
 }
 
+// responsesCustomToolCallType is the output item Codex expects back for a
+// freeform (grammar) tool. A freeform call returned as a plain function_call is
+// abandoned by Codex instead of being executed.
+const responsesCustomToolCallType = "custom_tool_call"
+
 type ResponseOutputItem struct {
 	ID        string                `json:"id"`
 	Type      string                `json:"type"`
@@ -43,6 +48,9 @@ type ResponseOutputItem struct {
 	CallID    string                `json:"call_id,omitempty"`
 	Name      string                `json:"name,omitempty"`
 	Arguments string                `json:"arguments,omitempty"`
+	// Input carries the raw payload of a custom_tool_call output item, which
+	// Codex reads instead of arguments for freeform tools.
+	Input string `json:"input,omitempty"`
 }
 
 type ResponseContentPart struct {
@@ -51,9 +59,14 @@ type ResponseContentPart struct {
 }
 
 type ResponsesUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens        int                          `json:"input_tokens"`
+	InputTokensDetails *ResponsesInputTokensDetails `json:"input_tokens_details,omitempty"`
+	OutputTokens       int                          `json:"output_tokens"`
+	TotalTokens        int                          `json:"total_tokens"`
+}
+
+type ResponsesInputTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 type ResponsesError struct {

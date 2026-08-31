@@ -248,6 +248,10 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
+	// Recorded here rather than in each caller: every model-refresh path goes
+	// through this function, and a caller that forgot would silently fall back to
+	// guessing the context window from the model name.
+	recordModelTokenLimits(result.Models)
 	return result.Models, nil
 }
 

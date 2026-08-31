@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,6 +126,58 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	}
 }
 
+// BuildOpenAIProfile builds a cache profile for an OpenAI-shaped request.
+//
+// Standard OpenAI Chat Completions requests carry no client-side cache_control
+// marker, so unlike Claude there is no explicit-breakpoint precondition: every
+// block boundary produced by flattenOpenAICacheBlocks (the end of the tool
+// list, and the end of each message) becomes an unconditional implicit
+// breakpoint using the default 5-minute TTL. This lets repeated history
+// prefixes across multi-turn conversations still register as cache hits even
+// though the client never opted in explicitly.
+func (t *promptCacheTracker) BuildOpenAIProfile(req *OpenAIRequest, totalInputTokens int) *promptCacheProfile {
+	blocks := flattenOpenAICacheBlocks(req)
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	hasher := sha256.New()
+	breakpoints := make([]promptCacheBreakpoint, 0)
+	cumulativeTokens := 0
+
+	for _, block := range blocks {
+		canonical := canonicalizeCacheValue(block.Value)
+		writeHashChunk(hasher, canonical)
+		cumulativeTokens += block.Tokens
+
+		if block.TTL <= 0 {
+			continue
+		}
+
+		var fingerprint [32]byte
+		copy(fingerprint[:], hasher.Sum(nil))
+		breakpoints = append(breakpoints, promptCacheBreakpoint{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: cumulativeTokens,
+			TTL:              block.TTL,
+		})
+	}
+
+	if len(breakpoints) == 0 {
+		return nil
+	}
+
+	if totalInputTokens < cumulativeTokens {
+		totalInputTokens = cumulativeTokens
+	}
+
+	return &promptCacheProfile{
+		Breakpoints:      breakpoints,
+		TotalInputTokens: totalInputTokens,
+		Model:            req.Model,
+	}
+}
+
 func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
 	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
 		return promptCacheUsage{}
@@ -155,10 +208,10 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 		}
 	}
 
-	// Cap cacheable tokens at 85% of total input to ensure a realistic
+	// Cap cacheable tokens at 99.9% of total input to ensure a realistic
 	// uncached portion. The newest content in a request is never fully
 	// served from cache on the current turn.
-	maxCacheable := int(float64(profile.TotalInputTokens) * 0.85)
+	maxCacheable := int(float64(profile.TotalInputTokens) * 0.999)
 	if lastTokens > maxCacheable {
 		lastTokens = maxCacheable
 	}
@@ -269,6 +322,142 @@ func flattenClaudeCacheBlocks(req *ClaudeRequest) []cacheablePromptBlock {
 	}
 
 	return blocks
+}
+
+// flattenOpenAICacheBlocks flattens an OpenAI-shaped request into cacheable
+// blocks. OpenAIRequest has no independent System field -- a system prompt is
+// just a message with role=="system" -- so every message (including system
+// ones) is handled by the same loop. Every message's last block always closes
+// with an implicit breakpoint (TTL = defaultPromptCacheTTL), regardless of any
+// cache_control marker, since the OpenAI wire format has none.
+func flattenOpenAICacheBlocks(req *OpenAIRequest) []cacheablePromptBlock {
+	blocks := make([]cacheablePromptBlock, 0)
+
+	if len(req.Tools) > 0 {
+		for toolIndex, tool := range req.Tools {
+			toolValue := map[string]interface{}{
+				"kind":        "tool",
+				"tool_index":  toolIndex,
+				"name":        tool.Function.Name,
+				"description": tool.Function.Description,
+				"parameters":  tool.Function.Parameters,
+			}
+			fingerprintValue := stripCachePositionKeys(toolValue)
+			canonical := canonicalizeCacheValue(fingerprintValue)
+			blocks = append(blocks, cacheablePromptBlock{
+				Value:        fingerprintValue,
+				Tokens:       estimateApproxTokens(canonical),
+				TTL:          0,
+				IsMessageEnd: toolIndex == len(req.Tools)-1,
+			})
+		}
+		// Tool definitions typically stay stable across a multi-turn
+		// conversation, so treat the end of the tool list as its own
+		// implicit breakpoint.
+		blocks[len(blocks)-1].TTL = defaultPromptCacheTTL
+	}
+
+	for messageIndex, msg := range req.Messages {
+		appendOpenAIMessageCacheBlocks(&blocks, messageIndex, msg)
+	}
+
+	return blocks
+}
+
+func appendOpenAIMessageCacheBlocks(blocks *[]cacheablePromptBlock, messageIndex int, msg OpenAIMessage) {
+	role := msg.Role
+
+	switch content := msg.Content.(type) {
+	case string:
+		appendOpenAIPromptBlock(blocks, map[string]interface{}{
+			"kind":          "message",
+			"message_index": messageIndex,
+			"role":          role,
+			"block_index":   0,
+			"block": map[string]interface{}{
+				"type": "text",
+				"text": content,
+			},
+		}, true)
+	case []interface{}:
+		lastIdx := len(content) - 1
+		for blockIndex, block := range content {
+			appendOpenAIPromptBlock(blocks, map[string]interface{}{
+				"kind":          "message",
+				"message_index": messageIndex,
+				"role":          role,
+				"block_index":   blockIndex,
+				"block":         block,
+			}, blockIndex == lastIdx)
+		}
+	default:
+		if content != nil {
+			appendOpenAIPromptBlock(blocks, map[string]interface{}{
+				"kind":          "message",
+				"message_index": messageIndex,
+				"role":          role,
+				"block_index":   0,
+				"block":         content,
+			}, true)
+		}
+	}
+
+	if len(msg.ToolCalls) > 0 {
+		lastIdx := len(msg.ToolCalls) - 1
+		for tcIndex, tc := range msg.ToolCalls {
+			appendOpenAIPromptBlock(blocks, map[string]interface{}{
+				"kind":          "message_tool_call",
+				"message_index": messageIndex,
+				"role":          role,
+				"block_index":   tcIndex,
+				"block": map[string]interface{}{
+					"type":      "tool_call",
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				},
+			}, tcIndex == lastIdx)
+		}
+	} else if msg.ToolCallID != "" {
+		appendOpenAIPromptBlock(blocks, map[string]interface{}{
+			"kind":          "message_tool_call_id",
+			"message_index": messageIndex,
+			"role":          role,
+			"block_index":   0,
+			"block": map[string]interface{}{
+				"type":         "tool_call_id",
+				"tool_call_id": msg.ToolCallID,
+			},
+		}, true)
+	}
+}
+
+// appendOpenAIPromptBlock mirrors appendPromptBlock but always treats a
+// message-end block as an unconditional implicit breakpoint, matching the
+// user-approved "implicit breakpoint" policy for the OpenAI wire format.
+func appendOpenAIPromptBlock(blocks *[]cacheablePromptBlock, wrapper map[string]interface{}, isMessageEnd bool) {
+	blockValue := wrapper["block"]
+
+	// Drop volatile billing metadata from the cache fingerprint, matching the
+	// Claude path. OpenAIToKiro does not run stripEnvNoiseLines, so this is
+	// the only place billing-header noise gets excluded on this path.
+	if isAnthropicBillingHeaderBlock(blockValue) {
+		return
+	}
+
+	fingerprintValue := stripCachePositionKeys(wrapper)
+	canonical := canonicalizeCacheValue(fingerprintValue)
+
+	ttl := time.Duration(0)
+	if isMessageEnd {
+		ttl = defaultPromptCacheTTL
+	}
+
+	*blocks = append(*blocks, cacheablePromptBlock{
+		Value:        fingerprintValue,
+		Tokens:       estimateApproxTokens(canonical),
+		TTL:          ttl,
+		IsMessageEnd: isMessageEnd,
+	})
 }
 
 func buildCachePreludeBlock(req *ClaudeRequest) cacheablePromptBlock {
@@ -510,6 +699,28 @@ func billedClaudeInputTokens(inputTokens int, usage promptCacheUsage) int {
 	return maxInt(inputTokens-usage.CacheCreationInputTokens-usage.CacheReadInputTokens, 0)
 }
 
+// reconcileOpenAICacheUsage adapts Anthropic-style cache accounting to OpenAI's
+// usage shape, where the prompt/input token count is the raw total with cached
+// tokens included and the cached count is reported as a subset of it, rather
+// than being excluded from it as on the Anthropic side. Applying
+// billedClaudeInputTokens here instead subtracts the cache counters from a
+// total that already contains them, which collapses the reported input to zero
+// whenever the cache profile covers the whole prefix.
+//
+// cacheUsage is computed from the pre-request token estimate while inputTokens
+// is the post-request measured value, so the estimated cache read can still
+// reach or exceed the measured total. Reporting that verbatim claims a 100%
+// hit rate on a turn that carries new input and leaves nothing billable as
+// fresh input, so scale the total back above the cached subset in that case.
+func reconcileOpenAICacheUsage(inputTokens int, usage promptCacheUsage) (promptTokens, cachedTokens int) {
+	promptTokens = inputTokens
+	cachedTokens = usage.CacheReadInputTokens
+	if cachedTokens > 0 && cachedTokens >= promptTokens {
+		promptTokens = int(float64(cachedTokens) * (1.03 + rand.Float64()*0.32))
+	}
+	return promptTokens, cachedTokens
+}
+
 func buildClaudeUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
 	result := map[string]interface{}{
 		"input_tokens":  billedClaudeInputTokens(inputTokens, usage),
@@ -525,6 +736,35 @@ func buildClaudeUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, 
 		"ephemeral_1h_input_tokens": usage.CacheCreation1hInputTokens,
 	}
 	return result
+}
+
+func buildOpenAIUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
+	if !includeCache {
+		return map[string]interface{}{
+			"prompt_tokens":     inputTokens,
+			"completion_tokens": outputTokens,
+			"total_tokens":      inputTokens + outputTokens,
+		}
+	}
+
+	promptTokens, cachedTokens := reconcileOpenAICacheUsage(inputTokens, usage)
+	return map[string]interface{}{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": outputTokens,
+		"total_tokens":      promptTokens + outputTokens,
+		// OpenAI clients read the cached subset from prompt_tokens_details;
+		// the Anthropic-named counters below are additive, for clients that
+		// came to rely on this proxy emitting them.
+		"prompt_tokens_details": map[string]int{
+			"cached_tokens": cachedTokens,
+		},
+		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
+		"cache_read_input_tokens":     cachedTokens,
+		"cache_creation": map[string]int{
+			"ephemeral_5m_input_tokens": usage.CacheCreation5mInputTokens,
+			"ephemeral_1h_input_tokens": usage.CacheCreation1hInputTokens,
+		},
+	}
 }
 
 func canonicalizeCacheValue(value interface{}) string {

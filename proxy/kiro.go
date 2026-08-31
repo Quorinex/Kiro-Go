@@ -271,6 +271,12 @@ type KiroStreamCallback struct {
 	OnCredits      func(credits float64)
 	OnContextUsage func(percentage float64)
 	OnStopReason   func(reason string)
+
+	// OnMetering fires when a meteringEvent frame arrives, regardless of the
+	// usage value it carries. Separate from OnCredits, which only fires once at
+	// end of stream and only for a non-zero total: integrity checks need to know
+	// that upstream closed the books on the turn, not how much it billed.
+	OnMetering func()
 }
 
 // ==================== API Call ====================
@@ -420,6 +426,27 @@ endpointLoop:
 		}
 
 		reqBody, _ := json.Marshal(payload)
+		// The serialized body size is the only number that can be compared
+		// against an upstream CONTENT_LENGTH_EXCEEDS_THRESHOLD rejection. It was
+		// previously computed only inside the truncation path and never logged,
+		// so a 400 gave no way to tell an oversized request from a mis-sized
+		// budget.
+		//
+		// Every attempt logs at debug, but a body that has climbed into the top
+		// of its budget is the precursor to that 400 and has to be visible at
+		// the default info level — otherwise the one line worth having is the
+		// one production never prints.
+		bodyModel := currentMessageModelID(payload)
+		bodyBudget := maxPayloadBytesForModel(bodyModel)
+		sizeLog := logger.Debugf
+		if bodyBudget > 0 && len(reqBody)*10 >= bodyBudget*7 {
+			sizeLog = logger.Infof
+		}
+		sizeLog("[KiroAPI] Request to %s: body=%dKB model=%s historyTurns=%d tools=%d budget=%dKB",
+			ep.Name, len(reqBody)/1024, bodyModel,
+			len(payload.ConversationState.History),
+			currentMessageToolCount(payload),
+			bodyBudget/1024)
 		host := ""
 		if parsedURL, parseErr := url.Parse(epURL); parseErr == nil {
 			host = parsedURL.Host
@@ -480,6 +507,17 @@ endpointLoop:
 				errBody, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, ep.Name, string(errBody))
+				// A size rejection is only actionable next to the size we sent:
+				// without it there is no way to tell an oversized conversation
+				// apart from a payload our own conversion inflated. Report the
+				// measured body so the two can be distinguished from the log
+				// alone.
+				if bytes.Contains(errBody, []byte("CONTENT_LENGTH_EXCEEDS_THRESHOLD")) {
+					logger.Warnf("[KiroAPI] Endpoint %s rejected body as too long: model=%s sentBody=%dKB budget=%dKB historyTurns=%d",
+						ep.Name, payload.ConversationState.CurrentMessage.UserInputMessage.ModelID,
+						len(reqBody)/1024, maxPayloadBytesForModel(payload.ConversationState.CurrentMessage.UserInputMessage.ModelID)/1024,
+						len(payload.ConversationState.History))
+				}
 				// Authentication errors and payment errors are not retried across endpoints.
 				if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
 					return lastErr
@@ -666,6 +704,9 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 				return emitted, toolErr
 			}
 		case "meteringEvent":
+			if callback.OnMetering != nil {
+				callback.OnMetering()
+			}
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}
@@ -759,15 +800,48 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 
 // getContextWindowSize returns the context window size (in tokens) for a model.
 //
-// Per Kiro's ListAvailableModels, the 1M-token context window applies to
-// Claude 4.6 and newer (sonnet-4.6, opus-4.6, opus-4.7, opus-4.8, and future
-// 4.x releases), while 4.5 and earlier (opus-4.5, sonnet-4.5, sonnet-4,
-// haiku-4.5) use a 200K window. This value is used to convert the upstream
-// contextUsagePercentage into an absolute input-token count that clients rely
-// on to decide when to compact; an undersized window under-reports tokens and
-// prevents clients from compacting in time.
+// This value converts the upstream contextUsagePercentage into the absolute
+// input-token count reported to clients, which agent clients divide by the
+// window they know for the model to decide when to compact. That makes it a
+// multiplier on every reported count, not a cosmetic default: a window that runs
+// high inflates the count by (used / real), and because compaction lowers the
+// percentage without changing the ratio, an inflated window makes a client
+// compact, still read an over-threshold count, and compact again indefinitely.
+//
+// So prefer the window the upstream itself reports for the model
+// (tokenLimits.maxInputTokens from ListAvailableModels), recorded on every model
+// refresh. The name-based classification below is only a fallback for models we
+// have not seen a refresh for — it cannot know a real limit and is wrong for any
+// model whose window does not match its version family.
 func getContextWindowSize(model string) int {
-	if isLargeContextModel(model) {
+	if limit, ok := lookupModelInputTokenLimit(model); ok {
+		return limit
+	}
+	return fallbackContextWindowSize(model)
+}
+
+// gptFallbackContextWindow is the window assumed for Kiro's GPT models until the
+// upstream reports one for them.
+//
+// Measured against Kiro's GPT models at roughly 256K, not the ~1M these models
+// carry on their vendor's own API. Kiro re-hosts them behind its own limit, and
+// the number that matters here is Kiro's. The previous 1M assumption inflated
+// every reported token count by about 4x, which is what drove clients into a
+// compaction loop they could not exit: compaction lowers the upstream usage
+// percentage, but the inflation ratio applies to the lowered value just the
+// same, so the count stayed over the client's threshold no matter how much it
+// discarded.
+const gptFallbackContextWindow = 256_000
+
+// fallbackContextWindowSize classifies a model's window by name, for models the
+// upstream has not reported a limit for. Every value here is a guess and should
+// be treated as one; lookupModelInputTokenLimit is the authority when present.
+func fallbackContextWindowSize(model string) int {
+	m := strings.ToLower(model)
+	if isGPT5OrNewer(m) {
+		return gptFallbackContextWindow
+	}
+	if isLargeContextModel(m) {
 		return 1_000_000
 	}
 	return 200_000
@@ -779,8 +853,39 @@ func getContextWindowSize(model string) int {
 // classify correctly instead of falling through to the 200K default.
 var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[.-](\d+))?`)
 
+// gptVersionExtractor matches "gpt-<major>[.<minor>]" so the GPT models Kiro
+// exposes (gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, ...) are classified by
+// version rather than falling through to the 200K default. Without this every
+// GPT model was treated as a 200K-window model, which both under-reported
+// input tokens and — via maxPayloadBytesForModel — truncated requests at a
+// quarter of the context the model actually accepts.
+//
+// The legacy gpt-4* / gpt-3.5* identifiers never reach here: modelAliases
+// redirects them to Claude models before this point.
+var gptVersionExtractor = regexp.MustCompile(`gpt-(\d+)(?:[.-](\d+))?`)
+
+// isGPT5OrNewer reports whether the identifier names one of Kiro's GPT-5+
+// models. These get their own window tier (gptFallbackContextWindow) rather than
+// sharing Claude's 1M tier: Kiro re-hosts them behind a materially smaller limit
+// than their vendor's API advertises, and treating them as 1M models is what
+// inflated reported token counts into an inescapable compaction loop.
+func isGPT5OrNewer(model string) bool {
+	match := gptVersionExtractor.FindStringSubmatch(strings.ToLower(model))
+	if match == nil {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	return err == nil && major >= 5
+}
+
 func isLargeContextModel(model string) bool {
 	m := strings.ToLower(model)
+	if match := gptVersionExtractor.FindStringSubmatch(m); match != nil {
+		if major, err := strconv.Atoi(match[1]); err == nil {
+			// 1M window for GPT-5 and newer (gpt-5.6-sol, gpt-5.6-terra, ...).
+			return major >= 5
+		}
+	}
 	if match := claudeVersionExtractor.FindStringSubmatch(m); match != nil {
 		major, errMaj := strconv.Atoi(match[1])
 		if errMaj == nil {

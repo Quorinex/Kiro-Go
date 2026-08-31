@@ -210,6 +210,156 @@ func TestCanonicalCacheValuePreservesSemanticPositionKeys(t *testing.T) {
 	}
 }
 
+// TestPromptCacheOpenAIImplicitBreakpointAcrossTurns verifies that the OpenAI
+// wire format, which has no cache_control marker at all, still gets a cache
+// hit on repeated history: every message end is an unconditional implicit
+// breakpoint (5-minute TTL) rather than requiring an explicit breakpoint
+// first as on the Claude path.
+func TestPromptCacheOpenAIImplicitBreakpointAcrossTurns(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	systemText := strings.Repeat("You are a helpful coding assistant with deep knowledge of Go, Rust, Python, and TypeScript. ", 80)
+
+	req1 := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: systemText},
+			{Role: "user", Content: "question one"},
+		},
+	}
+	profile1 := tracker.BuildOpenAIProfile(req1, 2048)
+	if profile1 == nil {
+		t.Fatalf("profile1 should be built")
+	}
+	first := tracker.Compute("acct-1", profile1)
+	if first.CacheReadInputTokens != 0 {
+		t.Fatalf("expected no cache read on first request, got %+v", first)
+	}
+	if first.CacheCreationInputTokens <= 0 {
+		t.Fatalf("expected first request to create cache tokens, got %+v", first)
+	}
+	tracker.Update("acct-1", profile1)
+
+	req2 := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: systemText},
+			{Role: "user", Content: "question one"},
+			{Role: "assistant", Content: "answer one"},
+			{Role: "user", Content: "follow-up question"},
+		},
+	}
+	profile2 := tracker.BuildOpenAIProfile(req2, 4096)
+	if profile2 == nil {
+		t.Fatalf("profile2 should be built")
+	}
+	second := tracker.Compute("acct-1", profile2)
+	if second.CacheReadInputTokens == 0 {
+		t.Fatalf("expected cache read via unconditional implicit breakpoint, got %+v", second)
+	}
+}
+
+// TestBuildOpenAIUsageMapIncludesCacheFields checks the OpenAI usage shape,
+// where prompt_tokens is the raw total with the cached portion reported as a
+// subset via prompt_tokens_details — not excluded from it as on the Anthropic
+// side.
+func TestBuildOpenAIUsageMapIncludesCacheFields(t *testing.T) {
+	usage := promptCacheUsage{
+		CacheCreationInputTokens:   30,
+		CacheReadInputTokens:       20,
+		CacheCreation5mInputTokens: 10,
+		CacheCreation1hInputTokens: 20,
+	}
+
+	m := buildOpenAIUsageMap(100, 50, usage, true)
+
+	if got := m["prompt_tokens"]; got != 100 {
+		t.Fatalf("expected raw prompt tokens 100, got %#v", got)
+	}
+	if got := m["completion_tokens"]; got != 50 {
+		t.Fatalf("expected completion tokens 50, got %#v", got)
+	}
+	if got := m["total_tokens"]; got != 150 {
+		t.Fatalf("expected total tokens 150, got %#v", got)
+	}
+	details, ok := m["prompt_tokens_details"].(map[string]int)
+	if !ok {
+		t.Fatalf("expected typed prompt_tokens_details map, got %#v", m["prompt_tokens_details"])
+	}
+	if details["cached_tokens"] != 20 {
+		t.Fatalf("expected cached_tokens 20, got %#v", details)
+	}
+	if got := m["cache_creation_input_tokens"]; got != 30 {
+		t.Fatalf("expected cache creation tokens 30, got %#v", got)
+	}
+	if got := m["cache_read_input_tokens"]; got != 20 {
+		t.Fatalf("expected cache read tokens 20, got %#v", got)
+	}
+	creation, ok := m["cache_creation"].(map[string]int)
+	if !ok {
+		t.Fatalf("expected typed cache creation map, got %#v", m["cache_creation"])
+	}
+	if creation["ephemeral_5m_input_tokens"] != 10 || creation["ephemeral_1h_input_tokens"] != 20 {
+		t.Fatalf("unexpected ttl breakdown: %#v", creation)
+	}
+}
+
+// TestBuildOpenAIUsageMapDoesNotCollapseInputToZero covers the reported bug:
+// the cache profile is built from the pre-request estimate, so on a fully
+// cached prefix the Anthropic-style counters can account for the entire
+// measured input. Subtracting them from a total that already includes them
+// reported prompt_tokens 0 (and a total made of output alone) on every turn.
+func TestBuildOpenAIUsageMapDoesNotCollapseInputToZero(t *testing.T) {
+	// First turn against an account: the whole prefix is billed as creation.
+	usage := promptCacheUsage{
+		CacheCreationInputTokens:   4096,
+		CacheCreation5mInputTokens: 4096,
+	}
+
+	m := buildOpenAIUsageMap(4000, 120, usage, true)
+
+	if got := m["prompt_tokens"]; got != 4000 {
+		t.Fatalf("expected measured prompt tokens 4000, got %#v", got)
+	}
+	if got := m["total_tokens"]; got != 4120 {
+		t.Fatalf("expected total tokens 4120, got %#v", got)
+	}
+}
+
+// TestBuildOpenAIUsageMapKeepsFreshInputHeadroom verifies that an estimated
+// cache read at or above the measured input does not report a 100% hit rate,
+// which would leave nothing billable as fresh input on a turn that plainly
+// carries new content.
+func TestBuildOpenAIUsageMapKeepsFreshInputHeadroom(t *testing.T) {
+	usage := promptCacheUsage{CacheReadInputTokens: 5000}
+
+	m := buildOpenAIUsageMap(4800, 60, usage, true)
+
+	promptTokens, ok := m["prompt_tokens"].(int)
+	if !ok {
+		t.Fatalf("expected int prompt_tokens, got %#v", m["prompt_tokens"])
+	}
+	if promptTokens <= 5000 {
+		t.Fatalf("expected prompt tokens scaled above the cached 5000, got %d", promptTokens)
+	}
+	if got := m["total_tokens"]; got != promptTokens+60 {
+		t.Fatalf("expected total tokens %d, got %#v", promptTokens+60, got)
+	}
+	details := m["prompt_tokens_details"].(map[string]int)
+	if details["cached_tokens"] != 5000 {
+		t.Fatalf("expected cached_tokens preserved at 5000, got %#v", details)
+	}
+}
+
+func TestBuildOpenAIUsageMapOmitsCacheFieldsWhenNoProfile(t *testing.T) {
+	m := buildOpenAIUsageMap(100, 50, promptCacheUsage{}, false)
+	if _, ok := m["cache_creation_input_tokens"]; ok {
+		t.Fatalf("expected no cache fields when includeCache is false, got %#v", m)
+	}
+	if _, ok := m["cache_creation"]; ok {
+		t.Fatalf("expected no cache_creation field when includeCache is false, got %#v", m)
+	}
+}
+
 // TestPromptCacheImplicitBreakpointAtMessageEnd verifies that once any
 // explicit cache_control breakpoint has been seen, subsequent message-end
 // boundaries act as implicit breakpoints. This allows multi-turn conversations

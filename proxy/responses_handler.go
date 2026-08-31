@@ -42,6 +42,13 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		storeResponse = *req.Store
 	}
 
+	// Resolved here rather than at the point of use further down: the replay
+	// budget below is sized from the model's context window, and a client-supplied
+	// name still carrying the thinking suffix matches no known model, so the
+	// window lookup would miss and fall back to the smallest tier.
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+
 	var historyMessages []OpenAIMessage
 	if req.PreviousResponseID != "" {
 		prev, loadErr := loadResponse(req.PreviousResponseID)
@@ -50,7 +57,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 				fmt.Sprintf("previous_response_id not found: %v", loadErr))
 			return
 		}
-		historyMessages = expandPreviousResponseHistory(prev)
+		historyMessages = expandPreviousResponseHistory(prev, actualModel)
 	}
 
 	inputMessages, err := parseResponsesInput(req.Input)
@@ -97,6 +104,24 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		Stream:   req.Stream,
 		Tools:    req.Tools,
 	}
+	// Codex Responses Lite (gpt-5.6 and newer) omits the top-level tools array
+	// and ships tool definitions inside an additional_tools input item instead.
+	// Without this merge the request reaches Kiro carrying no tools at all, and
+	// the model correctly reports that it has no shell available.
+	if extra := extractResponsesAdditionalTools(req.Input); len(extra) > 0 {
+		openaiReq.Tools = append(openaiReq.Tools, extra...)
+	}
+	// Unwrap Codex namespace wrappers up front so the token estimator and cache
+	// profile see the real tool schemas rather than just the wrapper name. Tool
+	// schemas are large, so leaving them nested materially skews both.
+	openaiReq.Tools = flattenOpenAITools(openaiReq.Tools, 0)
+	customTools := collectCustomToolNames(openaiReq.Tools)
+	if len(req.ToolChoice) > 0 {
+		var toolChoice interface{}
+		if err := json.Unmarshal(req.ToolChoice, &toolChoice); err == nil {
+			openaiReq.ToolChoice = toolChoice
+		}
+	}
 	if req.Temperature != nil {
 		openaiReq.Temperature = *req.Temperature
 	}
@@ -104,30 +129,30 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		openaiReq.MaxTokens = *req.MaxOutputTokens
 	}
 
-	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
+	cacheProfile := h.promptCache.BuildOpenAIProfile(openaiReq, estimatedInputTokens)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	respID := generateResponseID()
 
 	if req.Stream {
 		h.handleResponsesStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-			apiKeyID, respID, &req, storedInputCopy, storeResponse)
+			apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile, customTools)
 		return
 	}
 
 	h.handleResponsesNonStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-		apiKeyID, respID, &req, storedInputCopy, storeResponse)
+		apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile, customTools)
 }
 
 func (h *Handler) handleResponsesNonStream(
 	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	cacheProfile *promptCacheProfile, customTools map[string]bool,
 ) {
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -144,6 +169,8 @@ func (h *Handler) handleResponsesNonStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
+
+		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
 		var content, reasoningContent string
 		var toolUses []KiroToolUse
@@ -218,8 +245,9 @@ func (h *Handler) handleResponsesNonStream(
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
+		h.promptCache.Update(account.ID, cacheProfile)
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheUsage, cacheProfile != nil, customTools)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
 
@@ -256,6 +284,7 @@ func mapResponsesCompletion(reason string) (status, incompleteReason string) {
 func buildResponsesObject(
 	id, model, content string, toolUses []KiroToolUse,
 	inputTokens, outputTokens int, req *ResponsesRequest, upstreamStopReason string,
+	cacheUsage promptCacheUsage, includeCache bool, customTools map[string]bool,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
 
@@ -273,15 +302,20 @@ func buildResponsesObject(
 	}
 
 	for _, tu := range toolUses {
-		args, _ := json.Marshal(tu.Input)
-		output = append(output, ResponseOutputItem{
-			ID:        generateOutputItemID("fc"),
-			Type:      "function_call",
-			Status:    "completed",
-			CallID:    tu.ToolUseID,
-			Name:      tu.Name,
-			Arguments: string(args),
-		})
+		shape := shapeResponsesToolCall(tu, customTools)
+		item := ResponseOutputItem{
+			ID:     generateOutputItemID("fc"),
+			Type:   shape.Type,
+			Status: "completed",
+			CallID: tu.ToolUseID,
+			Name:   tu.Name,
+		}
+		if shape.Type == responsesCustomToolCallType {
+			item.Input = shape.Input
+		} else {
+			item.Arguments = shape.Arguments
+		}
+		output = append(output, item)
 	}
 
 	if len(output) == 0 {
@@ -303,14 +337,29 @@ func buildResponsesObject(
 		incompleteDetails = &ResponsesIncompleteDetails{Reason: incompleteReason}
 	}
 
+	var inputTokensDetails *ResponsesInputTokensDetails
+	if includeCache {
+		// Shared with the Chat Completions path: OpenAI reports input_tokens as
+		// the raw total with the cached portion as a subset of it, not excluded
+		// from it. See reconcileOpenAICacheUsage.
+		cachedTokens := 0
+		inputTokens, cachedTokens = reconcileOpenAICacheUsage(inputTokens, cacheUsage)
+		inputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cachedTokens}
+	}
+
 	return &ResponsesObject{
-		ID:                 id,
-		Object:             "response",
-		CreatedAt:          time.Now().Unix(),
-		Status:             status,
-		Model:              model,
-		Output:             output,
-		Usage:              ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens},
+		ID:        id,
+		Object:    "response",
+		CreatedAt: time.Now().Unix(),
+		Status:    status,
+		Model:     model,
+		Output:    output,
+		Usage: ResponsesUsage{
+			InputTokens:        inputTokens,
+			InputTokensDetails: inputTokensDetails,
+			OutputTokens:       outputTokens,
+			TotalTokens:        inputTokens + outputTokens,
+		},
 		PreviousResponseID: req.PreviousResponseID,
 		Metadata:           req.Metadata,
 		IncompleteDetails:  incompleteDetails,
@@ -321,6 +370,7 @@ func (h *Handler) handleResponsesStream(
 	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	cacheProfile *promptCacheProfile, customTools map[string]bool,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -374,6 +424,8 @@ func (h *Handler) handleResponsesStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
+
+		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
 		send("response.in_progress", map[string]interface{}{
 			"type":     "response.in_progress",
@@ -475,37 +527,20 @@ func (h *Handler) handleResponsesStream(
 				}
 
 				toolUses = append(toolUses, tu)
-				args, _ := json.Marshal(tu.Input)
+				shape := shapeResponsesToolCall(tu, customTools)
 				fcID := generateOutputItemID("fc")
 				send("response.output_item.added", map[string]interface{}{
 					"type":         "response.output_item.added",
 					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "in_progress",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": "",
-					},
+					"item":         shape.outputItem(fcID, tu, "in_progress", false),
 				})
-				send("response.function_call_arguments.delta", map[string]interface{}{
-					"type":         "response.function_call_arguments.delta",
-					"item_id":      fcID,
-					"output_index": outputIndex,
-					"delta":        string(args),
-				})
+				send(shape.deltaEvent(), shape.deltaPayload(fcID, outputIndex))
+				// Codex reads tool calls only from output_item.done, ignoring the
+				// delta events above, so this event must carry the complete call.
 				send("response.output_item.done", map[string]interface{}{
 					"type":         "response.output_item.done",
 					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "completed",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": string(args),
-					},
+					"item":         shape.outputItem(fcID, tu, "completed", true),
 				})
 				outputIndex++
 				responseStarted = true
@@ -613,8 +648,9 @@ func (h *Handler) handleResponsesStream(
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
+		h.promptCache.Update(account.ID, cacheProfile)
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason, cacheUsage, cacheProfile != nil, customTools)
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions

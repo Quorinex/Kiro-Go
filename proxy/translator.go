@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"kiro-go/config"
+	"kiro-go/logger"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -46,7 +48,8 @@ const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
 const toolResultImagePlaceholder = "[Tool returned an image; the image is attached to this message.]"
 
-// maxPayloadBytes is the upper bound for the serialized Kiro request body.
+// maxPayloadBytes is the upper bound for the serialized Kiro request body on
+// models with a 200K-token context window.
 // Kiro's upstream rejects oversized requests with HTTP 400
 // "Input is too long." (CONTENT_LENGTH_EXCEEDS_THRESHOLD). When a converted
 // payload exceeds this size we drop the oldest history turns (keeping the
@@ -54,10 +57,47 @@ const toolResultImagePlaceholder = "[Tool returned an image; the image is attach
 // message) and insert a placeholder note so the model knows context was elided.
 // The limit is kept conservatively below the observed upstream threshold to
 // leave room for headers and minor serialization overhead.
+//
+// Do not reference this constant directly when truncating: use
+// maxPayloadBytesForModel, which raises the budget for large-context models.
+// Applying this 200K-sized budget to a 1M-token model truncates roughly three
+// quarters of a conversation the upstream would have accepted.
 const maxPayloadBytes = 900 * 1024
 
+// payloadBytesPerToken converts a token budget into a serialized-payload byte
+// budget. Tokens are not bytes: JSON escaping, tool schemas and non-ASCII text
+// all inflate the wire size per token, so this ratio is deliberately generous
+// rather than an average — the truncation it guards is a last resort, and
+// cutting context the upstream would have accepted is the worse failure.
+const payloadBytesPerToken = 4
+
+// payloadTokenHeadroom is the fraction of a model's window we are willing to
+// fill with request payload, leaving the remainder for the model's answer. The
+// large tier's original 900K-of-1M budget is exactly this ratio.
+const payloadTokenHeadroom = 0.9
+
+// maxPayloadBytesForModel returns the serialized-body budget for a model.
+//
+// Derived from getContextWindowSize rather than from a separate tier test, so a
+// model's payload budget and its reported context window cannot disagree —
+// telling a client it has room we then truncate away is the failure this
+// function exists to avoid, and two independent classifications drift into
+// exactly that. The window itself prefers the upstream-reported limit and falls
+// back to a name-based guess; both flow through here unchanged.
+//
+// Never returns less than the 200K-tier budget: that floor is what today's
+// working models run on, so nothing here can tighten them.
+func maxPayloadBytesForModel(model string) int {
+	window := getContextWindowSize(model)
+	budget := int(float64(window)*payloadTokenHeadroom) * payloadBytesPerToken
+	if budget < maxPayloadBytes {
+		return maxPayloadBytes
+	}
+	return budget
+}
+
 // truncationPlaceholder is inserted in history where older turns were dropped to
-// fit within maxPayloadBytes.
+// fit the model's payload budget.
 const truncationPlaceholder = "[Earlier conversation history was truncated to fit the model's input limit. Older messages and tool activity have been omitted.]"
 
 // minRecentHistoryTurns is the number of most-recent history entries always kept
@@ -291,7 +331,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// 同一消息带有图片时，图片占位文本不能覆盖工具结果内容。
 	finalContent := currentContent
 	if len(currentToolResults) > 0 {
-		finalContent = joinHistoryText(finalContent, buildToolResultsContinuation(currentToolResults))
+		finalContent = joinHistoryText(finalContent, buildToolResultsContinuation(currentToolResults, modelID))
 	}
 	if finalContent == "" {
 		if len(currentImages) > 0 {
@@ -994,12 +1034,28 @@ func shortenToolName(name string) string {
 
 // ==================== Kiro -> Claude 转换 ====================
 
+// mapClaudeStopReason converts an upstream stopReason into a Claude stop_reason.
+//
+// The default is "end_turn" because clients reject values outside the documented
+// enum, so an unknown reason cannot be passed through verbatim. But "end_turn"
+// is also the one value that tells an agent client the task is finished and no
+// further turn is needed, which makes a silent default the most consequential
+// mapping here: a reason upstream added that we do not recognize gets reported
+// as a completed turn. Unrecognized non-empty reasons are therefore logged, so
+// a new upstream value shows up as a log line rather than as agent loops that
+// stop early for no visible reason.
+//
+// An empty reason still maps to "end_turn" without a log: by the time a turn
+// reaches this function, classifyStreamIntegrity has already rejected the
+// missing-stopReason case for accounts that send one, so an empty reason here is
+// an account that never sends metadataEvent and closed the turn with metering.
 func mapClaudeStopReason(reason string, toolCount int) string {
 	if toolCount > 0 {
 		return "tool_use"
 	}
 
-	switch strings.ToLower(strings.TrimSpace(reason)) {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch normalized {
 	case "max_tokens", "max_output_tokens", "length":
 		return "max_tokens"
 	case "model_context_window_exceeded", "context_window_exceeded":
@@ -1010,7 +1066,12 @@ func mapClaudeStopReason(reason string, toolCount int) string {
 		return "stop_sequence"
 	case "pause_turn":
 		return "pause_turn"
+	case "", "end_turn", "stop", "stop_reason_end_turn", "complete", "completed", "finished":
+		return "end_turn"
 	default:
+		// Reported as a finished turn because no safer enum value exists, but
+		// never silently: an unrecognized reason may well be a non-terminal one.
+		logger.Warnf("[StopReason] Unrecognized upstream stopReason %q mapped to end_turn; a non-terminal reason reported as complete would stall an agent loop", reason)
 		return "end_turn"
 	}
 }
@@ -1082,6 +1143,7 @@ type OpenAIRequest struct {
 	TopP        float64         `json:"top_p,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
 	Tools       []OpenAITool    `json:"tools,omitempty"`
+	ToolChoice  interface{}     `json:"tool_choice,omitempty"`
 }
 
 type OpenAIMessage struct {
@@ -1100,6 +1162,21 @@ type ToolCall struct {
 	} `json:"function"`
 }
 
+const (
+	openAIToolTypeFunction  = "function"
+	openAIToolTypeCustom    = "custom"
+	openAIToolTypeNamespace = "namespace"
+
+	// customToolInputKey is the single argument freeform (grammar) tools are
+	// exposed through, since Kiro only accepts JSON-schema tool definitions.
+	customToolInputKey = "input"
+
+	// maxToolNamespaceDepth bounds namespace unwrapping. Codex nests one level
+	// in practice; the cap only exists so malformed input cannot recurse away
+	// the stack.
+	maxToolNamespaceDepth = 4
+)
+
 type OpenAITool struct {
 	Type     string `json:"type"`
 	Function struct {
@@ -1107,6 +1184,17 @@ type OpenAITool struct {
 		Description string      `json:"description"`
 		Parameters  interface{} `json:"parameters"`
 	} `json:"function"`
+	// Tools carries the children of a Codex namespace wrapper:
+	//
+	//	{"type":"namespace","name":"functions","tools":[...]}
+	//
+	// Codex wraps tools this way for every provider that leaves
+	// namespace_tools enabled, which is the default for custom providers.
+	Tools []OpenAITool `json:"tools,omitempty"`
+	// Format carries the grammar of a Codex freeform tool:
+	//
+	//	{"type":"custom","name":"apply_patch","format":{"type":"grammar",...}}
+	Format map[string]interface{} `json:"format,omitempty"`
 }
 
 // UnmarshalJSON accepts both the Chat Completions tool shape, where the tool
@@ -1123,10 +1211,12 @@ type OpenAITool struct {
 // which Kiro rejects with HTTP 400 "Improperly formed request".
 func (t *OpenAITool) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Type        string      `json:"type"`
-		Name        string      `json:"name"`
-		Description string      `json:"description"`
-		Parameters  interface{} `json:"parameters"`
+		Type        string                 `json:"type"`
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		Parameters  interface{}            `json:"parameters"`
+		Tools       []OpenAITool           `json:"tools"`
+		Format      map[string]interface{} `json:"format"`
 		Function    *struct {
 			Name        string      `json:"name"`
 			Description string      `json:"description"`
@@ -1138,6 +1228,8 @@ func (t *OpenAITool) UnmarshalJSON(data []byte) error {
 	}
 
 	t.Type = raw.Type
+	t.Tools = raw.Tools
+	t.Format = raw.Format
 	if raw.Function != nil {
 		t.Function.Name = raw.Function.Name
 		t.Function.Description = raw.Function.Description
@@ -1189,7 +1281,13 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	var nonSystemMessages []OpenAIMessage
 
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
+		// "developer" is the Responses API name for what Chat Completions calls
+		// "system". Codex relies on it heavily: on the Responses Lite path it
+		// sends instructions as an empty string and ships its whole base prompt
+		// as a developer-role message instead. Anything not folded in here falls
+		// through the role switch below and is dropped outright, which silently
+		// removed the bulk of every Codex request.
+		if msg.Role == "system" || msg.Role == "developer" {
 			if s := extractOpenAIMessageText(msg.Content); s != "" {
 				systemPrompt += s + "\n"
 			}
@@ -1332,7 +1430,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	// 同一消息带有图片时，图片占位文本不能覆盖工具结果内容。
 	finalContent := currentContent
 	if len(currentToolResults) > 0 {
-		finalContent = joinHistoryText(finalContent, buildToolResultsContinuation(currentToolResults))
+		finalContent = joinHistoryText(finalContent, buildToolResultsContinuation(currentToolResults, modelID))
 	}
 	if finalContent == "" {
 		if len(currentImages) > 0 {
@@ -1730,7 +1828,9 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	if payload == nil {
 		return
 	}
-	if payloadByteSize(payload) <= maxPayloadBytes {
+	limit := maxPayloadBytesForModel(currentMessageModelID(payload))
+	originalSize := payloadByteSize(payload)
+	if originalSize <= limit {
 		return
 	}
 
@@ -1772,7 +1872,7 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	for i := len(conversation) - 1; i >= 0; i-- {
 		running += entrySizes[i]
 		kept := len(conversation) - i
-		if running > maxPayloadBytes && kept > minRecentHistoryTurns {
+		if running > limit && kept > minRecentHistoryTurns {
 			break
 		}
 		keepFrom = i
@@ -1791,9 +1891,19 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 
 	// If still too large (current message or retained tail alone exceeds the
 	// limit), shrink the current message content as a last resort.
-	if payloadByteSize(payload) > maxPayloadBytes {
-		truncateCurrentMessage(payload)
+	hardTruncated := false
+	if payloadByteSize(payload) > limit {
+		truncateCurrentMessage(payload, limit)
+		hardTruncated = true
 	}
+
+	// Truncation silently discards conversation the upstream may well have
+	// accepted, so make it visible: an unexpected line here is the signal that
+	// the budget is mis-sized for the model rather than the context being
+	// genuinely oversized.
+	logger.Warnf("[Truncate] model=%s payload=%dKB exceeded budget=%dKB; dropped %d/%d history turns, hardTruncatedCurrentMessage=%t, final=%dKB",
+		currentMessageModelID(payload), originalSize/1024, limit/1024,
+		keepFrom, len(conversation), hardTruncated, payloadByteSize(payload)/1024)
 }
 
 // historyEntryByteSize returns the serialized size of a single history entry,
@@ -1828,13 +1938,30 @@ func currentMessageModelID(payload *KiroPayload) string {
 	return payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
 }
 
+// currentMessageToolCount reports how many tool specs ride on the current
+// message. Tool schemas are re-sent in full on every turn and are among the
+// largest fixed contributors to body size, so the count belongs in the request
+// log next to the byte total.
+func currentMessageToolCount(payload *KiroPayload) int {
+	if payload == nil {
+		return 0
+	}
+	ctx := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if ctx == nil {
+		return 0
+	}
+	return len(ctx.Tools)
+}
+
 // truncateCurrentMessage hard-truncates the current message content as a last
 // resort when even the minimal retained history plus current message exceeds the
-// limit.
-func truncateCurrentMessage(payload *KiroPayload) {
+// limit. limit is the model's payload budget, not the 200K default: cutting a
+// 1M-model message against the smaller budget discards content the upstream
+// would have accepted.
+func truncateCurrentMessage(payload *KiroPayload, limit int) {
 	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
 	overhead := payloadByteSize(payload) - len(cur.Content)
-	budget := maxPayloadBytes - overhead
+	budget := limit - overhead
 	if budget < 0 {
 		budget = 0
 	}
@@ -1847,7 +1974,53 @@ func truncateCurrentMessage(payload *KiroPayload) {
 	}
 }
 
-func buildToolResultsContinuation(toolResults []KiroToolResult) string {
+// toolResultsContinuationTruncationMarker is appended when tool output had to be
+// cut. A silent cut is the dangerous case: the model reads a file listing or test
+// output that simply stops, has no way to know more existed, and acts on the
+// partial view as if it were complete.
+const toolResultsContinuationTruncationMarker = "\n\n[Tool output truncated to fit the model's input limit; earlier lines are shown above.]"
+
+// toolResultsContinuationShare bounds the readable tool-result text as a
+// fraction of the model's payload budget. Tool output is the largest variable
+// contributor to a turn, but it must not crowd out history and the tool specs
+// that ride alongside it, so it gets a share rather than the whole budget.
+const toolResultsContinuationShare = 2
+
+// maxToolResultsContinuationBytes returns the byte budget for the readable
+// rendering of tool results on a given model.
+//
+// This used to be a hardcoded 4000 bytes for every model. That number is small
+// enough to be actively harmful: a 32KB test log or file read arrived at the
+// model cut to its first ~4KB. When the structured toolResults are dropped
+// (currentToolResultsMatchLastAssistant is false, which is the normal case
+// whenever a client answers only some of a parallel tool batch) this text is the
+// ONLY carrier of tool output, so the model saw a fraction of what the tool
+// returned and stalled or guessed. Sizing it against the model's own payload
+// budget keeps the cap a real backstop instead of the default outcome;
+// truncatePayloadToLimit still enforces the true limit afterwards.
+func maxToolResultsContinuationBytes(model string) int {
+	return maxPayloadBytesForModel(model) / toolResultsContinuationShare
+}
+
+// truncateStringAtRuneBoundary cuts s to at most budget bytes without splitting
+// a multi-byte rune. A raw byte slice through UTF-8 leaves a partial sequence at
+// the tail, which JSON-encodes as U+FFFD and corrupts the last character of any
+// non-ASCII output (Chinese text hits this on almost every cut).
+func truncateStringAtRuneBoundary(s string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	if len(s) <= budget {
+		return s
+	}
+	cut := budget
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+func buildToolResultsContinuation(toolResults []KiroToolResult, model string) string {
 	if len(toolResults) == 0 {
 		return minimalFallbackUserContent
 	}
@@ -1869,10 +2042,17 @@ func buildToolResultsContinuation(toolResults []KiroToolResult) string {
 	}
 
 	joined := toolResultsContinuationPrefix + "\n\n" + strings.Join(parts, "\n\n")
-	if len(joined) > 4000 {
-		return joined[:4000]
+	limit := maxToolResultsContinuationBytes(model)
+	if len(joined) <= limit {
+		return joined
 	}
-	return joined
+	// Reserve room for the marker so the result still fits the budget, and cut on
+	// a rune boundary so the last character is not left as a partial sequence.
+	body := truncateStringAtRuneBoundary(joined, limit-len(toolResultsContinuationTruncationMarker))
+	if body == "" {
+		return truncateStringAtRuneBoundary(joined, limit)
+	}
+	return body + toolResultsContinuationTruncationMarker
 }
 
 func trimLeadingAssistantHistory(history []KiroHistoryMessage) []KiroHistoryMessage {
@@ -2096,17 +2276,94 @@ func parseBase64Image(data, format string) *KiroImage {
 	}
 }
 
+// flattenOpenAITools unwraps Codex namespace wrappers into a flat list of leaf
+// tools. Codex sends {"type":"namespace","name":"functions","tools":[...]} to
+// any provider with namespace_tools enabled (the default for custom
+// providers), so without unwrapping every tool inside the wrapper is lost.
+func flattenOpenAITools(tools []OpenAITool, depth int) []OpenAITool {
+	if len(tools) == 0 {
+		return nil
+	}
+	flat := make([]OpenAITool, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Type == openAIToolTypeNamespace || (tool.Type == "" && len(tool.Tools) > 0) {
+			if depth >= maxToolNamespaceDepth {
+				continue
+			}
+			flat = append(flat, flattenOpenAITools(tool.Tools, depth+1)...)
+			continue
+		}
+		flat = append(flat, tool)
+	}
+	return flat
+}
+
+// customToolSchema exposes a freeform (grammar) tool as a single-string-argument
+// function, the closest shape Kiro's JSON-schema-only tool specs can express.
+// The grammar itself is folded into the description so the model still knows
+// what to emit; responses_handler restores the custom_tool_call shape on the
+// way back out.
+func customToolSchema() interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			customToolInputKey: map[string]interface{}{
+				"type":        "string",
+				"description": "The complete raw payload for this tool, emitted verbatim as plain text.",
+			},
+		},
+		"required": []interface{}{customToolInputKey},
+	}
+}
+
+// describeCustomToolFormat appends the grammar definition of a freeform tool to
+// its description. Kiro cannot carry a lark grammar in an inputSchema, so the
+// grammar has to travel as prose or the model has no idea what syntax to emit.
+func describeCustomToolFormat(desc string, format map[string]interface{}) string {
+	if len(format) == 0 {
+		return desc
+	}
+	definition, _ := format["definition"].(string)
+	if strings.TrimSpace(definition) == "" {
+		return desc
+	}
+	syntax, _ := format["syntax"].(string)
+	if syntax == "" {
+		syntax = "grammar"
+	}
+	var b strings.Builder
+	b.WriteString(desc)
+	if strings.TrimSpace(desc) != "" {
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Emit the payload in the following ")
+	b.WriteString(syntax)
+	b.WriteString(" syntax:\n")
+	b.WriteString(definition)
+	return b.String()
+}
+
 func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 	if len(tools) == 0 {
 		return nil
 	}
 
-	result := make([]KiroToolWrapper, 0, len(tools))
-	for _, tool := range tools {
-		if tool.Type != "function" {
+	flat := flattenOpenAITools(tools, 0)
+	result := make([]KiroToolWrapper, 0, len(flat))
+	for _, tool := range flat {
+		// Server-side tool types (web_search, tool_search, image_generation,
+		// local_shell) are executed by the model host, not by Kiro. Forward
+		// only the types Kiro can actually describe, and drop the rest rather
+		// than letting them fail the whole request upstream.
+		if tool.Type != openAIToolTypeFunction && tool.Type != openAIToolTypeCustom && tool.Type != "" {
 			continue
 		}
 		desc := tool.Function.Description
+		schema := ensureObjectSchema(tool.Function.Parameters)
+		if tool.Type == openAIToolTypeCustom {
+			desc = describeCustomToolFormat(desc, tool.Format)
+			schema = customToolSchema()
+		}
 		if len(desc) > maxToolDescLen {
 			desc = desc[:maxToolDescLen] + "..."
 		}
@@ -2118,10 +2375,32 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
-		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: schema}
 		result = append(result, wrapper)
 	}
 	return result
+}
+
+// collectCustomToolNames records which tools arrived as Codex freeform tools so
+// the response path can emit custom_tool_call instead of function_call for
+// them. Codex abandons a freeform call that comes back as a plain function_call.
+func collectCustomToolNames(tools []OpenAITool) map[string]bool {
+	flat := flattenOpenAITools(tools, 0)
+	var names map[string]bool
+	for _, tool := range flat {
+		if tool.Type != openAIToolTypeCustom {
+			continue
+		}
+		name := shortenToolName(tool.Function.Name)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		if names == nil {
+			names = make(map[string]bool)
+		}
+		names[name] = true
+	}
+	return names
 }
 
 // ==================== Kiro -> OpenAI 转换 ====================
@@ -2196,7 +2475,7 @@ func extractThinkingFromContent(content string) (string, string) {
 }
 
 // KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
-func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat, upstreamStopReason string) map[string]interface{} {
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat, upstreamStopReason string, cacheUsage promptCacheUsage, includeCache bool) map[string]interface{} {
 	finishReason := mapOpenAIFinishReason(upstreamStopReason, len(toolUses))
 
 	message := map[string]interface{}{
@@ -2245,10 +2524,6 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			"message":       message,
 			"finish_reason": finishReason,
 		}},
-		"usage": map[string]int{
-			"prompt_tokens":     inputTokens,
-			"completion_tokens": outputTokens,
-			"total_tokens":      inputTokens + outputTokens,
-		},
+		"usage": buildOpenAIUsageMap(inputTokens, outputTokens, cacheUsage, includeCache),
 	}
 }
