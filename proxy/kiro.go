@@ -578,6 +578,7 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 	var totalCredits float64
 	var contextUsagePercentages []float64
 	var sawOutput bool
+	var sawAssistantContent, sawStopReason bool
 	pending := &pendingToolUses{}
 	trackedCallback := *callback
 	originalOnToolUse := trackedCallback.OnToolUse
@@ -644,10 +645,18 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 
 		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
 
+		if reason := findStopReason(event); reason != "" {
+			sawStopReason = true
+			if callback.OnStopReason != nil {
+				callback.OnStopReason(reason)
+			}
+		}
+
 		switch headers[":event-type"] {
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
 				sawOutput = true
+				sawAssistantContent = true
 				if callback.OnText != nil {
 					emitted = true
 					callback.OnText(content, false)
@@ -674,11 +683,12 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 				contextUsagePercentages = append(contextUsagePercentages, pct)
 			}
 		case "metadataEvent":
-			// stopReason rides inside metadataEvent on the wire; there is no
-			// standalone stop reason event type. Its absence after content is
-			// how callers detect a truncated stream.
-			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" && callback.OnStopReason != nil {
-				callback.OnStopReason(reason)
+			// A metadata envelope is terminal even without an explicit reason.
+			if !sawStopReason {
+				sawStopReason = true
+				if callback.OnStopReason != nil {
+					callback.OnStopReason("end_turn")
+				}
 			}
 		}
 	}
@@ -689,6 +699,11 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 	}
 	if !sawOutput {
 		return emitted, errEmptyKiroStream
+	}
+	// Reached only after clean EOF and successful tool flushing. A read or
+	// frame error must never synthesize successful completion.
+	if sawAssistantContent && !sawStopReason && callback.OnStopReason != nil {
+		callback.OnStopReason("end_turn")
 	}
 	if callback.OnCredits != nil && totalCredits > 0 {
 		callback.OnCredits(totalCredits)
@@ -702,6 +717,31 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 		callback.OnComplete(inputTokens, outputTokens)
 	}
 	return emitted, nil
+}
+
+// findStopReason accepts terminal field variants inside decoded event envelopes.
+// String values are never decoded as JSON, so assistant text cannot supply a signal.
+func findStopReason(value interface{}) string {
+	switch value := value.(type) {
+	case map[string]interface{}:
+		for _, key := range []string{"stopReason", "stop_reason", "finishReason", "finish_reason"} {
+			if reason, ok := value[key].(string); ok && strings.TrimSpace(reason) != "" {
+				return reason
+			}
+		}
+		for _, nested := range value {
+			if reason := findStopReason(nested); reason != "" {
+				return reason
+			}
+		}
+	case []interface{}:
+		for _, nested := range value {
+			if reason := findStopReason(nested); reason != "" {
+				return reason
+			}
+		}
+	}
+	return ""
 }
 
 func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int) {

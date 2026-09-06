@@ -11,6 +11,56 @@ import (
 	"testing"
 )
 
+func TestHandlersAcceptTextOnlyCleanEOF(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body, terminal string
+	}{
+		{"Claude stream", "/v1/messages", `{"model":"claude-sonnet-4.5","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":true}`, `"stop_reason":"end_turn"`},
+		{"Claude buffered", "/v1/messages", `{"model":"claude-sonnet-4.5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`, `"stop_reason":"end_turn"`},
+		{"Chat stream", "/v1/chat/completions", `{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hi"}],"stream":true}`, `"finish_reason":"stop"`},
+		{"Chat buffered", "/v1/chat/completions", `{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hi"}]}`, `"finish_reason":"stop"`},
+		{"Responses stream", "/v1/responses", `{"model":"claude-sonnet-4.5","input":"hi","stream":true,"store":false}`, "response.completed"},
+		{"Responses buffered", "/v1/responses", `{"model":"claude-sonnet-4.5","input":"hi","store":false}`, `"status":"completed"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				for _, chunk := range []string{"complete ", "answer"} {
+					_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": chunk}))
+				}
+				_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 1}))
+				_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1}))
+			}))
+			defer server.Close()
+			h := setupIntegrityPathTest(t, server)
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			switch tc.path {
+			case "/v1/messages":
+				h.handleClaudeMessages(rec, req)
+			case "/v1/chat/completions":
+				h.handleOpenAIChat(rec, req)
+			case "/v1/responses":
+				h.handleOpenAIResponses(rec, req)
+			}
+			body := rec.Body.String()
+			if rec.Code != http.StatusOK || !strings.Contains(body, "answer") || !strings.Contains(body, tc.terminal) {
+				t.Fatalf("status=%d body=%s", rec.Code, body)
+			}
+			if strings.Contains(body, `"type":"error"`) || strings.Contains(body, "response.failed") || strings.Contains(body, "upstream truncated") {
+				t.Fatalf("unexpected error: %s", body)
+			}
+			if tc.name == "Chat stream" && !strings.Contains(body, "[DONE]") {
+				t.Fatalf("missing DONE: %s", body)
+			}
+			if hits.Load() != 1 {
+				t.Fatalf("successful EOF must not retry: hits=%d", hits.Load())
+			}
+		})
+	}
+}
+
 // setupIntegrityPathTest installs a single-account config plus a fake upstream
 // and returns a handler wired to the reloaded pool.
 func setupIntegrityPathTest(t *testing.T, server *httptest.Server) *Handler {
@@ -42,7 +92,7 @@ func setupIntegrityPathTest(t *testing.T, server *httptest.Server) *Handler {
 	}
 }
 
-// truncatedUpstream serves content long enough to be flushed to the client but
+// truncatedUpstream serves reasoning long enough to be flushed to the client but
 // never sends a metadataEvent, i.e. a transport-successful truncated stream.
 func truncatedUpstream(t *testing.T, hits *atomic.Int32) *httptest.Server {
 	t.Helper()
@@ -51,8 +101,8 @@ func truncatedUpstream(t *testing.T, hits *atomic.Int32) *httptest.Server {
 			hits.Add(1)
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": strings.Repeat("partial answer ", 8),
+		_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+			"text": strings.Repeat("partial answer ", 8),
 		}))
 	}))
 }
@@ -66,7 +116,7 @@ func TestClaudeStreamEmitsErrorOnTruncatedStream(t *testing.T) {
 	h := setupIntegrityPathTest(t, server)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
-		"model":"claude-sonnet-4.5",
+		"model":"claude-sonnet-4.5-thinking",
 		"max_tokens":100,
 		"messages":[{"role":"user","content":"hello"}],
 		"stream":true
@@ -98,8 +148,8 @@ func TestClaudeNonStreamRetriesTruncatedStream(t *testing.T) {
 		n := hits.Add(1)
 		w.WriteHeader(http.StatusOK)
 		if n == 1 {
-			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-				"content": "truncated attempt",
+			_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+				"text": "truncated attempt",
 			}))
 			return
 		}
@@ -114,7 +164,7 @@ func TestClaudeNonStreamRetriesTruncatedStream(t *testing.T) {
 	h := setupIntegrityPathTest(t, server)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
-		"model":"claude-sonnet-4.5",
+		"model":"claude-sonnet-4.5-thinking",
 		"max_tokens":100,
 		"messages":[{"role":"user","content":"hello"}]
 	}`))
@@ -151,7 +201,7 @@ func TestIntegrityFailureDoesNotBanAccount(t *testing.T) {
 	h := setupIntegrityPathTest(t, server)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
-		"model":"claude-sonnet-4.5",
+		"model":"claude-sonnet-4.5-thinking",
 		"max_tokens":100,
 		"messages":[{"role":"user","content":"hello"}],
 		"stream":true
@@ -186,7 +236,7 @@ func TestResponsesStreamEmitsFailedOnTruncatedStream(t *testing.T) {
 	h := setupIntegrityPathTest(t, server)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
-		"model":"claude-sonnet-4.5",
+		"model":"claude-sonnet-4.5-thinking",
 		"input":"hello",
 		"stream":true,
 		"store":false
@@ -210,7 +260,7 @@ func TestOpenAIStreamEmitsErrorOnTruncatedStream(t *testing.T) {
 	h := setupIntegrityPathTest(t, server)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
-		"model":"claude-sonnet-4.5",
+		"model":"claude-sonnet-4.5-thinking",
 		"messages":[{"role":"user","content":"hello"}],
 		"stream":true
 	}`))
@@ -232,19 +282,16 @@ func TestOpenAIStreamEmitsErrorOnTruncatedStream(t *testing.T) {
 	}
 }
 
-// Regression for a defect the reference implementation does not cover: a short
-// unflushed chunk stays inside processClaudeText's tag buffer, so a retry that
-// does not clear it concatenates the previous attempt's text onto the new one.
+// Reasoning hidden in non-thinking mode must not leak into the recovered answer.
 func TestClaudeStreamRetryDoesNotLeakPreviousAttemptText(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := hits.Add(1)
 		w.WriteHeader(http.StatusOK)
 		if n == 1 {
-			// Short enough to stay in the buffer: never flushed to the client,
-			// so the stream is still retryable.
-			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-				"content": "LEAK",
+			// Reasoning is hidden in non-thinking mode, so retry remains safe.
+			_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+				"text": "LEAK",
 			}))
 			return
 		}
