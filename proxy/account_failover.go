@@ -28,7 +28,7 @@ const maxAccountRetryAttempts = 3
 const maxSameAccountStreamRetries = 2
 
 // errUpstreamTruncatedResponse is a soft failure raised when a transport-clean
-// stream carried content but never a terminal signal. It is retryable on the
+// stream carried only reasoning without a terminal signal. It is retryable on the
 // same account and must not mark the account unhealthy.
 //
 // There is deliberately no empty-response error here. A stream that produced no
@@ -49,7 +49,8 @@ var errUpstreamTruncatedResponse = errors.New("upstream truncated response witho
 // match Kiro IDE, whose empty and truncation predicates each require
 // toolCallCount === 0.
 //
-// Truncated when content arrived without any terminal signal.
+// Ordinary assistant content is also complete after a transport-clean EOF:
+// the CLI runtime can omit terminal metadata even for a completed answer.
 //
 // Reasoning-only with no answer is STRICTER THAN THE IDE, deliberately. The
 // IDE's truncation predicate ends in (contentChars > 0 || !reasoningSeen), so
@@ -63,10 +64,10 @@ func classifyStreamIntegrity(contentChars, toolCallCount int, stopReason string,
 	if strings.TrimSpace(stopReason) != "" {
 		return nil
 	}
-	if toolCallCount > 0 {
+	if toolCallCount > 0 || contentChars > 0 {
 		return nil
 	}
-	if contentChars > 0 || sawReasoning {
+	if sawReasoning {
 		return errUpstreamTruncatedResponse
 	}
 	// No content, no reasoning, no tools: unreachable through the wired paths

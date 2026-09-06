@@ -7,9 +7,83 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"testing"
 )
+
+func TestParseEventStreamCompletionSignals(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		eventType string
+		payload   map[string]interface{}
+		want      string
+	}{
+		{"text only EOF", "", nil, "end_turn"},
+		{"empty metadata", "metadataEvent", map[string]interface{}{}, "end_turn"},
+		{"nested map", "metadataEvent", map[string]interface{}{"metadata": map[string]interface{}{"finish_reason": "MAX_TOKENS"}}, "MAX_TOKENS"},
+		{"nested array", "metadataEvent", map[string]interface{}{"events": []interface{}{map[string]interface{}{"finishReason": "MAX_TOKENS"}}}, "MAX_TOKENS"},
+		{"assistant terminal field", "assistantResponseEvent", map[string]interface{}{"content": "done", "finishReason": "MAX_TOKENS"}, "MAX_TOKENS"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stream bytes.Buffer
+			stream.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "answer"}))
+			stream.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 1}))
+			stream.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1}))
+			if tc.eventType != "" {
+				stream.Write(awsEventStreamFrame(t, tc.eventType, tc.payload))
+			}
+			if tc.want == "MAX_TOKENS" {
+				stream.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{}))
+			}
+			var reasons []string
+			completed := false
+			err := parseEventStream(&stream, &KiroStreamCallback{
+				OnStopReason: func(r string) { reasons = append(reasons, r) },
+				OnComplete: func(int, int) {
+					completed = true
+					if len(reasons) != 1 || reasons[0] != tc.want {
+						t.Errorf("reasons before completion=%v, want [%s]", reasons, tc.want)
+					}
+				},
+			})
+			if err != nil || !completed {
+				t.Fatalf("err=%v completed=%v", err, completed)
+			}
+		})
+	}
+}
+
+func TestParseEventStreamDoesNotSynthesizeCompletionForIncompleteOutput(t *testing.T) {
+	text := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "partial"})
+	frame := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "next"})
+	corrupt := append([]byte(nil), frame...)
+	corrupt[len(corrupt)-1] ^= 1
+	for _, tc := range []struct {
+		name    string
+		stream  []byte
+		wantErr error
+	}{
+		{"reasoning only", awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "thinking"}), nil},
+		{"reasoning with key-like text", awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": `{"stopReason":"end_turn"}`}), nil},
+		{"empty", nil, errEmptyKiroStream},
+		{"partial prelude", append(append([]byte(nil), text...), frame[:5]...), io.ErrUnexpectedEOF},
+		{"partial payload", append(append([]byte(nil), text...), frame[:len(frame)-1]...), io.ErrUnexpectedEOF},
+		{"bad CRC", append(append([]byte(nil), text...), corrupt...), errInvalidKiroEventStream},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reasons int
+			err := parseEventStream(bytes.NewReader(tc.stream), &KiroStreamCallback{OnStopReason: func(string) { reasons++ }})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err=%v want %v", err, tc.wantErr)
+			}
+			if reasons != 0 {
+				t.Fatalf("unexpected completion signal: %d", reasons)
+			}
+		})
+	}
+}
 
 // A tool that opens with both id and name, then continues with fragments that
 // carry only input and no id, must accumulate into the same entry. This is the
@@ -186,17 +260,15 @@ func TestParseEventStreamIDLessNameChangeOpensNewTool(t *testing.T) {
 	}
 }
 
-// stopReason rides inside metadataEvent. Upstream has been seen using both the
-// camelCase and snake_case spellings, and missing it means a truncated stream
-// is reported to the client as a normal end_turn.
+// Preserve explicit terminal reasons across supported field spellings.
 func TestParseEventStreamReadsStopReasonKeyVariants(t *testing.T) {
-	for _, key := range []string{"stopReason", "stop_reason"} {
+	for _, key := range []string{"stopReason", "stop_reason", "finishReason", "finish_reason"} {
 		t.Run(key, func(t *testing.T) {
 			var stream bytes.Buffer
 			stream.Write(awsEventStreamFrame(t, "assistantResponseEvent",
 				map[string]interface{}{"content": "done"}))
 			stream.Write(awsEventStreamFrame(t, "metadataEvent",
-				map[string]interface{}{key: "end_turn"}))
+				map[string]interface{}{key: "MAX_TOKENS"}))
 
 			var reason string
 			err := parseEventStream(bytes.NewReader(stream.Bytes()), &KiroStreamCallback{
@@ -206,8 +278,8 @@ func TestParseEventStreamReadsStopReasonKeyVariants(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected parse error: %v", err)
 			}
-			if reason != "end_turn" {
-				t.Fatalf("stop reason=%q, want end_turn", reason)
+			if reason != "MAX_TOKENS" {
+				t.Fatalf("stop reason=%q, want MAX_TOKENS", reason)
 			}
 		})
 	}

@@ -13,7 +13,7 @@ import (
 )
 
 // classifyStreamIntegrity is the completeness rule: a stream that returned no
-// transport error is still incomplete when it carries no terminal signal.
+// transport error accepts ordinary text even without a terminal signal.
 // A stopReason of any value, or a delivered tool call, means complete.
 //
 // The reasoning-only case deliberately differs from Kiro IDE, which treats it
@@ -31,7 +31,8 @@ func TestClassifyStreamIntegrity(t *testing.T) {
 		{"complete with stop", 12, 0, "end_turn", false, nil},
 		{"complete with tools", 0, 1, "", false, nil},
 		{"complete with tools despite content", 12, 1, "", false, nil},
-		{"truncated content", 8, 0, "", false, errUpstreamTruncatedResponse},
+		{"text content with clean EOF", 8, 0, "", false, nil},
+		{"reasoning followed by answer", 8, 0, "", true, nil},
 		{"reasoning only stricter than ide", 0, 0, "", true, errUpstreamTruncatedResponse},
 		{"no signal at all", 0, 0, "", false, errUpstreamTruncatedResponse},
 	} {
@@ -95,7 +96,7 @@ func integrityTestPayload() *KiroPayload {
 	return payload
 }
 
-// A stream that delivered content but no stopReason is truncated, not failed:
+// A stream that delivered only reasoning but no stopReason is truncated, not failed:
 // the transport layer sees success and returns nil. The helper must catch that,
 // reset the caller's accumulators, and retry on the same account.
 //
@@ -109,9 +110,9 @@ func TestRunKiroWithIntegrityRetryRecoversTruncatedThenComplete(t *testing.T) {
 		n := hits.Add(1)
 		w.WriteHeader(http.StatusOK)
 		if n == 1 {
-			// Content but no metadataEvent => transport-successful truncation.
-			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-				"content": "partial",
+			// Reasoning only without metadata => transport-successful truncation.
+			_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+				"text": "partial",
 			}))
 			return
 		}
@@ -126,19 +127,27 @@ func TestRunKiroWithIntegrityRetryRecoversTruncatedThenComplete(t *testing.T) {
 	defer setupIntegrityTestUpstream(t, server)()
 
 	var content string
+	var sawReasoning bool
 	var stopReason string
 	var resets int
 	err := runKiroWithIntegrityRetry(context.Background(), integrityTestAccount(), integrityTestPayload(),
 		&KiroStreamCallback{
-			OnText:       func(s string, _ bool) { content += s },
+			OnText: func(s string, reasoning bool) {
+				if reasoning {
+					sawReasoning = true
+				} else {
+					content += s
+				}
+			},
 			OnStopReason: func(r string) { stopReason = r },
 		},
 		func() (int, int, string, bool) {
-			return len(content), 0, stopReason, false
+			return len(content), 0, stopReason, sawReasoning
 		},
 		func() {
 			resets++
 			content = ""
+			sawReasoning = false
 			stopReason = ""
 		},
 		nil,
@@ -166,8 +175,8 @@ func TestRunKiroWithIntegrityRetrySkipsRetryAfterClientFlush(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "partial",
+		_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+			"text": "partial",
 		}))
 		// no metadataEvent/stopReason => truncated
 	}))
@@ -175,13 +184,20 @@ func TestRunKiroWithIntegrityRetrySkipsRetryAfterClientFlush(t *testing.T) {
 	defer setupIntegrityTestUpstream(t, server)()
 
 	var content string
+	var sawReasoning bool
 	flushed := true
 	err := runKiroWithIntegrityRetry(context.Background(), integrityTestAccount(), integrityTestPayload(),
 		&KiroStreamCallback{
-			OnText: func(s string, _ bool) { content += s },
+			OnText: func(s string, reasoning bool) {
+				if reasoning {
+					sawReasoning = true
+				} else {
+					content += s
+				}
+			},
 		},
-		func() (int, int, string, bool) { return len(content), 0, "", false },
-		func() { content = "" },
+		func() (int, int, string, bool) { return len(content), 0, "", sawReasoning },
+		func() { content = ""; sawReasoning = false },
 		func() bool { return !flushed },
 	)
 	if !isStreamIntegrityError(err) {
@@ -190,7 +206,7 @@ func TestRunKiroWithIntegrityRetrySkipsRetryAfterClientFlush(t *testing.T) {
 	if hits.Load() != 1 {
 		t.Fatalf("must not retry after flush, hits=%d", hits.Load())
 	}
-	if content != "partial" {
+	if content != "" || !sawReasoning {
 		t.Fatalf("content=%q", content)
 	}
 }
@@ -198,15 +214,15 @@ func TestRunKiroWithIntegrityRetrySkipsRetryAfterClientFlush(t *testing.T) {
 // A canceled client context must not drive an integrity retry. The turn is over,
 // so reissuing it would only burn upstream quota.
 //
-// The upstream here returns content with no stopReason, which classifies as
+// The upstream here returns reasoning with no stopReason, which classifies as
 // truncated and would otherwise be retried; cancellation must suppress that.
 func TestRunKiroWithIntegrityRetryStopsOnCanceledContext(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "partial",
+		_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+			"text": "partial",
 		}))
 	}))
 	defer server.Close()
@@ -216,10 +232,17 @@ func TestRunKiroWithIntegrityRetryStopsOnCanceledContext(t *testing.T) {
 	cancel()
 
 	var content string
+	var sawReasoning bool
 	var resets int
 	err := runKiroWithIntegrityRetry(ctx, integrityTestAccount(), integrityTestPayload(),
-		&KiroStreamCallback{OnText: func(s string, _ bool) { content += s }},
-		func() (int, int, string, bool) { return len(content), 0, "", false },
+		&KiroStreamCallback{OnText: func(s string, reasoning bool) {
+			if reasoning {
+				sawReasoning = true
+			} else {
+				content += s
+			}
+		}},
+		func() (int, int, string, bool) { return len(content), 0, "", sawReasoning },
 		func() { resets++ },
 		nil,
 	)
@@ -246,19 +269,26 @@ func TestRunKiroWithIntegrityRetryStopsAfterBudgetExhausted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(http.StatusOK)
-		// Always truncated: content with no terminal signal.
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "partial",
+		// Always truncated: reasoning with no terminal signal.
+		_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+			"text": "partial",
 		}))
 	}))
 	defer server.Close()
 	defer setupIntegrityTestUpstream(t, server)()
 
 	var content string
+	var sawReasoning bool
 	err := runKiroWithIntegrityRetry(context.Background(), integrityTestAccount(), integrityTestPayload(),
-		&KiroStreamCallback{OnText: func(s string, _ bool) { content += s }},
-		func() (int, int, string, bool) { return len(content), 0, "", false },
-		func() { content = "" },
+		&KiroStreamCallback{OnText: func(s string, reasoning bool) {
+			if reasoning {
+				sawReasoning = true
+			} else {
+				content += s
+			}
+		}},
+		func() (int, int, string, bool) { return len(content), 0, "", sawReasoning },
+		func() { content = ""; sawReasoning = false },
 		nil,
 	)
 	if !isStreamIntegrityError(err) {
