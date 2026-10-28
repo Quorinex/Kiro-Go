@@ -905,6 +905,14 @@ func cloneSchemaValue(v interface{}) interface{} {
 // cleanSchema 递归清理会导致 Kiro 400 的 schema 字段。
 func cleanSchema(m map[string]interface{}) {
 	delete(m, "additionalProperties")
+	// "encrypted" is a Codex-specific, non-standard JSON Schema keyword used on
+	// multi-agent tools (spawn_agent/send_message/followup_task's "message"
+	// property) to mark that field for Codex's own client-side encrypted
+	// transport. Kiro doesn't understand it; stripping it is a safe no-op for
+	// every other client and mirrors what working third-party Codex proxies
+	// (e.g. CLIProxyAPI's optimize-multi-agent-v2) already do before forwarding
+	// these tool schemas upstream.
+	delete(m, "encrypted")
 
 	// required 必须是非空数组，否则 Kiro 会报 Improperly formed request。
 	if req, exists := m["required"]; exists {
@@ -1107,6 +1115,19 @@ type OpenAITool struct {
 		Description string      `json:"description"`
 		Parameters  interface{} `json:"parameters"`
 	} `json:"function"`
+	// Namespace is set programmatically (not parsed from JSON) when a tool is
+	// flattened out of a Responses API "namespace" wrapper (e.g. Codex's
+	// "collaboration" sub-agent group). Codex's own FunctionCall wire format
+	// carries the namespace as a sibling "namespace" field alongside the bare
+	// "name" (confirmed in codex-rs/protocol/src/models.rs tests, e.g.
+	// {"type":"function_call","name":"spawn_agent","namespace":"collaboration",...}) --
+	// it is NOT concatenated into the name. Omitting it here is exactly why a
+	// bare "spawn_agent" call round-tripped through this proxy fails with
+	// Codex's local "unsupported call: spawn_agent" router error: Codex
+	// registers the handler under ToolName{name, namespace: Some(ns)} and a
+	// response with no namespace field parses back as namespace: None, which
+	// never matches.
+	Namespace string `json:"-"`
 }
 
 // UnmarshalJSON accepts both the Chat Completions tool shape, where the tool
@@ -2096,6 +2117,24 @@ func parseBase64Image(data, format string) *KiroImage {
 	}
 }
 
+// customToolInputSchema is the schema advertised to Kiro for OpenAI "custom"
+// tools (e.g. Codex's freeform "exec" tool), which take a single raw string
+// argument rather than a JSON-schema-described object. Kiro's tool_use still
+// requires a JSON object input, so we pin the argument to a single "input"
+// string field; convertOpenAIToolUseToCustomCall relies on this exact key
+// when translating the model's tool call back into a Responses API
+// custom_tool_call output item.
+var customToolInputSchema = map[string]interface{}{
+	"type": "object",
+	"properties": map[string]interface{}{
+		"input": map[string]interface{}{
+			"type":        "string",
+			"description": "Raw text input for this tool.",
+		},
+	},
+	"required": []interface{}{"input"},
+}
+
 func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 	if len(tools) == 0 {
 		return nil
@@ -2103,7 +2142,7 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Type != "function" {
+		if tool.Type != "function" && tool.Type != "custom" {
 			continue
 		}
 		desc := tool.Function.Description
@@ -2118,7 +2157,11 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
-		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		if tool.Type == "custom" {
+			wrapper.ToolSpecification.InputSchema = InputSchema{JSON: customToolInputSchema}
+		} else {
+			wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		}
 		result = append(result, wrapper)
 	}
 	return result

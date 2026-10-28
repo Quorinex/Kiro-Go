@@ -502,3 +502,219 @@ func TestResponsesStreamSSE(t *testing.T) {
 		t.Fatalf("expected stream content delta, got:\n%s", bodyStr)
 	}
 }
+
+// TestExtractResponsesToolsAdditionalTools covers newer Codex clients
+// (v0.146+) that stop sending the top-level "tools" field and instead embed
+// every tool -- including Codex's own built-in "exec" custom tool that
+// fronts shell/file/git access -- as a developer-role "additional_tools"
+// item inside "input". Namespace-wrapped tools (e.g. sub-agent groups) must
+// be flattened using their own plain name.
+func TestExtractResponsesToolsAdditionalTools(t *testing.T) {
+	raw := json.RawMessage(`[
+		{
+			"type": "additional_tools",
+			"role": "developer",
+			"tools": [
+				{"type": "custom", "name": "exec", "description": "Run JS"},
+				{"type": "function", "name": "wait", "description": "Wait", "parameters": {"type": "object", "properties": {"cell_id": {"type": "string"}}}},
+				{
+					"type": "namespace",
+					"name": "collaboration",
+					"description": "Sub-agents",
+					"tools": [
+						{"type": "function", "name": "followup_task", "description": "Follow up", "parameters": {"type": "object", "properties": {"target": {"type": "string"}}}}
+					]
+				}
+			]
+		},
+		{"type": "message", "role": "user", "content": "hi"}
+	]`)
+
+	tools := extractResponsesTools(raw)
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 flattened tools, got %d (%+v)", len(tools), tools)
+	}
+
+	byName := map[string]OpenAITool{}
+	for _, tool := range tools {
+		byName[tool.Function.Name] = tool
+	}
+
+	exec, ok := byName["exec"]
+	if !ok || exec.Type != "custom" {
+		t.Fatalf("expected custom exec tool, got %+v", byName)
+	}
+	if _, ok := byName["wait"]; !ok {
+		t.Fatalf("expected wait function tool, got %+v", byName)
+	}
+	followup, ok := byName["followup_task"]
+	if !ok || followup.Type != "function" {
+		t.Fatalf("expected namespace-flattened followup_task tool with its own plain name, got %+v", byName)
+	}
+	if followup.Namespace != "collaboration" {
+		t.Fatalf("expected followup_task to carry its source namespace for the response round trip, got %q", followup.Namespace)
+	}
+}
+
+// TestToolNamespaceMapAndFunctionCallOutput ensures a tool flattened out of a
+// Responses API namespace (e.g. Codex's "collaboration" spawn_agent group)
+// gets its namespace re-attached as a sibling "namespace" field on the
+// function_call output item -- Codex's FunctionCall wire format keys
+// dispatch on ToolName{name, namespace}, so a response with a bare name and
+// no namespace field never matches what Codex registered internally.
+func TestToolNamespaceMapAndFunctionCallOutput(t *testing.T) {
+	tools := []OpenAITool{{Type: "function", Namespace: "collaboration"}}
+	tools[0].Function.Name = "spawn_agent"
+
+	ns := toolNamespaceMap(tools)
+	if ns["spawn_agent"] != "collaboration" {
+		t.Fatalf("expected spawn_agent namespaced under collaboration, got %+v", ns)
+	}
+
+	req := &ResponsesRequest{Tools: tools}
+	toolUses := []KiroToolUse{{ToolUseID: "call_1", Name: "spawn_agent", Input: map[string]interface{}{"task_name": "worker", "message": "hi"}}}
+	obj := buildResponsesObject("resp_1", "gpt-5.6-terra", "", toolUses, 0, 0, req, "tool_use")
+
+	var fc *ResponseOutputItem
+	for i := range obj.Output {
+		if obj.Output[i].Type == "function_call" {
+			fc = &obj.Output[i]
+		}
+	}
+	if fc == nil {
+		t.Fatalf("expected a function_call output item, got %+v", obj.Output)
+	}
+	if fc.Namespace != "collaboration" {
+		t.Fatalf("expected function_call namespace %q, got %q", "collaboration", fc.Namespace)
+	}
+}
+
+// TestConvertOpenAIToolsCustomType ensures "custom" tools (freeform string
+// input, no JSON schema) get a stable single-"input"-field schema so the
+// model's tool call can be round-tripped back into a custom_tool_call output
+// item deterministically.
+func TestConvertOpenAIToolsCustomType(t *testing.T) {
+	tools := []OpenAITool{{Type: "custom"}}
+	tools[0].Function.Name = "exec"
+	tools[0].Function.Description = "Run JS"
+
+	wrapped := convertOpenAITools(tools)
+	if len(wrapped) != 1 {
+		t.Fatalf("expected 1 wrapped tool, got %d", len(wrapped))
+	}
+	schema, ok := wrapped[0].ToolSpecification.InputSchema.JSON.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map schema, got %T", wrapped[0].ToolSpecification.InputSchema.JSON)
+	}
+	props, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected properties map in schema, got %+v", schema)
+	}
+	if _, ok := props["input"]; !ok {
+		t.Fatalf("expected a single 'input' property, got %+v", props)
+	}
+}
+
+// TestResponsesParseCustomToolCallRoundTrip covers the reverse direction:
+// Codex re-submits a prior custom_tool_call/custom_tool_call_output pair on
+// the next turn, which must parse into the same assistant tool_calls +
+// tool-result shape as ordinary function_call items so Kiro's history
+// sanitization can handle both uniformly.
+func TestResponsesParseCustomToolCallRoundTrip(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"message","role":"user","content":"run something"},
+		{"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"console.log(1)"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"1"}
+	]`)
+
+	msgs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatalf("parse custom tool call: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d (%+v)", len(msgs), msgs)
+	}
+	if msgs[1].Role != "assistant" || len(msgs[1].ToolCalls) != 1 {
+		t.Fatalf("expected assistant tool call message, got %+v", msgs[1])
+	}
+	tc := msgs[1].ToolCalls[0]
+	if tc.Function.Name != "exec" {
+		t.Fatalf("expected exec tool call, got %q", tc.Function.Name)
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+		t.Fatalf("expected JSON-wrapped arguments, got %q: %v", tc.Function.Arguments, err)
+	}
+	if args["input"] != "console.log(1)" {
+		t.Fatalf("expected wrapped raw input, got %+v", args)
+	}
+	if msgs[2].Role != "tool" || msgs[2].ToolCallID != "call_1" || msgs[2].Content != "1" {
+		t.Fatalf("expected tool result message, got %+v", msgs[2])
+	}
+}
+
+// TestResponsesParseAgentMessage covers Codex's multi-agent v2 delivery of a
+// spawned sub-agent's initial task (and inter-agent messages) as an
+// "agent_message" item rather than a plain "message". Without this parsing
+// case the sub-agent silently receives no task at all -- it still runs, but
+// answers as if starting a conversation with no instructions.
+func TestResponsesParseAgentMessage(t *testing.T) {
+	raw := json.RawMessage(`[
+		{
+			"type": "agent_message",
+			"author": "/root",
+			"recipient": "/root/worker",
+			"content": [{"type": "input_text", "text": "reply with exactly: PONG"}]
+		}
+	]`)
+
+	msgs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatalf("parse agent_message: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d (%+v)", len(msgs), msgs)
+	}
+	if msgs[0].Role != "user" {
+		t.Fatalf("expected user role, got %q", msgs[0].Role)
+	}
+	if got, _ := msgs[0].Content.(string); got != "reply with exactly: PONG" {
+		t.Fatalf("expected task text, got %v", msgs[0].Content)
+	}
+}
+
+// TestResponsesParseAgentMessageReadsEncryptedContentField ensures the
+// "encrypted_content" part's value is read as plain text, not skipped as
+// opaque ciphertext. Codex tags multi-agent payload content this way
+// unconditionally, but against a non-ChatGPT-backend provider (no
+// encryption session exists) the field genuinely carries the task text
+// as-is -- confirmed live against a real Codex CLI session, where a spawned
+// sub-agent's "Message Type: NEW_TASK" agent_message arrived as
+// {"type":"input_text","text":"Message Type: NEW_TASK\n...\nPayload:\n"}
+// followed by {"type":"encrypted_content","encrypted_content":"<the actual
+// plaintext task>"}.
+func TestResponsesParseAgentMessageReadsEncryptedContentField(t *testing.T) {
+	raw := json.RawMessage(`[
+		{
+			"type": "agent_message",
+			"author": "/root",
+			"recipient": "/root/worker",
+			"content": [
+				{"type": "input_text", "text": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},
+				{"type": "encrypted_content", "encrypted_content": "reply with exactly: PONG"}
+			]
+		}
+	]`)
+
+	msgs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatalf("parse agent_message: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d (%+v)", len(msgs), msgs)
+	}
+	got, _ := msgs[0].Content.(string)
+	if !strings.Contains(got, "reply with exactly: PONG") {
+		t.Fatalf("expected the task payload to be readable, got %v", got)
+	}
+}
