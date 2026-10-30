@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"kiro-go/config"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -1594,6 +1595,14 @@ func joinHistoryText(existing, narrated string) string {
 // tool uses are fully covered by that set, its structured toolUses are kept.
 func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[string]bool) []KiroHistoryMessage {
 	if len(history) == 0 {
+		return history
+	}
+
+	// EXPERIMENT: keep structured tool uses / results in history untouched.
+	// If the upstream now accepts them, this removes the "narrate then stop"
+	// in-context pattern; if it still rejects them, requests will fail and the
+	// flag simply must not be used.
+	if os.Getenv("KIRO_KEEP_STRUCTURED_TOOL_HISTORY") == "1" {
 		return history
 	}
 
