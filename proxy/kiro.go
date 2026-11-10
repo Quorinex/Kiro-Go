@@ -189,6 +189,10 @@ type KiroPayload struct {
 	ProfileArn      string           `json:"profileArn,omitempty"`
 	InferenceConfig *InferenceConfig `json:"inferenceConfig,omitempty"`
 
+	// AdditionalModelRequestFields carries per-model reasoning controls such as
+	// {"output_config":{"effort":"low"}}. Shape comes from ListAvailableModels.
+	AdditionalModelRequestFields map[string]interface{} `json:"additionalModelRequestFields,omitempty"`
+
 	// ToolNameMap maps sanitized tool names (sent to Kiro) back to the
 	// original names supplied by the client. Used to restore original names
 	// in tool_use responses so the client can match them to its tool registry.
@@ -354,6 +358,12 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 // CallKiroAPIContext calls Kiro while respecting cancellation from the client request.
 func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	// The legacy generateAssistantResponse operation is retired upstream, so
+	// OAuth accounts go straight to the /v1/responses transport.
+	if useResponsesUpstream(account) {
+		return callKiroResponsesAPIContext(ctx, account, payload, callback)
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}

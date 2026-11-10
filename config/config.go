@@ -29,6 +29,7 @@ var (
 	ErrDuplicateRefreshToken = errors.New("account refresh token already exists")
 	ErrDuplicateAPIKey       = errors.New("account API key already exists")
 	ErrEmptyAPIKey           = errors.New("kiroApiKey is empty")
+	ErrConfigUnavailable     = errors.New("config not initialized")
 )
 
 // GenerateMachineId generates a UUID v4 format machine identifier.
@@ -191,6 +192,9 @@ type Config struct {
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
+	// UpstreamProtocol selects the Kiro data-plane protocol: "responses" (default)
+	// or "legacy" for the retired generateAssistantResponse operation.
+	UpstreamProtocol string `json:"upstreamProtocol,omitempty"`
 
 	// EndpointFallback controls whether to try other endpoints when the preferred one fails.
 	// Defaults to true. Set to false to only use the preferred endpoint.
@@ -1106,6 +1110,39 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
 	cfg.ThinkingSuffix = suffix
 	cfg.OpenAIThinkingFormat = openaiFormat
 	cfg.ClaudeThinkingFormat = claudeFormat
+	return Save()
+}
+
+// GetUpstreamProtocol returns the configured upstream protocol.
+// Defaults to "responses": the legacy generateAssistantResponse operation is no
+// longer served by Kiro (it answers 403 FEATURE_NOT_SUPPORTED for every client
+// version, including the current IDE release).
+func GetUpstreamProtocol() string {
+	cfgLock.RLock()
+	stored := ""
+	if cfg != nil {
+		stored = cfg.UpstreamProtocol
+	}
+	cfgLock.RUnlock()
+	if stored != "" {
+		return stored
+	}
+	// The env override keeps test harnesses and one-off debugging on the legacy
+	// transport without rewriting the persisted config.
+	if env := strings.TrimSpace(os.Getenv("KIRO_UPSTREAM_PROTOCOL")); env != "" {
+		return env
+	}
+	return "responses"
+}
+
+// UpdateUpstreamProtocol persists the upstream protocol choice.
+func UpdateUpstreamProtocol(protocol string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return ErrConfigUnavailable
+	}
+	cfg.UpstreamProtocol = protocol
 	return Save()
 }
 
